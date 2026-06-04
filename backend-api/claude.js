@@ -1,0 +1,284 @@
+// ===========================================================================
+// Claude API client — generates the actual SEO/accessibility content the agent
+// proposes (meta descriptions, title rewrites, alt text, etc.). Uses the key
+// from env (locally) or the Supabase secret (in edge functions). Generic: the
+// page context is passed in, nothing is site-specific.
+//
+// Model: Claude Sonnet — strong quality/latency balance for short structured
+// content generation. Prompt caching applied to the shared system prompt.
+// ===========================================================================
+import { config } from 'dotenv';
+// override:true because some hosted environments inject an EMPTY ANTHROPIC_API_KEY
+// into process.env, which dotenv won't replace without override.
+config({ override: true });
+
+const API = 'https://api.anthropic.com/v1/messages';
+const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
+
+// Allow an explicit key (e.g. fetched from a Supabase secret in edge fns).
+let RUNTIME_KEY = null;
+export function setClaudeKey(k) { RUNTIME_KEY = k || null; }
+
+function key() {
+  const k = RUNTIME_KEY || process.env.ANTHROPIC_API_KEY;
+  if (!k) throw new Error('ANTHROPIC_API_KEY not set');
+  return k;
+}
+
+// Low-level call. Returns the assistant text. `promptKey` lets per-prompt admin
+// model/temperature overrides apply; explicit model/temperature still win.
+export async function complete({ system, messages, maxTokens = 1024, temperature, model, promptKey }) {
+  const m = model || (promptKey ? modelFor(promptKey) : null) || MODEL;
+  const t = temperature != null ? temperature : (promptKey && tempFor(promptKey) != null ? tempFor(promptKey) : 0.3);
+  const res = await fetch(API, {
+    method: 'POST',
+    headers: {
+      'x-api-key': key(),
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: m,
+      max_tokens: maxTokens,
+      temperature: t,
+      system,
+      messages,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Claude ${res.status}: ${data.error?.message || JSON.stringify(data).slice(0, 200)}`);
+  return (data.content || []).map((b) => b.text || '').join('').trim();
+}
+
+// System prompts are sourced from the editable registry (admin panel → Supabase).
+// SYSTEM() is the shared content-rules block, cached.
+import { P, modelFor, tempFor } from './prompts.js';
+const SYSTEM = () => [{ type: 'text', text: P('content.rules'), cache_control: { type: 'ephemeral' } }];
+const sys = (key) => [{ type: 'text', text: P(key) }];
+
+// ---- task helpers ---------------------------------------------------------
+
+// Meta description: 140–160 chars, compelling, keyword-aware.
+export async function metaDescription({ url, title, headings, excerpt }) {
+  const txt = await complete({
+    system: SYSTEM(), promptKey: 'content.rules',
+    maxTokens: 200,
+    messages: [{
+      role: 'user',
+      content: `Write a meta description (140–160 characters, single line) for this page.
+URL: ${url}
+Title: ${title || '(none)'}
+Key headings: ${(headings || []).slice(0, 6).join(' | ') || '(none)'}
+Excerpt: ${(excerpt || '').slice(0, 500)}
+
+Output only the meta description text.`,
+    }],
+  });
+  return txt.replace(/^["']|["']$/g, '').slice(0, 165);
+}
+
+// Title rewrite: <= 60 chars, keyword front-loaded, keeps brand.
+export async function titleRewrite({ url, currentTitle, brand }) {
+  const txt = await complete({
+    system: SYSTEM(), promptKey: 'content.rules',
+    maxTokens: 120,
+    messages: [{
+      role: 'user',
+      content: `Rewrite this page title to be <= 60 characters, keyword front-loaded, compelling for search.
+${brand ? 'Keep the brand "' + brand + '" if it fits.' : ''}
+URL: ${url}
+Current title: ${currentTitle}
+
+Output only the new title.`,
+    }],
+  });
+  return txt.replace(/^["']|["']$/g, '').slice(0, 65);
+}
+
+// Alt text for an image, from its filename + surrounding context.
+export async function altText({ filename, context, pageTitle }) {
+  const txt = await complete({
+    system: SYSTEM(), promptKey: 'content.rules',
+    maxTokens: 120,
+    messages: [{
+      role: 'user',
+      content: `Write concise, descriptive alt text (<= 125 chars) for an image.
+Filename: ${filename}
+Page: ${pageTitle || ''}
+Nearby text: ${(context || '').slice(0, 300)}
+
+Describe what the image likely shows. Output only the alt text.`,
+    }],
+  });
+  return txt.replace(/^["']|["']$/g, '').slice(0, 125);
+}
+
+// Content intelligence: analyze a site's existing content (titles/URLs/topics)
+// and return content gaps, new-content suggestions, and keyword clusters.
+// Returns structured JSON the UI renders. Generic across niches.
+export async function contentIntelligence({ siteName, niche, titles, sampleHeadings }) {
+  const list = (titles || []).slice(0, 90).map((t, i) => `${i + 1}. ${t}`).join('\n');
+  const txt = await complete({
+    system: SYSTEM(), promptKey: 'content.rules',
+    maxTokens: 4096,
+    messages: [{
+      role: 'user',
+      content: `You are an SEO content strategist. Analyze this site's existing content and return a JSON object.
+Site: ${siteName || ''}${niche ? ' — niche: ' + niche : ''}
+
+Existing page titles (sample of the library):
+${list || '(none provided)'}
+
+Return ONLY valid JSON (no markdown fences) with this exact shape:
+{
+  "clusters": [
+    { "name": "topic cluster name", "theme": "what unifies it", "pageCount": <int est. from titles>, "keywords": ["kw1","kw2","kw3","kw4"], "strength": "strong|moderate|thin" }
+  ],
+  "gaps": [
+    { "topic": "missing topic", "why": "why it matters for this audience", "intent": "informational|commercial|transactional", "priority": "high|medium|low" }
+  ],
+  "suggestions": [
+    { "title": "proposed new article title (<=60 chars)", "cluster": "which cluster it strengthens", "targetKeyword": "primary kw", "rationale": "1 sentence", "format": "guide|comparison|faq|listicle|how-to" }
+  ],
+  "internalLinks": [
+    { "from": "topic/keyword", "to": "topic/keyword", "reason": "why link these" }
+  ]
+}
+Rules: 4-7 clusters, 5-8 gaps, 6-10 suggestions, 3-5 internalLinks. Base everything on the actual titles. Be specific to this site's niche. For YMYL niches stay factual.`,
+    }],
+  });
+  // Robust JSON extraction
+  let json = txt.trim();
+  const fence = json.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) json = fence[1].trim();
+  const start = json.indexOf('{'); const end = json.lastIndexOf('}');
+  if (start >= 0 && end > start) json = json.slice(start, end + 1);
+  try { return JSON.parse(json); }
+  catch (e) { return { clusters: [], gaps: [], suggestions: [], internalLinks: [], _parseError: true, _raw: txt.slice(0, 500) }; }
+}
+
+// Generic: ask Claude to draft the "after" value for any proposal, given the finding.
+export async function draftFix({ finding, pageContext }) {
+  const txt = await complete({
+    system: SYSTEM(), promptKey: 'content.rules',
+    maxTokens: 400,
+    messages: [{
+      role: 'user',
+      content: `An automated audit found this issue. Draft the concrete fix value a human will review.
+Issue: ${finding.title}
+Detail: ${finding.detail || ''}
+Page: ${finding.page || ''}
+Channel: ${finding.channel || ''}
+Page context: ${JSON.stringify(pageContext || {}).slice(0, 600)}
+
+Output only the proposed fix (the value to apply), nothing else.`,
+    }],
+  });
+  return txt.trim();
+}
+
+// Executive narrative — Claude writes a weekly story OVER pre-computed metrics.
+// CRITICAL: it narrates the numbers; it must never invent or recompute them.
+export async function narrate({ siteName, metrics }) {
+  const txt = await complete({
+    system: sys('report.narrate'),
+    promptKey: 'report.narrate',
+    maxTokens: 700,
+    messages: [{ role: 'user', content: `Site: ${siteName}\n\nComputed metrics (do not alter these numbers):\n${JSON.stringify(metrics, null, 1).slice(0, 6000)}\n\nWrite the weekly executive briefing.` }],
+  });
+  return txt.trim();
+}
+
+// Internal-link suggestions. Given a source page's text + a CLOSED LIST of
+// candidate target pages (so Claude cannot invent URLs), propose contextual
+// internal links. Returns [{ anchor, targetUrl, reason }].
+export async function internalLinkSuggestions({ sourceUrl, sourceTitle, sourceText, candidates }) {
+  const list = (candidates || []).slice(0, 60).map((c, i) => `${i + 1}. ${c.title} → ${c.url}`).join('\n');
+  const txt = await complete({
+    system: sys('seo.internalLinks'),
+    promptKey: 'seo.internalLinks',
+    maxTokens: 700,
+    messages: [{ role: 'user', content: `SOURCE PAGE: ${sourceTitle || ''} (${sourceUrl})\n\nSOURCE TEXT (excerpt):\n${(sourceText || '').slice(0, 3500)}\n\nCANDIDATE TARGET PAGES (link only to these):\n${list}\n\nReturn the JSON array of internal-link suggestions.` }],
+  });
+  try {
+    const arr = JSON.parse(txt.slice(txt.indexOf('['), txt.lastIndexOf(']') + 1));
+    const valid = new Set((candidates || []).map((c) => c.url));
+    return arr.filter((s) => s && s.anchor && valid.has(s.targetUrl) && s.targetUrl !== sourceUrl)
+      .map((s) => ({ anchor: String(s.anchor).slice(0, 80), targetUrl: s.targetUrl, reason: String(s.reason || '').slice(0, 120) }));
+  } catch (e) { return []; }
+}
+
+// AI-SEO fact extraction. Pull the citable, extractable facts from a page and
+// propose a FAQPage JSON-LD + concrete factual additions that make the page
+// easier for LLMs/answer engines to cite. Returns { facts, faqs, suggestions }.
+export async function extractCitableFacts({ url, title, text, niche }) {
+  const txt = await complete({
+    system: sys('seo.pageFacts'),
+    promptKey: 'seo.pageFacts',
+    maxTokens: 1100,
+    messages: [{ role: 'user', content: `URL: ${url}\nTITLE: ${title || ''}\nNICHE: ${niche || ''}\n\nPAGE TEXT (excerpt):\n${(text || '').slice(0, 6000)}\n\nReturn the JSON.` }],
+  });
+  try {
+    const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
+    return { facts: o.facts || [], faqs: o.faqs || [], suggestions: o.suggestions || [] };
+  } catch (e) { return { facts: [], faqs: [], suggestions: [], _parseError: true }; }
+}
+
+// grill-me: produce a plan BEFORE any code/changes. Grills the brief, surfaces
+// open questions/risks, and sequences the work. Returns a markdown plan.
+export async function projectPlan({ siteName, niche, baseUrl, keyPages, scores, goals }) {
+  const txt = await complete({
+    system: sys('plan.project'),
+    promptKey: 'plan.project',
+    maxTokens: 1100,
+    messages: [{ role: 'user', content: `Site: ${siteName || baseUrl} (${baseUrl})\nNiche: ${niche || 'unknown'}\nGoals: ${goals || 'reach 100/100 Lighthouse across Performance/Accessibility/Best-Practices/SEO + improve AI citation, with human approval before publishing.'}\nCurrent scores: ${scores ? JSON.stringify(scores) : 'not yet audited'}\nKey pages: ${(keyPages || []).map((p) => p.name || p.path || p).join(', ') || 'not specified'}\n\nWrite the plan.` }],
+  });
+  return txt.trim();
+}
+
+// Cluster a flat keyword list into labelled topic clusters with search intent
+// and a suggested content title/format. Claude ONLY groups + labels — it must
+// use the EXACT keyword strings provided (no inventing keywords); volumes/gaps
+// are computed deterministically by the caller.
+export async function clusterKeywords({ keywords, siteName, niche }) {
+  const list = (keywords || []).slice(0, 140).map((k) => `${k.keyword}${k.volume ? ` (${k.volume})` : ''}`).join('\n');
+  const txt = await complete({
+    system: sys('content.cluster'),
+    promptKey: 'content.cluster',
+    maxTokens: 8000,
+    messages: [{ role: 'user', content: `Site: ${siteName || ''}\nNiche: ${niche || ''}\n\nKeywords (with volume):\n${list}\n\nReturn the clustered JSON.` }],
+  });
+  // Parse; if the JSON was truncated, salvage whatever complete cluster objects exist.
+  try {
+    const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
+    return (o.clusters || []).filter((c) => c && c.label && Array.isArray(c.keywords));
+  } catch (e) {
+    const salvaged = [];
+    const re = /\{\s*"label"[\s\S]*?"keywords"\s*:\s*\[[^\]]*\][\s\S]*?\}/g;
+    let m; while ((m = re.exec(txt)) !== null) { try { const c = JSON.parse(m[0]); if (c.label && Array.isArray(c.keywords)) salvaged.push(c); } catch (_) {} }
+    return salvaged;
+  }
+}
+
+// Synthesize a writer-ready content brief from web RESEARCH (Tavily sources +
+// Perplexity grounded answer). Claude structures + writes the brief but must use
+// ONLY the supplied research — every fact ties to a provided source, nothing
+// invented. UK audience, UK English. Returns structured JSON.
+export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates }) {
+  const sources = (research.sources || []).map((s, i) => `[${i + 1}] ${s.title || ''} — ${s.url}`).join('\n');
+  const material = (research.material || '').slice(0, 9000);
+  const links = (internalLinkCandidates || []).slice(0, 25).map((p) => `${p.title} → ${p.url}`).join('\n');
+  const txt = await complete({
+    system: sys('content.brief'),
+    promptKey: 'content.brief',
+    maxTokens: 3000,
+    messages: [{ role: 'user', content: `KEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}\n\nWrite the UK content brief as JSON.` }],
+  });
+  try {
+    const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
+    o.sources = research.sources || [];
+    return o;
+  } catch (e) { return { title: keyword, error: 'brief synthesis parse failed', sources: research.sources || [], _raw: txt.slice(0, 400) }; }
+}
+
+export default { metaDescription, titleRewrite, altText, draftFix, narrate, internalLinkSuggestions, extractCitableFacts, projectPlan, clusterKeywords, synthesizeContentBrief, complete };

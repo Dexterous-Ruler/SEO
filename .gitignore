@@ -1,0 +1,15 @@
+node_modules/
+.env
+.env.local
+reports/
+.cache/
+.data/
+*.log
+.DS_Store
+tmp/
+.lighthouseci/
+
+# Agent/local config (contains tokens) + per-site config
+.claude/
+config/sites.json
+*.local.json

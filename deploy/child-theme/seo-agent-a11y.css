@@ -1,0 +1,108 @@
+/* ============================================================
+   SEO Agent — Accessibility fixes for go-legal.ai
+   Target: Hello Elementor child theme.
+   Safe, low-risk, no brand-color changes. WCAG 2.2 AA.
+
+   INSTALL: append to the child theme's style.css, OR enqueue this
+   file from the child theme's functions.php. Deploy to STAGING first,
+   verify the homepage visually, then publish.
+   ============================================================ */
+
+/* ---- A5: Target Size (WCAG 2.2 SC 2.5.8 — min 24x24px) -------------
+   Footer icon-list links (e.g. /terms-conditions/) render at 22.4px tall.
+   Give them a 24px min touch height without changing visual layout much. */
+.elementor-icon-list-items .elementor-icon-list-item > a,
+.elementor-icon-list-items .elementor-icon-list-item {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+}
+/* Generic safety net for small inline action links in footers/menus */
+footer a,
+.elementor-widget-icon-list a {
+  min-height: 24px;
+}
+
+/* ---- A4: Accessible name for the search input ----------------------
+   The <input id="search"> has an empty placeholder + no label.
+   The visually-hidden label is added in markup (see functions snippet);
+   this just provides the .screen-reader-text utility if the theme lacks it. */
+.screen-reader-text {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap; border: 0;
+}
+
+/* ---- A7: Visible, focusable skip link ------------------------------
+   Pairs with the skip-link markup added in functions.php. Hidden until
+   focused, then visible at top-left. */
+.seoagent-skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100000;
+  padding: 12px 20px;
+  background: #0b3d91;      /* accessible dark blue, high contrast on white */
+  color: #ffffff;
+  text-decoration: none;
+  border-radius: 0 0 6px 0;
+}
+.seoagent-skip-link:focus {
+  left: 0;
+}
+
+/* ---- Focus visibility (WCAG 2.2 SC 2.4.11 / 2.4.13) ----------------
+   Ensure a clear, consistent focus ring on all interactive elements.
+   Helps keyboard users and the "Focus Appearance" criteria. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid #0b3d91;
+  outline-offset: 2px;
+}
+
+/* ---- Reduced motion respect (good-practice, cheap) ----------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---- A1: Color contrast (WCAG 1.4.3) — PENDING YOUR APPROVAL --------
+   These darken the failing brand greys just enough to pass 4.5:1 while
+   keeping the same hue. Exact values computed from the live homepage.
+   See reports/HOMEPAGE-CONTRAST-SPEC.md. C1 (white-on-light) is left out
+   until you choose Option A (darken text) vs Option B (darken background).
+
+   >>> COMMENTED OUT until approved. Uncomment C2/C3 to ship them. <<<
+
+.elementor-image-box-title {
+  color: #757575;
+*/ /* C2: was #ababab (2.30:1) → 4.61:1 */
+/*
+}
+.elementor-heading-title {
+  color: #707070;
+*/ /* C3: was #ababab (2.14:1) → 4.62:1 */
+/*
+}
+*/
+
+/* ============================================================
+   NOT included here (need your decision / Elementor edits):
+   - A1-C1 white-on-light: choose darken-text vs darken-background.
+   - A2/S1 Link names: add text/aria-label in Elementor widgets.
+   - A3 ARIA tabs: add role="tablist" to Elementor nested-tabs.
+   - A6 Main landmark: handled in functions-snippet.php (role="main").
+   ============================================================ */
