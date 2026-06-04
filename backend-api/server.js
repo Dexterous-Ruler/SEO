@@ -1235,8 +1235,11 @@ const server = createServer(async (req, res) => {
 
   const handler = routes[key];
   if (!handler) {
-    // Non-API GET → serve the static console (web/). API misses still 404 JSON.
-    if (req.method === 'GET' && !url.pathname.startsWith('/api')) return serveStatic(req, res, url.pathname);
+    // Any unmatched GET is a static asset (the only GET API route, /health, is
+    // matched above) → serve from web/ (serveStatic SPA-falls-back to index).
+    // Note: do NOT gate on the path prefix — files like /api.jsx start with
+    // "/api" and must still be served.
+    if (req.method === 'GET') return serveStatic(req, res, url.pathname);
     return send(res, 404, { error: `No route ${key}` });
   }
   try {
