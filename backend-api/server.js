@@ -1273,6 +1273,12 @@ const server = createServer(async (req, res) => {
       'Access-Control-Allow-Origin': '*',
     });
     const sse = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    // Heartbeat: the agentic loop has long idle gaps (Claude "thinking" before the
+    // first token, and server-side tool execution that can run 30-60s). With no
+    // bytes flowing, proxies/load-balancers kill the connection and the browser
+    // throws "Failed to fetch". A comment ping every 15s keeps it alive; SSE
+    // comment lines (": ...") are ignored by the client parser.
+    const heartbeat = setInterval(() => { try { res.write(': ping\n\n'); } catch (e) {} }, 15000);
     try {
       const body = await readBody(req);
       const r = await chatbot.chatStream({
@@ -1300,6 +1306,8 @@ const server = createServer(async (req, res) => {
       sse('done', { reply: r.reply, toolsUsed: r.toolsUsed, conversationId: convoId, title });
     } catch (e) {
       sse('error', { error: e.message });
+    } finally {
+      clearInterval(heartbeat);
     }
     return res.end();
   }

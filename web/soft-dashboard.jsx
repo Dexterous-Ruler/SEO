@@ -3158,45 +3158,18 @@ function ChatScreen({ ctx }) {
 /* ---------------- AI Assistant (floating chatbot) ---------------- */
 function Assistant({ ctx, open, setOpen }) {
   const s = ctx.site;
-  const API = window.SentinelAPI;
-  const [msgs,setMsgs] = useState([]);     // [{role:'user'|'assistant', text}]
-  const [history,setHistory] = useState([]); // raw API messages for context
+  // Use the shared streaming chat hook (SSE) — same as the full chat screen — so
+  // the floating assistant shows progressive output and survives proxy timeouts
+  // instead of sitting on a blocking request that can drop with "Failed to fetch".
+  const { msgs, busy, send:sendChat, reset } = useChat(s.id);
   const [input,setInput] = useState("");
-  const [busy,setBusy] = useState(false);
-  const [listening,setListening] = useState(false);
   const bodyRef = useRef(null);
-  const recogRef = useRef(null);
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const voice = useVoice(setInput, ()=>input);
+  const listening = voice.listening;
+  const toggleMic = ()=>voice.toggle(ctx.toast);
   useEffect(()=>{ if(bodyRef.current) bodyRef.current.scrollTop=bodyRef.current.scrollHeight; },[msgs,busy]);
-  useEffect(()=>{ setMsgs([]); setHistory([]); },[s.id]);
 
-  // Voice input via the Web Speech API (browser-native, no deps).
-  const toggleMic = ()=>{
-    if(!SR){ ctx.toast("Voice input needs Chrome/Edge (Web Speech API)","gold"); return; }
-    if(listening){ try{ recogRef.current && recogRef.current.stop(); }catch(e){} return; }
-    const rec = new SR();
-    rec.lang = "en-US"; rec.interimResults = true; rec.continuous = false;
-    let base = input ? input + " " : "";
-    rec.onresult = (e)=>{
-      let txt = "";
-      for(let i=e.resultIndex;i<e.results.length;i++) txt += e.results[i][0].transcript;
-      setInput(base + txt);
-    };
-    rec.onerror = (e)=>{ setListening(false); if(e.error!=="aborted"&&e.error!=="no-speech") ctx.toast("Mic: "+e.error,"clay"); };
-    rec.onend = ()=>setListening(false);
-    recogRef.current = rec;
-    setListening(true); rec.start();
-  };
-
-  const send = (text)=>{
-    const t=(text||input).trim(); if(!t||busy) return;
-    const nd=[...msgs,{role:"user",text:t}];
-    setMsgs(nd); setInput(""); setBusy(true);
-    API.chat({ siteId:s.id, text:t, apiHistory:history, displayMessages:nd }).then(r=>{
-      setMsgs(m=>[...m,{role:"assistant",text:r.reply||"(no response)"}]);
-      if(r.messages) setHistory(r.messages);
-    }).catch(e=>setMsgs(m=>[...m,{role:"assistant",text:"⚠️ "+e.message}])).finally(()=>setBusy(false));
-  };
+  const send = (text)=>{ const t=(text||input).trim(); if(!t||busy) return; sendChat(t); setInput(""); };
   const quick = [
     "Extract keywords from a URL…",
     "Write an SEO article about…",
@@ -3221,7 +3194,7 @@ function Assistant({ ctx, open, setOpen }) {
             <div style={{ width:36, height:36, borderRadius:11, background:"linear-gradient(135deg,var(--t-500),var(--t-700))", color:"#F3EFE4", display:"grid", placeItems:"center", boxShadow:"var(--neo-sm)" }}><Icon name="sparkles" size={18} /></div>
             <div style={{ flex:1 }}><div style={{ fontSize:14.5, fontWeight:800 }}>SEO Assistant</div><div style={{ fontSize:11.5, color:"var(--muted)" }}>scoped to {s.name}</div></div>
             <button onClick={()=>{ setOpen(false); ctx.goto("chat"); }} className="neo-btn tip" data-tip="Open full chat" style={{ width:32, height:32, borderRadius:9, background:"var(--bg)", boxShadow:"var(--neo-in)", display:"grid", placeItems:"center", color:"var(--muted)" }}><Icon name="upload" size={15} /></button>
-            <button onClick={()=>{ setMsgs([]); setHistory([]); }} className="neo-btn tip" data-tip="New chat" style={{ width:32, height:32, borderRadius:9, background:"var(--bg)", boxShadow:"var(--neo-in)", display:"grid", placeItems:"center", color:"var(--muted)" }}><Icon name="edit" size={15} /></button>
+            <button onClick={reset} className="neo-btn tip" data-tip="New chat" style={{ width:32, height:32, borderRadius:9, background:"var(--bg)", boxShadow:"var(--neo-in)", display:"grid", placeItems:"center", color:"var(--muted)" }}><Icon name="edit" size={15} /></button>
           </div>
           {/* messages */}
           <div ref={bodyRef} className="scroll" style={{ flex:1, padding:"16px 16px 8px", display:"flex", flexDirection:"column", gap:12 }}>
