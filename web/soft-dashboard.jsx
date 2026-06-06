@@ -2104,6 +2104,8 @@ function GscScreen({ ctx }) {
   const [tab,setTab] = useState("queries");
   const [saEmail,setSaEmail] = useState(null);
   const [advanced,setAdvanced] = useState(false);   // show service-account paste
+  const [propMenu,setPropMenu] = useState(false);   // header property switcher
+  const [propsLoading,setPropsLoading] = useState(false);
   const [decay,setDecay] = useState(null);
   const [decayBusy,setDecayBusy] = useState(false);
   const [briefFor,setBriefFor] = useState(null);
@@ -2113,7 +2115,7 @@ function GscScreen({ ctx }) {
   const [drops,setDrops] = useState(null);
   const [idxBusy,setIdxBusy] = useState("");
 
-  useEffect(()=>{ setData(null); setProps([]); setSaText(""); setErr(null); setDecay(null); setAnom(null); setIdxHealth(null); setDrops(null); if(live) API.gscStatus(s.id).then(setStatus).catch(()=>{}); },[s.id]);
+  useEffect(()=>{ setData(null); setProps([]); setSaText(""); setErr(null); setDecay(null); setAnom(null); setIdxHealth(null); setDrops(null); setPropMenu(false); if(live) API.gscStatus(s.id).then(setStatus).catch(()=>{}); },[s.id]);
   const runIndexHealth = ()=>{ setIdxBusy("health"); setErr(null); API.gscIndexHealth(s.id).then(r=>{ if(r.error){setErr({msg:r.error,needsConnect:r.needsConnect});return;} setIdxHealth(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setIdxBusy("")); };
   const runRankDrops = ()=>{ setIdxBusy("drops"); setErr(null); API.gscRankingDrops(s.id).then(r=>{ if(r.error){setErr({msg:r.error});return;} setDrops(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setIdxBusy("")); };
   const submitIndex = ()=>{ setIdxBusy("submit"); API.gscSubmitUrls(s.id).then(r=>{ if(r.error){ctx.toast("Indexing: "+r.error,"clay");return;} ctx.toast(r.succeeded+"/"+r.submitted+" URLs submitted to Google for indexing","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setIdxBusy("")); };
@@ -2156,8 +2158,14 @@ function GscScreen({ ctx }) {
     window.addEventListener("message", onMsg);
   };
   const pickProperty = (p)=>{
-    API.gscSetProperty(s.id, p).then(()=>{ setStatus({connected:true,property:p}); setProps([]); loadData(p); }).catch(e=>setErr({ msg:e.message }));
+    API.gscSetProperty(s.id, p).then(()=>{ setStatus(st=>Object.assign({},st,{connected:true,property:p})); setPropMenu(false); loadData(p); }).catch(e=>setErr({ msg:e.message }));
   };
+  // Load every property the connected account can see (for the switcher dropdown).
+  const loadProperties = ()=>{
+    setPropsLoading(true); setErr(null);
+    API.gscProperties(s.id).then(r=>{ if(r.error){ setErr({ msg:r.error, needsConnect:r.needsConnect }); return; } setProps(r.properties||[]); }).catch(e=>setErr({ msg:e.message })).finally(()=>setPropsLoading(false));
+  };
+  const togglePropMenu = ()=>{ setPropMenu(m=>{ const open=!m; if(open && !props.length) loadProperties(); return open; }); };
   const loadData = (prop)=>{
     setBusy("load"); setErr(null); setData(null);
     API.gscSnapshot(s.id, 28).then(r=>{
@@ -2171,12 +2179,50 @@ function GscScreen({ ctx }) {
   const fmt=(v)=> v==null?"—":Number(v).toLocaleString();
   const pct=(v)=> v==null?"—":(v*100).toFixed(1)+"%";
   const posTone=(p)=> p<=3?"teal":p<=10?"gold":"gray";
+  // Match GSC properties to the active site's domain so the right one floats up.
+  const cleanProp=(u)=>(u||"").replace(/^sc-domain:/,"").replace(/^https?:\/\//,"").replace(/\/$/,"");
+  const siteDomain=((s&&(s._rawUrl||s.url))||"").replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/.*$/,"");
+  const isMatch=(u)=>{ const c=cleanProp(u).replace(/^www\./,""); return siteDomain && (c===siteDomain || c.endsWith("."+siteDomain) || siteDomain.endsWith("."+c) || c.includes(siteDomain)); };
+  const sortedProps=[...props].sort((a,b)=>(isMatch(b.url)?1:0)-(isMatch(a.url)?1:0));
 
   return (
     <div className="rise">
       <PageHead title="Search Console" sub="First-party Google data — real clicks, impressions, CTR & position.">
         <div style={{ display:"flex", gap:10, alignItems:"center" }}>
-          {hasProp && <Chip tone="teal" size="sm" icon="check">{status.property.replace(/^sc-domain:/,"").replace(/^https?:\/\//,"")}</Chip>}
+          {/* Property switcher — this account may own many properties; pick the
+              one to map to the active site. Always available once connected. */}
+          {connected && (
+            <div style={{ position:"relative" }}>
+              <button onClick={togglePropMenu} className="neo-btn tip" data-tip="Switch Search Console property"
+                style={{ display:"inline-flex", alignItems:"center", gap:8, padding:"8px 13px", borderRadius:10, background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, fontWeight:700, color:"var(--ink)", maxWidth:280 }}>
+                <Icon name={hasProp?"check":"globe"} size={15} style={{ color:"var(--t-700)", flexShrink:0 }} />
+                <span style={{ fontFamily:"var(--mono)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{hasProp?cleanProp(status.property):"Select property"}</span>
+                <Icon name="chevD" size={14} style={{ color:"var(--muted)", flexShrink:0 }} />
+              </button>
+              {propMenu && (<>
+                <div onClick={()=>setPropMenu(false)} style={{ position:"fixed", inset:0, zIndex:55 }} />
+                <div className="scroll" style={{ position:"absolute", top:"calc(100% + 6px)", right:0, zIndex:60, width:330, maxHeight:380, overflowY:"auto", background:"var(--surface)", borderRadius:"var(--r-md)", boxShadow:"var(--neo)", border:"1px solid var(--line-soft)", padding:8 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:6, padding:"5px 8px 7px" }}>
+                    <span style={{ flex:1, fontSize:10.5, fontWeight:800, color:"var(--muted)", textTransform:"uppercase", letterSpacing:.5 }}>Properties{status&&status.email?(" · "+status.email):""}</span>
+                    <button onClick={loadProperties} className="neo-btn tip" data-tip="Reload" style={{ width:24, height:24, borderRadius:7, background:"var(--bg)", boxShadow:"var(--neo-in)", display:"grid", placeItems:"center", color:"var(--muted)" }}><Icon name="trend" size={12} /></button>
+                  </div>
+                  {propsLoading && <div style={{ padding:"10px 8px", color:"var(--muted)", fontSize:12.5, display:"flex", gap:8, alignItems:"center" }}><Icon name="cog" size={14} className="audit-spin" />Loading properties…</div>}
+                  {!propsLoading && !props.length && <div style={{ padding:"10px 8px", color:"var(--muted)", fontSize:12.5 }}>No properties found for this account.</div>}
+                  {!propsLoading && sortedProps.map((p,i)=>{
+                    const cur = hasProp && status.property===p.url; const match = isMatch(p.url);
+                    return (
+                      <button key={i} onClick={()=>pickProperty(p.url)} className="neo-btn" style={{ display:"flex", alignItems:"center", gap:9, width:"100%", padding:"9px 10px", borderRadius:9, background:cur?"var(--t-100)":"transparent", boxShadow:cur?"var(--neo-in)":"none", textAlign:"left", marginBottom:2 }}>
+                        <Icon name={cur?"check":"globe"} size={14} style={{ color:cur?"var(--t-700)":"var(--muted)", flexShrink:0 }} />
+                        <span style={{ flex:1, fontSize:12.5, fontWeight:600, fontFamily:"var(--mono)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{cleanProp(p.url)}</span>
+                        {match && !cur && <Chip tone="teal" size="sm">match</Chip>}
+                        {p.permission && <Chip tone="gray" size="sm">{p.permission}</Chip>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </>)}
+            </div>
+          )}
           {data && <NeoButton kind="soft" size="sm" icon="trend" onClick={()=>loadData()}>Refresh</NeoButton>}
         </div>
       </PageHead>
@@ -2232,18 +2278,22 @@ function GscScreen({ ctx }) {
         </SoftCard>
       )}
 
-      {/* PICK PROPERTY */}
-      {live && props.length>0 && (
+      {/* PICK PROPERTY (right after connecting, before a property is chosen) */}
+      {live && props.length>0 && !hasProp && (
         <SoftCard hover={false} style={{ marginTop:16 }}>
-          <SectionHead sub={saEmail?("Connected as "+saEmail):"Choose the property to track"}>Select a property</SectionHead>
+          <SectionHead sub={(status&&status.email)?("Connected as "+status.email+" — choose the property for "+(s&&s.name||"this site")):(saEmail?("Connected as "+saEmail):"Choose the property to track")}>Select a property</SectionHead>
           <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-            {props.map((p,i)=>(
-              <button key={i} className="neo-btn nav-item" onClick={()=>pickProperty(p.url)} style={{ display:"flex", alignItems:"center", gap:11, padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", textAlign:"left" }}>
-                <Icon name="globe" size={16} style={{ color:"var(--t-700)" }} />
-                <span style={{ flex:1, fontSize:13.5, fontWeight:700, fontFamily:"var(--mono)" }}>{p.url}</span>
-                <Chip tone="gray" size="sm">{p.permission}</Chip>
-              </button>
-            ))}
+            {sortedProps.map((p,i)=>{
+              const match=isMatch(p.url);
+              return (
+                <button key={i} className="neo-btn nav-item" onClick={()=>pickProperty(p.url)} style={{ display:"flex", alignItems:"center", gap:11, padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", textAlign:"left" }}>
+                  <Icon name="globe" size={16} style={{ color:"var(--t-700)" }} />
+                  <span style={{ flex:1, fontSize:13.5, fontWeight:700, fontFamily:"var(--mono)" }}>{cleanProp(p.url)}</span>
+                  {match && <Chip tone="teal" size="sm" icon="check">matches {s&&s.name}</Chip>}
+                  <Chip tone="gray" size="sm">{p.permission}</Chip>
+                </button>
+              );
+            })}
           </div>
         </SoftCard>
       )}
