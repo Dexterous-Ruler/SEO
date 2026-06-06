@@ -8,6 +8,7 @@
 // server is stateless and can serve multiple WordPress accounts.
 // ===========================================================================
 import { createServer } from 'node:http';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { URL } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import { join, normalize, extname, dirname } from 'node:path';
@@ -93,6 +94,39 @@ function send(res, status, body) {
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   });
   res.end(data);
+}
+
+// ── Google OAuth helpers (interactive "Connect with Google" flow) ──────────
+const OAUTH_SECRET = process.env.SITE_SECRET_KEY || 'sentinel-dev-key';
+// Public origin used to build the OAuth redirect URI. Behind a PaaS proxy we
+// derive it from forwarded headers; PUBLIC_BASE_URL overrides (set it in prod to
+// match the redirect URI registered on the Google OAuth client).
+function publicOrigin(req) {
+  if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL.replace(/\/$/, '');
+  const proto = (req.headers['x-forwarded-proto'] || '').split(',')[0] || 'http';
+  const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
+  return `${proto}://${host}`;
+}
+const gscRedirectUri = (req) => `${publicOrigin(req)}/gsc-oauth-callback`;
+// Signed, time-bounded state so the callback can trust the siteId it carries.
+function signState(siteId) {
+  const payload = `${siteId}.${Date.now()}`;
+  const sig = createHmac('sha256', OAUTH_SECRET).update(payload).digest('base64url');
+  return Buffer.from(`${payload}.${sig}`).toString('base64url');
+}
+function verifyState(state) {
+  try {
+    const raw = Buffer.from(state, 'base64url').toString();
+    const i = raw.lastIndexOf('.');
+    const payload = raw.slice(0, i);
+    const sig = raw.slice(i + 1);
+    const expect = createHmac('sha256', OAUTH_SECRET).update(payload).digest('base64url');
+    const a = Buffer.from(sig); const b = Buffer.from(expect);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+    const [siteId, ts] = payload.split('.');
+    if (Date.now() - Number(ts) > 10 * 60 * 1000) return null; // 10-min window
+    return siteId;
+  } catch (e) { return null; }
 }
 
 // Shift a YYYY-MM-DD date string by N days (UTC), returning YYYY-MM-DD.
@@ -556,11 +590,32 @@ const routes = {
     return { ok: true };
   },
 
-  // Status: is GSC connected + which property.
+  // Status: is GSC connected + which property + auth method.
   'POST /gsc-status': async (body) => {
-    const sa = await db.getGscSa(body.siteId).catch(() => null);
+    const saStr = await db.getGscSa(body.siteId).catch(() => null);
     const site = await db.getSite(body.siteId).catch(() => null);
-    return { connected: !!sa, property: site && site.gsc_property };
+    let method = null, email = null;
+    if (saStr) { try { const c = JSON.parse(saStr); method = c.refresh_token ? 'oauth' : 'service_account'; email = c.email || c.client_email || null; } catch (e) {} }
+    return { connected: !!saStr, property: site && site.gsc_property, method, email, oauthAvailable: gsc.oauthConfigured() };
+  },
+
+  // Whether one-click Google sign-in is available on this server (client id/secret set).
+  'POST /gsc-oauth-config': async () => ({ configured: gsc.oauthConfigured() }),
+
+  // List the GSC properties the stored credential (OAuth or SA) can access.
+  // Used by the UI after the one-click OAuth popup completes.
+  'POST /gsc-properties': async (body) => {
+    const saStr = await db.getGscSa(body.siteId).catch(() => null);
+    if (!saStr) return { error: 'Google Search Console not connected for this site.', needsConnect: true };
+    try { return { properties: await gsc.listSites(JSON.parse(saStr)) }; }
+    catch (e) { return { error: e.message }; }
+  },
+
+  // Disconnect: drop the stored credential + selected property.
+  'POST /gsc-disconnect': async (body) => {
+    await db.setGscSa(body.siteId, '').catch(() => {});
+    await db.updateSite(body.siteId, { gsc_property: null }).catch(() => {});
+    return { ok: true };
   },
 
   // Pull a GSC snapshot (totals, top queries/pages, daily series, striking).
@@ -1263,6 +1318,43 @@ const server = createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, {});
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const key = `${req.method} ${url.pathname}`;
+
+  // ── Google OAuth: one-click "Connect with Google" (redirect flow) ──────────
+  // GET /gsc-oauth-start → bounce the user to Google's consent screen.
+  if (key === 'GET /gsc-oauth-start') {
+    if (!gsc.oauthConfigured()) { res.writeHead(503, { 'Content-Type': 'text/plain' }); return res.end('Google OAuth is not configured on this server (set GOOGLE_OAUTH_CLIENT_ID/SECRET).'); }
+    const siteId = url.searchParams.get('siteId');
+    if (!siteId) { res.writeHead(400, { 'Content-Type': 'text/plain' }); return res.end('Missing siteId'); }
+    const authUrl = gsc.oauthAuthUrl({ state: signState(siteId), redirectUri: gscRedirectUri(req) });
+    res.writeHead(302, { Location: authUrl });
+    return res.end();
+  }
+  // GET /gsc-oauth-callback → Google redirects back here with ?code & ?state.
+  if (key === 'GET /gsc-oauth-callback') {
+    const closePage = (ok, msg) => {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<!doctype html><meta charset="utf-8"><title>Search Console</title>
+<body style="font-family:system-ui;background:#ECECEC;color:#1c2b2a;display:grid;place-items:center;height:100vh;margin:0">
+<div style="text-align:center;max-width:360px;padding:24px;background:#fff;border-radius:16px;box-shadow:0 8px 30px rgba(0,0,0,.12)">
+<div style="font-size:42px">${ok ? '✅' : '⚠️'}</div>
+<h2 style="margin:8px 0">${ok ? 'Search Console connected' : 'Connection failed'}</h2>
+<p style="color:#5a6b69;font-size:14px">${msg || (ok ? 'You can close this window.' : '')}</p></div>
+<script>try{if(window.opener){window.opener.postMessage({type:'gsc-oauth',ok:${ok ? 'true' : 'false'}},'*');}}catch(e){}
+setTimeout(function(){try{window.close();}catch(e){} if(!window.closed){location.replace('/?screen=gsc');}}, ${ok ? 1200 : 2500});</script>`);
+    };
+    try {
+      const error = url.searchParams.get('error');
+      if (error) return closePage(false, 'Google said: ' + error);
+      const code = url.searchParams.get('code');
+      const siteId = verifyState(url.searchParams.get('state') || '');
+      if (!code || !siteId) return closePage(false, 'Invalid or expired authorization. Please try again.');
+      const creds = await gsc.oauthExchangeCode({ code, redirectUri: gscRedirectUri(req) });
+      await db.setGscSa(siteId, JSON.stringify(creds));
+      return closePage(true, creds.email ? ('Connected as ' + creds.email + '. Choose a property in the dashboard.') : 'Choose a property in the dashboard.');
+    } catch (e) {
+      return closePage(false, e.message);
+    }
+  }
 
   // ── Streaming chat (Server-Sent Events) — special-cased outside JSON routes.
   if (key === 'POST /chat-stream') {

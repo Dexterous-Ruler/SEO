@@ -120,6 +120,11 @@
     gscConnect(siteId, serviceAccount) { return engine("/gsc-connect", { siteId, serviceAccount }); },
     gscSetProperty(siteId, property) { return engine("/gsc-set-property", { siteId, property }); },
     gscStatus(siteId) { return engine("/gsc-status", { siteId }); },
+    // One-click OAuth ("Connect with Google")
+    gscOAuthConfig() { return engine("/gsc-oauth-config", {}); },
+    gscOAuthStartUrl(siteId) { return (ENGINE || "") + "/gsc-oauth-start?siteId=" + encodeURIComponent(siteId); },
+    gscProperties(siteId) { return engine("/gsc-properties", { siteId }); },
+    gscDisconnect(siteId) { return engine("/gsc-disconnect", { siteId }); },
     gscSnapshot(siteId, days) { return engine("/gsc-snapshot", { siteId, days }); },
     gscAnomalies(siteId, days) { return engine("/gsc-anomalies", { siteId, days: days || 90 }); },
     gscSubmitUrls(siteId, urls) { return engine("/gsc-submit-urls", { siteId, urls }); },

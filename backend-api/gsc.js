@@ -13,17 +13,90 @@
 import { createSign } from 'node:crypto';
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';
+const INDEXING_SCOPE = 'https://www.googleapis.com/auth/indexing';
+// Scopes requested in the one-click OAuth consent. We request both up front so
+// every feature (analytics + Indexing API) works without re-consenting.
+export const OAUTH_SCOPES = [SCOPE, INDEXING_SCOPE, 'openid', 'email'];
 
 function b64url(buf) {
   return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-// Mint an OAuth access token from a service-account key via a signed JWT.
-// `scope` defaults to read-only Search Console; pass the Indexing scope for the
-// Indexing API.
-export async function getAccessToken(sa, scope = SCOPE) {
-  if (!sa || !sa.client_email || !sa.private_key) throw new Error('Invalid service-account JSON (need client_email + private_key).');
+// ── Interactive OAuth (3-legged) — "Connect with Google" one-click flow ─────
+// The user signs in with their own Google account and grants access; we store
+// the resulting refresh_token (per site) and mint short-lived access tokens from
+// it. App-level client id/secret come from env. This is the recommended path for
+// non-technical users (no service-account key file to create).
+export function oauthConfigured() {
+  return !!(process.env.GOOGLE_OAUTH_CLIENT_ID && process.env.GOOGLE_OAUTH_CLIENT_SECRET);
+}
+
+// Build the Google consent URL. `state` is an opaque signed token (carries the
+// siteId); `redirectUri` MUST exactly match one registered on the OAuth client.
+export function oauthAuthUrl({ state, redirectUri }) {
+  const params = new URLSearchParams({
+    client_id: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: OAUTH_SCOPES.join(' '),
+    access_type: 'offline',     // → returns a refresh_token
+    prompt: 'consent',          // → forces a refresh_token even on re-auth
+    include_granted_scopes: 'true',
+    state,
+  });
+  return `${AUTH_URL}?${params.toString()}`;
+}
+
+// Exchange the authorization code for tokens. Returns { refresh_token, access_token, scope, email }.
+export async function oauthExchangeCode({ code, redirectUri }) {
+  const res = await fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      code,
+      client_id: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
+      client_secret: process.env.GOOGLE_OAUTH_CLIENT_SECRET || '',
+      redirect_uri: redirectUri,
+      grant_type: 'authorization_code',
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error('Google token exchange failed: ' + (data.error_description || data.error || res.status));
+  if (!data.refresh_token) throw new Error('Google did not return a refresh token — revoke prior access at myaccount.google.com/permissions and reconnect.');
+  let email = null;
+  try { if (data.id_token) email = JSON.parse(Buffer.from(data.id_token.split('.')[1], 'base64').toString()).email || null; } catch (e) {}
+  return { type: 'oauth', refresh_token: data.refresh_token, scope: data.scope, email };
+}
+
+// Mint an access token from a stored refresh_token (OAuth path).
+async function oauthAccessToken(creds) {
+  if (!oauthConfigured()) throw new Error('Google OAuth is not configured on the server (GOOGLE_OAUTH_CLIENT_ID/SECRET).');
+  const res = await fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: process.env.GOOGLE_OAUTH_CLIENT_ID,
+      client_secret: process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+      refresh_token: creds.refresh_token,
+      grant_type: 'refresh_token',
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error('Google token refresh failed: ' + (data.error_description || data.error || res.status) + ' — the connection may have been revoked; reconnect.');
+  return data.access_token;
+}
+
+// Mint an OAuth access token. Accepts EITHER an interactive-OAuth credential
+// ({ refresh_token, ... }) OR a service-account key ({ client_email, private_key }).
+// All higher-level functions forward whatever credential was stored, so both auth
+// methods work everywhere with no other code changes. `scope` only applies to the
+// service-account path (interactive OAuth fixes scopes at consent time).
+export async function getAccessToken(creds, scope = SCOPE) {
+  if (creds && creds.refresh_token) return oauthAccessToken(creds);
+  const sa = creds;
+  if (!sa || !sa.client_email || !sa.private_key) throw new Error('Invalid Google credential (need an OAuth refresh token or a service-account key).');
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
   const claim = b64url(JSON.stringify({
