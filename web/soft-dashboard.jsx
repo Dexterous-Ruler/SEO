@@ -2967,18 +2967,39 @@ function AirtableScreen({ ctx }) {
   const [tables,setTables] = useState([]);
   const [pat,setPat] = useState("");
   const [baseId,setBaseId] = useState("");
+  const [tableId,setTableId] = useState("");      // chosen keyword table (id)
+  const [keywordField,setKeywordField] = useState("");  // chosen keyword column name
   const [busy,setBusy] = useState("");
-  const [competitor,setCompetitor] = useState("");
   const [log,setLog] = useState([]);
-  const [syncKinds,setSyncKinds] = useState({ gaps:true, content:true, geo:true });
   const [airErr,setAirErr] = useState(null);   // persistent error banner
 
+  // Load tables for a base, restoring the saved table + keyword-field selection.
+  const loadTables = (bid, cfg)=>{
+    setBusy("tables");
+    API.airtableTables(s.id, bid).then(r=>{
+      if(r.error){ setAirErr({ msg:r.error }); return; }
+      const tbls=r.tables||[]; setTables(tbls);
+      const savedTable = cfg && cfg.table_keywords;
+      if(savedTable && tbls.some(t=>t.id===savedTable||t.name===savedTable)) setTableId(savedTable);
+      if(cfg && cfg.keyword_field) setKeywordField(cfg.keyword_field);
+    }).catch(e=>setAirErr({ msg:e.message })).finally(()=>setBusy(""));
+  };
   const refresh = ()=>{
     if(!live){ return; }
-    API.airtableStatus(s.id).then(st=>{ setStatus(st); if(st.config&&st.config.base_id) setBaseId(st.config.base_id); }).catch(()=>{});
+    API.airtableStatus(s.id).then(st=>{
+      setStatus(st);
+      const cfg = st.config||{};
+      if(cfg.base_id){ setBaseId(cfg.base_id); }
+      if(cfg.table_keywords) setTableId(cfg.table_keywords);
+      if(cfg.keyword_field) setKeywordField(cfg.keyword_field);
+      if(st.connected){
+        API.airtableBases(s.id).then(b=>{ if(!b.error) setBases(b.bases||[]); }).catch(()=>{});
+        if(cfg.base_id) loadTables(cfg.base_id, cfg);
+      }
+    }).catch(()=>{});
     API.listAirtableLog(s.id).then(setLog).catch(()=>{});
   };
-  useEffect(()=>{ setStatus(null); setBases([]); setTables([]); setPat(""); setBaseId(""); setLog([]); setAirErr(null); refresh(); },[s.id]);
+  useEffect(()=>{ setStatus(null); setBases([]); setTables([]); setPat(""); setBaseId(""); setTableId(""); setKeywordField(""); setLog([]); setAirErr(null); refresh(); },[s.id]);
 
   const connect = ()=>{
     if(!pat.trim()){ ctx.toast("Paste your Airtable Personal Access Token","gold"); return; }
@@ -2991,35 +3012,39 @@ function AirtableScreen({ ctx }) {
     }).catch(e=>setAirErr({ msg:"Connect failed: "+e.message })).finally(()=>setBusy(""));
   };
   const chooseBase = (bid)=>{
-    setBaseId(bid); setBusy("tables"); setAirErr(null);
-    API.airtableTables(s.id, bid).then(r=>{ if(r.error){ setAirErr({ msg:r.error }); return; } setTables(r.tables||[]); }).catch(e=>setAirErr({ msg:e.message })).finally(()=>setBusy(""));
+    if(!bid){ return; }
+    setBaseId(bid); setTableId(""); setKeywordField(""); setTables([]); setAirErr(null);
     API.airtableConfig(s.id,{ baseId:bid }).catch(()=>{});
+    loadTables(bid, null);
   };
-  const runSync = ()=>{
-    const kinds=Object.keys(syncKinds).filter(k=>syncKinds[k]);
-    if(!kinds.length){ ctx.toast("Select at least one data type","gold"); return; }
-    setBusy("sync"); setAirErr(null); ctx.toast("Syncing to Airtable…","teal");
-    API.airtableSync(s.id,{
-      kinds,
-      competitor: competitor.trim()||undefined,
-      suggestions: (ctx.intel&&ctx.intel.suggestions)||[],
-      geoResults: (ctx.geo&&ctx.geo.results)||[],
-    }).then(r=>{
+  const chooseTable = (tid)=>{
+    setTableId(tid);
+    const t = tables.find(x=>x.id===tid||x.name===tid);
+    // default the keyword column to a field literally named "keyword", else first field
+    let field = keywordField;
+    if(t && t.fields){ const kw=t.fields.find(f=>/keyword/i.test(f.name)); field = (kw&&kw.name) || (t.fields[0]&&t.fields[0].name) || ""; setKeywordField(field); }
+    API.airtableConfig(s.id,{ tableKeywords:tid, keywordField:field }).catch(()=>{});
+  };
+  const chooseField = (name)=>{ setKeywordField(name); API.airtableConfig(s.id,{ keywordField:name }).catch(()=>{}); };
+  const pushKeywords = ()=>{
+    setBusy("push"); setAirErr(null); ctx.toast("Finding content-gap keywords…","teal");
+    API.airtablePushKeywords(s.id).then(r=>{
       if(r.error){ setAirErr({ msg:r.error }); return; }
-      const total=Object.values(r.synced||{}).reduce((a,x)=>a+(x.pushed||0),0);
-      if(total===0){ setAirErr({ msg:"Nothing was synced — run Content Intel / AI Visibility first (for content & GEO), or set a competitor + DataForSEO units (for keyword gaps)." }); return; }
-      ctx.toast("Synced "+total+" record(s) to Airtable ✓","teal");
+      const msg = r.pushed>0 ? ("Pushed "+r.pushed+" keyword(s) to Airtable ✓"+(r.skipped?" ("+r.skipped+" already there)":"")) : (r.skipped? ("All "+r.skipped+" keyword(s) already in Airtable — nothing new"):"No new keywords to push");
+      ctx.toast(msg, r.pushed>0?"teal":"gold");
       refresh();
-    }).catch(e=>setAirErr({ msg:"Sync failed: "+e.message })).finally(()=>setBusy(""));
+    }).catch(e=>setAirErr({ msg:"Push failed: "+e.message })).finally(()=>setBusy(""));
   };
 
   const connected = status && status.connected;
-  const hasBase = baseId || (status&&status.config&&status.config.base_id);
+  const selectedTable = tables.find(t=>t.id===tableId||t.name===tableId);
+  const ready = connected && baseId && tableId && keywordField;
+  const SEL_STYLE = { padding:"11px 14px", borderRadius:"var(--r-md)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13.5, color:"var(--ink)", outline:"none", fontFamily:"var(--ff)", minWidth:240, cursor:"pointer" };
 
   return (
     <div className="rise">
-      <PageHead title="Airtable Sync" sub={`Push ${s.name}'s keyword gaps, content ideas & AI-citation data into Airtable.`}>
-        {connected && hasBase && <NeoButton kind="primary" icon={busy==="sync"?undefined:"upload"} disabled={busy==="sync"} onClick={runSync}>{busy==="sync"&&<Icon name="cog" size={17} className="audit-spin" />}{busy==="sync"?"Syncing…":"Sync now"}</NeoButton>}
+      <PageHead title="Airtable Sync" sub={`Push ${s.name}'s content-gap keywords into its Airtable base — Airtable writes the articles.`}>
+        {ready && <NeoButton kind="primary" icon={busy==="push"?undefined:"upload"} disabled={busy==="push"} onClick={pushKeywords}>{busy==="push"&&<Icon name="cog" size={17} className="audit-spin" />}{busy==="push"?"Pushing…":"Push keywords"}</NeoButton>}
       </PageHead>
 
       {!live && <SoftCard hover={false}><div style={{ padding:"14px 4px", color:"var(--muted)", fontSize:13.5 }}>Connect a live WordPress site first to configure Airtable for it.</div></SoftCard>}
@@ -3039,78 +3064,76 @@ function AirtableScreen({ ctx }) {
                 </div>
                 <div style={{ display:"flex", gap:10, padding:"12px 14px", background:"var(--t-50)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-xs)" }}>
                   <Icon name="shield" size={17} style={{ color:"var(--t-700)", flexShrink:0, marginTop:1 }} />
-                  <span style={{ fontSize:12.5, color:"var(--t-800)", lineHeight:1.5 }}>Create a token at <b>airtable.com/create/tokens</b> with scopes <b>data.records:write</b> + <b>schema.bases:read</b> (add <b>schema.bases:write</b> to auto-create tables). Grant it access to your base. The token is encrypted server-side and never returned to the browser.</span>
+                  <span style={{ fontSize:12.5, color:"var(--t-800)", lineHeight:1.5 }}>Create a token at <b>airtable.com/create/tokens</b> with scopes <b>data.records:read</b> + <b>data.records:write</b> + <b>schema.bases:read</b>. Grant it access to this site's base. The token is encrypted server-side and never returned to the browser.</span>
                 </div>
               </div>
             ) : (
               <div style={{ display:"flex", alignItems:"center", gap:11, fontSize:13.5, color:"var(--ink-2)" }}>
-                <Icon name="check" size={17} style={{ color:"var(--t-600)" }} />Token stored & verified. {status.config&&status.config.last_sync?`Last sync ${window.timeAgo?window.timeAgo(status.config.last_sync):status.config.last_sync}.`:"No sync yet."}
-                <NeoButton kind="ghost" size="sm" icon="link" style={{ marginLeft:"auto" }} onClick={()=>{ setStatus({connected:false}); setBases([]); setTables([]); setPat(""); ctx.toast("Enter a new Airtable token to reconnect","gold"); }}>Reconnect</NeoButton>
+                <Icon name="check" size={17} style={{ color:"var(--t-600)" }} />Token stored & verified. {status.config&&status.config.last_sync?`Last push ${window.timeAgo?window.timeAgo(status.config.last_sync):status.config.last_sync}.`:"No push yet."}
+                <NeoButton kind="ghost" size="sm" icon="link" style={{ marginLeft:"auto" }} onClick={()=>{ setStatus({connected:false}); setBases([]); setTables([]); setBaseId(""); setTableId(""); setKeywordField(""); setPat(""); ctx.toast("Enter a new Airtable token to reconnect","gold"); }}>Reconnect</NeoButton>
               </div>
             )}
           </SoftCard>
 
-          {/* Step 2 — base + tables */}
+          {/* Step 2 — destination: base → table → keyword column (per site) */}
           {connected && (
             <SoftCard hover={false}>
-              <SectionHead sub="Choose the base; tables auto-create if your token allows it">2 · Destination base</SectionHead>
-              {bases.length===0 && !hasBase && <NeoButton kind="soft" size="sm" icon="layers" onClick={()=>{ setBusy("bases"); API.airtableConnect(s.id, "noop").catch(()=>{}); refresh(); ctx.toast("Re-enter token to list bases","gold"); }}>Load bases</NeoButton>}
-              <div style={{ display:"flex", flexWrap:"wrap", gap:9 }}>
-                {bases.map(b=>(
-                  <button key={b.id} onClick={()=>chooseBase(b.id)} className="neo-btn"
-                    style={{ display:"flex", alignItems:"center", gap:8, padding:"10px 14px", borderRadius:"var(--r-md)", background:baseId===b.id?"var(--t-50)":"var(--surface)", boxShadow:baseId===b.id?"var(--neo-xs)":"var(--neo-sm)", fontSize:13, fontWeight:700, color:baseId===b.id?"var(--t-700)":"var(--ink-2)" }}>
-                    <Icon name="layers" size={15} />{b.name}
-                  </button>
-                ))}
-                {bases.length===0 && hasBase && <Chip tone="teal" size="sm" icon="check">Base configured: {(status.config&&status.config.base_id)||baseId}</Chip>}
-              </div>
-              {tables.length>0 && (
-                <div style={{ marginTop:14, fontSize:12.5, color:"var(--muted)" }}>
-                  <b>{tables.length}</b> table(s) in this base. The agent will write to (or create): <b>SEO Keyword Gaps</b>, <b>Content Suggestions</b>, <b>AI Citation Results</b>.
+              <SectionHead sub="Each site maps to its own base, table and keyword column">2 · Destination</SectionHead>
+              <div style={{ display:"flex", flexWrap:"wrap", gap:18 }}>
+                <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                  <label style={{ fontSize:11.5, fontWeight:700, color:"var(--muted)" }}>Base / app</label>
+                  <select value={baseId} onChange={e=>chooseBase(e.target.value)} style={SEL_STYLE}>
+                    <option value="">{bases.length?"Select a base…":"Loading bases…"}</option>
+                    {bases.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
+                  </select>
                 </div>
-              )}
+                <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                  <label style={{ fontSize:11.5, fontWeight:700, color:"var(--muted)" }}>Table</label>
+                  <select value={tableId} onChange={e=>chooseTable(e.target.value)} disabled={!baseId||busy==="tables"} style={Object.assign({},SEL_STYLE,{opacity:(!baseId||busy==="tables")?.55:1})}>
+                    <option value="">{busy==="tables"?"Loading tables…":(baseId?"Select a table…":"Pick a base first")}</option>
+                    {tables.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </div>
+                <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                  <label style={{ fontSize:11.5, fontWeight:700, color:"var(--muted)" }}>Keyword column</label>
+                  <select value={keywordField} onChange={e=>chooseField(e.target.value)} disabled={!selectedTable} style={Object.assign({},SEL_STYLE,{opacity:!selectedTable?.55:1})}>
+                    <option value="">{selectedTable?"Select a column…":"Pick a table first"}</option>
+                    {selectedTable&&(selectedTable.fields||[]).map(f=><option key={f.name} value={f.name}>{f.name}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div style={{ marginTop:16, display:"flex", gap:10, padding:"12px 14px", background:"var(--t-50)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-xs)" }}>
+                <Icon name="sparkles" size={17} style={{ color:"var(--t-700)", flexShrink:0, marginTop:1 }} />
+                <span style={{ fontSize:12.5, color:"var(--t-800)", lineHeight:1.5 }}>Sentinel fills <b>only the keyword column</b> — one row per content-gap keyword (topics you don't have a page for yet, from your rankings, sitemap, competitors &amp; trending). Existing keywords are skipped. Your Airtable automation writes the articles.</span>
+              </div>
             </SoftCard>
           )}
 
-          {/* Step 3 — what to sync */}
-          {connected && hasBase && (
+          {/* Step 3 — push */}
+          {connected && (
             <SoftCard hover={false}>
-              <SectionHead sub="Pick the data, then Sync now (top-right)">3 · What to sync</SectionHead>
-              <div style={{ display:"flex", flexDirection:"column", gap:9 }}>
-                {[["gaps","SEO Keyword Gaps","DataForSEO keywords competitors rank for that you don't","bolt"],
-                  ["content","Content Suggestions","Claude article ideas from Content Intel","sparkles"],
-                  ["geo","AI Citation Results","Per-prompt GEO citation results","globe"]].map(([k,label,desc,icon])=>(
-                  <div key={k} style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 14px", borderRadius:"var(--r-md)", background:syncKinds[k]?"var(--t-50)":"var(--bg)", boxShadow:syncKinds[k]?"var(--neo-xs)":"var(--neo-in)" }}>
-                    <div style={{ width:32, height:32, borderRadius:9, background:syncKinds[k]?"var(--t-100)":"var(--surface)", color:syncKinds[k]?"var(--t-700)":"var(--faint)", display:"grid", placeItems:"center" }}><Icon name={icon} size={16} /></div>
-                    <div style={{ flex:1 }}><div style={{ fontSize:13.5, fontWeight:700 }}>{label}</div><div style={{ fontSize:11.5, color:"var(--muted)" }}>{desc}</div></div>
-                    <Toggle on={syncKinds[k]} onChange={v=>setSyncKinds({...syncKinds,[k]:v})} size={40} />
-                  </div>
-                ))}
-              </div>
-              {syncKinds.gaps && (
-                <div style={{ display:"flex", alignItems:"center", gap:10, marginTop:12, flexWrap:"wrap" }}>
-                  <span style={{ fontSize:12.5, fontWeight:700, color:"var(--muted)" }}>Keyword-gap competitor:</span>
-                  <input value={competitor} onChange={e=>setCompetitor(e.target.value)} placeholder="competitor.com"
-                    className="search-in" style={{ flex:1, minWidth:180, padding:"9px 13px", borderRadius:"var(--r-pill)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, fontFamily:"var(--mono)", color:"var(--ink)", outline:"none" }} />
-                  <span style={{ fontSize:11.5, color:"var(--faint)" }}>needs DataForSEO key</span>
+              <SectionHead sub="Finds content-gap keywords for this site and adds the new ones">3 · Push keywords</SectionHead>
+              {ready ? (
+                <div style={{ display:"flex", alignItems:"center", gap:14, flexWrap:"wrap" }}>
+                  <NeoButton kind="primary" icon={busy==="push"?undefined:"upload"} disabled={busy==="push"} onClick={pushKeywords}>{busy==="push"&&<Icon name="cog" size={16} className="audit-spin" />}{busy==="push"?"Pushing…":"Push content-gap keywords"}</NeoButton>
+                  <span style={{ fontSize:12.5, color:"var(--muted)" }}>→ <b>{selectedTable&&selectedTable.name}</b> · column <b>{keywordField}</b></span>
                 </div>
+              ) : (
+                <div style={{ fontSize:13, color:"var(--muted)" }}>Choose a base, table and keyword column above to enable pushing.</div>
               )}
-              <div style={{ marginTop:14, fontSize:12, color:"var(--muted)", display:"flex", alignItems:"center", gap:7 }}>
-                <Icon name="sparkles" size={13} />Content + GEO sync use your latest Content Intel / AI Visibility results. Run those first for data.
-              </div>
             </SoftCard>
           )}
 
           {/* sync log */}
           {log.length>0 && (
             <SoftCard hover={false}>
-              <SectionHead sub="Recent pushes to Airtable">Sync Log</SectionHead>
+              <SectionHead sub="Recent keyword pushes to Airtable">Push Log</SectionHead>
               <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
                 {log.map((l,i)=>(
                   <div key={i} style={{ display:"flex", alignItems:"center", gap:11, padding:"9px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
                     <div style={{ width:28, height:28, borderRadius:8, background:l.status==="ok"?"var(--t-100)":"var(--clay-bg)", color:l.status==="ok"?"var(--t-700)":"var(--clay)", display:"grid", placeItems:"center", flexShrink:0 }}><Icon name={l.status==="ok"?"check":"alert"} size={14} /></div>
-                    <span style={{ flex:1, fontSize:13, fontWeight:600 }}>{l.kind==="gaps"?"Keyword gaps":l.kind==="content"?"Content suggestions":"AI citation results"}</span>
-                    <span style={{ fontSize:12.5, fontWeight:700, color:"var(--t-700)" }}>{l.records_pushed} rows</span>
+                    <span style={{ flex:1, fontSize:13, fontWeight:600 }}>{l.kind==="keywords"?"Keywords":l.kind==="gaps"?"Keyword gaps":l.kind==="content"?"Content suggestions":"AI citation results"}</span>
+                    <span style={{ fontSize:12.5, fontWeight:700, color:"var(--t-700)" }}>{l.records_pushed} {l.kind==="keywords"?"added":"rows"}</span>
                     <span style={{ fontSize:11.5, color:"var(--muted)" }}>{window.timeAgo?window.timeAgo(l.created_at):""}</span>
                   </div>
                 ))}

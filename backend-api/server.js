@@ -1159,27 +1159,73 @@ const routes = {
     return { ok: true, bases };
   },
 
-  // List tables in a chosen base (for field/table mapping in the UI).
+  // List the bases this site's stored PAT can access (for the per-site dropdown).
+  'POST /airtable-bases': async (body) => {
+    const pat = await db.getAirtablePat(body.siteId);
+    if (!pat) return { error: 'Airtable not connected', needsConnect: true };
+    try { return { bases: await airtable.listBases(pat) }; }
+    catch (e) { return { error: e.message }; }
+  },
+
+  // List tables (with their fields) in a chosen base — for the table + keyword-field dropdowns.
   'POST /airtable-tables': async (body) => {
     const pat = await db.getAirtablePat(body.siteId);
     if (!pat) return { error: 'Airtable not connected', needsConnect: true };
-    const tables = await airtable.listTables(pat, body.baseId);
-    return { tables };
+    try { return { tables: await airtable.listTables(pat, body.baseId) }; }
+    catch (e) { return { error: e.message }; }
   },
 
-  // Save the base + table selections for a site.
+  // Save the per-site destination: base + the table & keyword column to fill.
+  // NOTE: the airtable_config table predates this flow, so we reuse two existing
+  // columns — table_gaps = keyword TABLE (id), table_content = keyword FIELD name.
   'POST /airtable-config': async (body) => {
-    const cfg = await db.upsertAirtableConfig(body.siteId, {
-      base_id: body.baseId, table_gaps: body.tableGaps, table_content: body.tableContent, table_geo: body.tableGeo,
-    });
+    const patch = {};
+    if (body.baseId !== undefined) patch.base_id = body.baseId;
+    if (body.tableKeywords !== undefined) patch.table_gaps = body.tableKeywords;
+    if (body.keywordField !== undefined) patch.table_content = body.keywordField;
+    const cfg = await db.upsertAirtableConfig(body.siteId, patch);
     return { config: cfg };
   },
 
   // Read current Airtable config + connection status for a site.
+  // Surfaces the repurposed columns under clear names for the UI.
   'POST /airtable-status': async (body) => {
     const cfg = await db.getAirtableConfig(body.siteId);
     const pat = await db.getAirtablePat(body.siteId).catch(() => null);
-    return { connected: !!pat, config: cfg || null };
+    const view = cfg ? { ...cfg, table_keywords: cfg.table_gaps || null, keyword_field: cfg.table_content || null } : null;
+    return { connected: !!pat, config: view };
+  },
+
+  // THE KEYWORD FLOW: push content-gap keywords into this site's Airtable table,
+  // filling ONLY the chosen keyword column (one row per keyword). Airtable's own
+  // automation then writes the articles. De-dupes against existing rows.
+  'POST /airtable-push-keywords': async (body) => {
+    const { siteId } = body;
+    const pat = await db.getAirtablePat(siteId);
+    if (!pat) return { error: 'Airtable not connected', needsConnect: true };
+    const cfg = await db.getAirtableConfig(siteId);
+    if (!cfg || !cfg.base_id) return { error: 'No Airtable base selected for this site.', needsConfig: true };
+    const table = cfg.table_gaps;                 // repurposed: keyword table
+    const field = cfg.table_content || 'Keyword'; // repurposed: keyword field
+    if (!table) return { error: 'No Airtable table selected for this site.', needsConfig: true };
+
+    // Keywords: use the list the UI passed, else derive content-GAP keywords
+    // (clusters with no existing page) from the opportunity engine.
+    let keywords = Array.isArray(body.keywords) && body.keywords.length ? body.keywords : null;
+    let derived = false;
+    if (!keywords) {
+      const r = await findOpportunities(siteId, { maxKeywords: body.maxKeywords || 160 });
+      if (r.error) return { error: r.error };
+      keywords = (r.clusters || []).filter((c) => c.isGap).map((c) => c.primaryKeyword).filter(Boolean);
+      derived = true;
+    }
+    if (!keywords.length) return { error: 'No content-gap keywords found to push — run a Content Plan first, or add competitors/connect Search Console.', pushed: 0 };
+    try {
+      const res = await airtable.pushKeywords(pat, cfg.base_id, table, field, keywords);
+      await db.logAirtableSync({ site_id: siteId, kind: 'keywords', records_pushed: res.pushed, status: 'ok' }).catch(() => {});
+      await db.upsertAirtableConfig(siteId, { last_sync: new Date().toISOString() }).catch(() => {});
+      return { ok: true, ...res, candidates: keywords.length, derived, field };
+    } catch (e) { return { error: 'Airtable push failed: ' + e.message }; }
   },
 
   // THE FLOW: gather DataForSEO keyword-gaps + Claude content suggestions + GEO
