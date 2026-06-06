@@ -611,10 +611,10 @@ const routes = {
     catch (e) { return { error: e.message }; }
   },
 
-  // Disconnect: drop the stored credential + selected property.
-  'POST /gsc-disconnect': async (body) => {
-    await db.setGscSa(body.siteId, '').catch(() => {});
-    await db.updateSite(body.siteId, { gsc_property: null }).catch(() => {});
+  // Disconnect: the connection is global (one Google account), so disconnecting
+  // clears the credential + selected property for ALL sites.
+  'POST /gsc-disconnect': async () => {
+    await db.clearAllGscSa().catch(() => {});
     return { ok: true };
   },
 

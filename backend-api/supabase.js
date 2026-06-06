@@ -13,6 +13,10 @@ const SB = process.env.SUPABASE_URL;
 const SERVICE = process.env.SUPABASE_SERVICE_ROLE;
 const ENC_KEY = process.env.SITE_SECRET_KEY || 'sentinel-dev-key';
 
+// Short-lived cache of the "any site" GSC credential (global-connection fallback),
+// so the many per-request getGscSa calls don't re-scan every site each time.
+let _anyGsc = { v: null, exp: 0 };
+
 function headers(extra) {
   return Object.assign({
     apikey: SERVICE,
@@ -72,9 +76,38 @@ export const db = {
     return rpc('get_airtable_pat', { p_site: siteId, p_key: ENC_KEY });
   },
 
-  // GSC service-account JSON (encrypted, isolated table).
-  async setGscSa(siteId, saJson) { return rpc('set_gsc_sa', { p_site: siteId, p_sa: saJson, p_key: ENC_KEY }); },
-  async getGscSa(siteId) { return rpc('get_gsc_sa', { p_site: siteId, p_key: ENC_KEY }); },
+  // GSC credential (OAuth refresh token OR service-account JSON), encrypted.
+  // GLOBAL model: the dashboard connects ONE Google account that owns every
+  // property, so a credential stored for any site authenticates all of them.
+  // getGscSa returns the site's own credential if present, otherwise falls back
+  // to any stored credential (briefly cached) — so connecting once connects the
+  // whole dashboard. The per-site *property* (sites.gsc_property) is what differs.
+  async setGscSa(siteId, saJson) { _anyGsc = { v: null, exp: 0 }; return rpc('set_gsc_sa', { p_site: siteId, p_sa: saJson, p_key: ENC_KEY }); },
+  async getGscSa(siteId) {
+    if (siteId) {
+      const own = await rpc('get_gsc_sa', { p_site: siteId, p_key: ENC_KEY }).catch(() => null);
+      if (own) return own;
+    }
+    const now = Date.now();
+    if (_anyGsc.v && _anyGsc.exp > now) return _anyGsc.v;
+    try {
+      const sites = await this.listSites();
+      for (const s of (sites || [])) {
+        const c = await rpc('get_gsc_sa', { p_site: s.id, p_key: ENC_KEY }).catch(() => null);
+        if (c) { _anyGsc = { v: c, exp: now + 60000 }; return c; }
+      }
+    } catch (e) {}
+    return null;
+  },
+  // Clear the GSC credential for EVERY site (global disconnect).
+  async clearAllGscSa() {
+    _anyGsc = { v: null, exp: 0 };
+    const sites = await this.listSites().catch(() => []);
+    for (const s of (sites || [])) {
+      await rpc('set_gsc_sa', { p_site: s.id, p_sa: '', p_key: ENC_KEY }).catch(() => {});
+      await this.updateSite(s.id, { gsc_property: null }).catch(() => {});
+    }
+  },
 
   // Airtable config (base/table selection) — browser-readable (no secret).
   async getAirtableConfig(siteId) {
