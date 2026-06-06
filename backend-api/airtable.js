@@ -67,6 +67,40 @@ export async function createRecords(pat, baseId, table, records) {
   return pushed;
 }
 
+// Read every existing value of ONE field (for de-duplication). Paginates.
+export async function listFieldValues(pat, baseId, table, fieldName, { max = 8000 } = {}) {
+  const enc = encodeURIComponent(table);
+  const vals = new Set();
+  let offset;
+  do {
+    const params = new URLSearchParams({ pageSize: '100' });
+    params.append('fields[]', fieldName);
+    if (offset) params.set('offset', offset);
+    const data = await at(pat, `${API}/${baseId}/${enc}?${params.toString()}`);
+    for (const r of (data.records || [])) {
+      const v = r.fields && r.fields[fieldName];
+      if (v != null && String(v).trim()) vals.add(String(v).trim().toLowerCase());
+    }
+    offset = data.offset;
+  } while (offset && vals.size < max);
+  return vals;
+}
+
+// Push keywords into ONE column of a table — one row per keyword, that field only.
+// De-dupes (case-insensitive) against keywords already in the column so we never
+// create duplicate rows. Returns { pushed, skipped }.
+export async function pushKeywords(pat, baseId, table, fieldName, keywords) {
+  const field = fieldName || 'Keyword';
+  const clean = [...new Set((keywords || []).map((k) => String(k || '').trim()).filter(Boolean))];
+  if (!clean.length) return { pushed: 0, skipped: 0 };
+  let existing = new Set();
+  try { existing = await listFieldValues(pat, baseId, table, field); } catch (e) { /* if read fails, push anyway */ }
+  const fresh = clean.filter((k) => !existing.has(k.toLowerCase()));
+  if (!fresh.length) return { pushed: 0, skipped: clean.length };
+  const pushed = await createRecords(pat, baseId, table, fresh.map((k) => ({ [field]: k })));
+  return { pushed, skipped: clean.length - fresh.length };
+}
+
 // ── field schemas for auto-created tables ──────────────────────────────────
 export const SCHEMAS = {
   gaps: [
@@ -161,4 +195,4 @@ function briefToText(b) {
   return lines.join('\n');
 }
 
-export default { listBases, listTables, ensureTable, createRecords, SCHEMAS, mapGaps, mapContent, mapGeo, mapOpportunities };
+export default { listBases, listTables, ensureTable, createRecords, listFieldValues, pushKeywords, SCHEMAS, mapGaps, mapContent, mapGeo, mapOpportunities };

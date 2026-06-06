@@ -146,9 +146,11 @@
     async listGeoRuns(siteId) { return sbSelect("geo_runs", "site_id=eq." + siteId + "&select=*&order=created_at.desc&limit=20"); },
     // Airtable
     airtableConnect(siteId, pat) { return engine("/airtable-connect", { siteId, pat }); },
+    airtableBases(siteId) { return engine("/airtable-bases", { siteId }); },
     airtableTables(siteId, baseId) { return engine("/airtable-tables", { siteId, baseId }); },
     airtableConfig(siteId, opts) { return engine("/airtable-config", Object.assign({ siteId }, opts || {})); },
     airtableStatus(siteId) { return engine("/airtable-status", { siteId }); },
+    airtablePushKeywords(siteId, keywords) { return engine("/airtable-push-keywords", { siteId, keywords }); },
     airtableSync(siteId, opts) { return engine("/airtable-sync", Object.assign({ siteId }, opts || {})); },
     async listAirtableLog(siteId) { return sbSelect("airtable_sync_log", "site_id=eq." + siteId + "&select=*&order=created_at.desc&limit=15"); },
     connect(creds) { return engine("/connect", { creds }); },

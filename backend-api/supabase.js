@@ -16,6 +16,9 @@ const ENC_KEY = process.env.SITE_SECRET_KEY || 'sentinel-dev-key';
 // Short-lived cache of the "any site" GSC credential (global-connection fallback),
 // so the many per-request getGscSa calls don't re-scan every site each time.
 let _anyGsc = { v: null, exp: 0 };
+// Same idea for the Airtable PAT — one token accesses all the user's bases, so
+// the connection is global; each site only differs by which base it writes to.
+let _anyAt = { v: null, exp: 0 };
 
 function headers(extra) {
   return Object.assign({
@@ -69,11 +72,27 @@ export const db = {
   },
 
   // Airtable PAT (encrypted, isolated table — zero browser access).
+  // GLOBAL model: one token accesses every base, so getAirtablePat falls back to
+  // any stored token — connect once, then each site just picks its own base.
   async setAirtablePat(siteId, pat) {
+    _anyAt = { v: null, exp: 0 };
     return rpc('set_airtable_pat', { p_site: siteId, p_pat: pat, p_key: ENC_KEY });
   },
   async getAirtablePat(siteId) {
-    return rpc('get_airtable_pat', { p_site: siteId, p_key: ENC_KEY });
+    if (siteId) {
+      const own = await rpc('get_airtable_pat', { p_site: siteId, p_key: ENC_KEY }).catch(() => null);
+      if (own) return own;
+    }
+    const now = Date.now();
+    if (_anyAt.v && _anyAt.exp > now) return _anyAt.v;
+    try {
+      const sites = await this.listSites();
+      for (const s of (sites || [])) {
+        const c = await rpc('get_airtable_pat', { p_site: s.id, p_key: ENC_KEY }).catch(() => null);
+        if (c) { _anyAt = { v: c, exp: now + 60000 }; return c; }
+      }
+    } catch (e) {}
+    return null;
   },
 
   // GSC credential (OAuth refresh token OR service-account JSON), encrypted.
