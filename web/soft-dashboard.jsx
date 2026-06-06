@@ -1502,7 +1502,17 @@ function OptimizeScreen({ ctx }) {
   const genFacts = ()=>{ if(!pageUrl){ctx.toast("Enter a page URL","gold");return;} setBusy("facts"); setErr(null); API.aiSeoFacts(s.id,pageUrl).then(r=>{ if(r.error){setErr(r.error);return;} setFacts(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const genCss = ()=>{ setBusy("css"); setErr(null); API.generateCss(s.id).then(r=>{ if(r.error){setErr(r.error);return;} setCss(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const scanMedia = ()=>{ setBusy("scan"); setErr(null); API.mediaScan(s.id).then(r=>{ if(r.error){setErr(r.error);return;} setMedia(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
-  const optimizeMedia = (apply)=>{ setBusy(apply?"apply":"preview"); API.mediaOptimize(s.id,{apply,max:8}).then(r=>{ if(r.error){ctx.toast("Images: "+r.error,"clay");return;} ctx.toast((apply?"Optimized + uploaded ":"Preview: ")+r.processed+" image(s) · "+r.savedKB+" KB saved","teal"); setMedia(m=>({...(m||{}),lastRun:r})); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
+  const optimizeMedia = (apply)=>{ setBusy(apply?"apply":"preview"); API.mediaOptimize(s.id,{apply,max:8}).then(r=>{
+    if(r.error){ctx.toast("Images: "+r.error,"clay");return;}
+    if(apply){
+      const ok=r.uploaded||0, bad=r.failed||0;
+      const msg = ok>0 ? ("Uploaded "+ok+" WebP to media library · "+r.savedKB+" KB lighter"+(bad?" · "+bad+" failed":"")) : ("Nothing uploaded"+(bad?" — "+bad+" failed: "+((r.errors||[])[0]||"WP rejected the upload"):""));
+      ctx.toast(msg, ok>0?"teal":"clay");
+    } else {
+      ctx.toast("Preview: "+r.processed+" image(s) · ~"+r.savedKB+" KB potential saving (no write)","teal");
+    }
+    setMedia(m=>({...(m||{}),lastRun:r}));
+  }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
   const runSpeed = ()=>{ if(!pageUrl){ctx.toast("Enter a URL","gold");return;} setBusy("speed"); setErr(null); API.speedTest(pageUrl,speedStrat).then(r=>{ if(r.error){setErr(r.error);return;} setSpeed(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
 
   const TABS=[["links","Internal Links","link"],["schema","Schema","layers"],["facts","AI-SEO Facts","sparkles"],["css","CSS Fixes","bolt"],["images","Images","image"],["speed","Speed Test","gauge"]];
