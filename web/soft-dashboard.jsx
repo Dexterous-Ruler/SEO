@@ -2114,6 +2114,7 @@ function GscScreen({ ctx }) {
   const [idxHealth,setIdxHealth] = useState(null);
   const [drops,setDrops] = useState(null);
   const [idxBusy,setIdxBusy] = useState("");
+  const autoPickedRef = useRef(new Set());   // sites we've already auto-mapped this session
 
   useEffect(()=>{ setData(null); setProps([]); setSaText(""); setErr(null); setDecay(null); setAnom(null); setIdxHealth(null); setDrops(null); setPropMenu(false); if(live) API.gscStatus(s.id).then(setStatus).catch(()=>{}); },[s.id]);
   const runIndexHealth = ()=>{ setIdxBusy("health"); setErr(null); API.gscIndexHealth(s.id).then(r=>{ if(r.error){setErr({msg:r.error,needsConnect:r.needsConnect});return;} setIdxHealth(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setIdxBusy("")); };
@@ -2184,6 +2185,20 @@ function GscScreen({ ctx }) {
   const siteDomain=((s&&(s._rawUrl||s.url))||"").replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/.*$/,"");
   const isMatch=(u)=>{ const c=cleanProp(u).replace(/^www\./,""); return siteDomain && (c===siteDomain || c.endsWith("."+siteDomain) || siteDomain.endsWith("."+c) || c.includes(siteDomain)); };
   const sortedProps=[...props].sort((a,b)=>(isMatch(b.url)?1:0)-(isMatch(a.url)?1:0));
+
+  // Once connected (globally), fetch the property list up front so the switcher
+  // is instant and we can auto-map.
+  useEffect(()=>{ if(live && status && status.connected && !props.length && !propsLoading) loadProperties(); },[status, live]);
+  // Auto-map each site to the GSC property matching its domain (once per site).
+  // Covers the "every site uses the same Google account" model: switch site →
+  // its own property is selected automatically, even if none/the wrong one was set.
+  useEffect(()=>{
+    if(!live || !status || !status.connected || !props.length) return;
+    if(autoPickedRef.current.has(s.id)) return;
+    autoPickedRef.current.add(s.id);
+    const m = sortedProps.find(p=>isMatch(p.url));
+    if(m && status.property!==m.url) pickProperty(m.url);
+  },[props, status]);
 
   return (
     <div className="rise">
