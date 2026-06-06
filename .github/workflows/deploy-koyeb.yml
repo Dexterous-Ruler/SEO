@@ -1,0 +1,90 @@
+name: Deploy to Koyeb
+
+# Auto-deploy: every push to main (and a manual "Run workflow" button) validates
+# the backend, triggers a Koyeb rebuild from main HEAD, and waits until the new
+# deployment is HEALTHY. Koyeb has no GitHub webhook on this service (it was
+# created from a public repo via the API), so this workflow is the deploy trigger.
+#
+# REQUIRED ONE-TIME SETUP: add a repository secret named KOYEB_TOKEN
+#   GitHub repo → Settings → Secrets and variables → Actions → New repository secret
+#   Name: KOYEB_TOKEN   Value: <your Koyeb API token>
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: koyeb-deploy
+  cancel-in-progress: false
+
+env:
+  KOYEB_SERVICE: 0b7dc428-a6be-4a3f-b2c2-78a9394d56f2
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Cheap guard: a syntax error in any backend module must NOT reach prod.
+      - name: Validate backend JS syntax
+        run: |
+          set -e
+          fail=0
+          for f in backend-api/*.js src/**/*.js src/*.js; do
+            [ -f "$f" ] || continue
+            node --check "$f" || { echo "::error file=$f::syntax error"; fail=1; }
+          done
+          [ "$fail" = "0" ] || exit 1
+
+      - name: Check KOYEB_TOKEN is set
+        env:
+          KOYEB_TOKEN: ${{ secrets.KOYEB_TOKEN }}
+        run: |
+          if [ -z "$KOYEB_TOKEN" ]; then
+            echo "::error::KOYEB_TOKEN secret is missing. Add it under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+      - name: Trigger Koyeb redeploy (rebuild from main HEAD)
+        env:
+          KOYEB_TOKEN: ${{ secrets.KOYEB_TOKEN }}
+        run: |
+          set -e
+          code=$(curl -sS -o resp.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $KOYEB_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"use_cache":false}' \
+            "https://app.koyeb.com/v1/services/$KOYEB_SERVICE/redeploy")
+          echo "redeploy HTTP $code"
+          cat resp.json || true
+          [ "$code" = "200" ] || { echo "::error::redeploy request failed ($code)"; exit 1; }
+
+      - name: Wait for deployment to be healthy
+        env:
+          KOYEB_TOKEN: ${{ secrets.KOYEB_TOKEN }}
+        run: |
+          node - <<'EOF'
+          const T = process.env.KOYEB_TOKEN, SVC = process.env.KOYEB_SERVICE;
+          const H = { Authorization: 'Bearer ' + T };
+          const k = async (p) => (await fetch('https://app.koyeb.com/v1' + p, { headers: H })).json();
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+          const FAIL = new Set(['ERROR', 'STOPPED', 'CANCELED', 'STASHED']);
+          (async () => {
+            for (let i = 0; i < 40; i++) {
+              await sleep(15000);
+              const d = await k(`/deployments?service_id=${SVC}&limit=1`).catch(() => ({}));
+              const dep = (d.deployments || [])[0];
+              const st = dep && dep.status;
+              console.log(`[${i}] deployment ${(dep && dep.id || '').slice(0, 8)} → ${st}`);
+              if (st === 'HEALTHY') { console.log('✓ deployment healthy'); process.exit(0); }
+              if (FAIL.has(st)) { console.error('✗ deployment failed: ' + st); process.exit(1); }
+            }
+            console.error('✗ timed out waiting for HEALTHY'); process.exit(1);
+          })();
+          EOF
