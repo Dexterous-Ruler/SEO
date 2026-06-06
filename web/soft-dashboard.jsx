@@ -2103,6 +2103,7 @@ function GscScreen({ ctx }) {
   const [err,setErr] = useState(null);
   const [tab,setTab] = useState("queries");
   const [saEmail,setSaEmail] = useState(null);
+  const [advanced,setAdvanced] = useState(false);   // show service-account paste
   const [decay,setDecay] = useState(null);
   const [decayBusy,setDecayBusy] = useState(false);
   const [briefFor,setBriefFor] = useState(null);
@@ -2138,6 +2139,22 @@ function GscScreen({ ctx }) {
       ctx.toast("Connected — "+(r.properties||[]).length+" propertie(s) found","teal");
     }).catch(e=>setErr({ msg:e.message })).finally(()=>setBusy(""));
   };
+  // One-click "Connect with Google": open the OAuth consent in a popup, then
+  // load the account's properties when it reports success via postMessage.
+  const connectGoogle = ()=>{
+    const w=520,h=640, left=window.screenX+(window.outerWidth-w)/2, top=window.screenY+(window.outerHeight-h)/2;
+    window.open(API.gscOAuthStartUrl(s.id), "gsc-oauth", "width="+w+",height="+h+",left="+left+",top="+top);
+    const onMsg=(e)=>{
+      if(!e.data||e.data.type!=="gsc-oauth") return;
+      window.removeEventListener("message", onMsg);
+      if(e.data.ok){
+        ctx.toast("Google connected — loading your properties…","teal");
+        setStatus(st=>Object.assign({},st,{connected:true,method:"oauth"}));
+        API.gscProperties(s.id).then(r=>{ if(r.error){ setErr({ msg:r.error }); return; } setProps(r.properties||[]); }).catch(e=>setErr({ msg:e.message }));
+      } else { ctx.toast("Google connection failed — please try again","clay"); }
+    };
+    window.addEventListener("message", onMsg);
+  };
   const pickProperty = (p)=>{
     API.gscSetProperty(s.id, p).then(()=>{ setStatus({connected:true,property:p}); setProps([]); loadData(p); }).catch(e=>setErr({ msg:e.message }));
   };
@@ -2171,19 +2188,46 @@ function GscScreen({ ctx }) {
       {/* CONNECT step */}
       {live && !connected && (
         <SoftCard hover={false}>
-          <SectionHead sub="Service-account auth — works server-side for all your sites">Connect Google Search Console</SectionHead>
-          <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
-            <div style={{ display:"flex", gap:10, padding:"13px 15px", background:"var(--t-50)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-xs)" }}>
-              <Icon name="shield" size={18} style={{ color:"var(--t-700)", flexShrink:0, marginTop:1 }} />
-              <div style={{ fontSize:12.5, color:"var(--t-800)", lineHeight:1.55 }}>
-                <b>Setup (one-time):</b> In Google Cloud Console → create a <b>Service Account</b> → enable the <b>Search Console API</b> → create a <b>JSON key</b>. Then in Search Console → <b>Settings → Users → Add user</b> → paste the service-account email (ends in <code>.gserviceaccount.com</code>) as a <b>Restricted</b> user. Paste the JSON key below.
+          <SectionHead sub="Sign in with the Google account that owns this property — no setup required">Connect Google Search Console</SectionHead>
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            {/* Primary: one-click Google sign-in */}
+            {(!status || status.oauthAvailable!==false) ? (
+              <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:12, padding:"22px 16px", background:"var(--t-50)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-xs)" }}>
+                <div style={{ fontSize:13.5, color:"var(--t-800)", textAlign:"center", lineHeight:1.5, maxWidth:380 }}>
+                  Click below, choose your Google account, and approve access. We only request read access to your Search Console data.
+                </div>
+                <button onClick={connectGoogle} className="neo-btn" style={{ display:"inline-flex", alignItems:"center", gap:11, padding:"12px 20px", borderRadius:12, background:"#fff", boxShadow:"var(--neo-sm)", fontSize:14.5, fontWeight:700, color:"#3c4043" }}>
+                  <svg width="20" height="20" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+                  Connect with Google
+                </button>
+                {status && status.oauthAvailable===undefined && <div style={{ fontSize:11, color:"var(--muted)" }} />}
               </div>
-            </div>
-            <textarea value={saText} onChange={e=>setSaText(e.target.value)} placeholder='Paste the full service-account JSON key here: { "type": "service_account", "project_id": "...", "client_email": "...", "private_key": "..." }'
-              rows={5} className="search-in" style={{ width:"100%", resize:"vertical", padding:"12px 14px", borderRadius:"var(--r-md)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12, fontFamily:"var(--mono)", color:"var(--ink)", outline:"none" }} />
-            <div style={{ display:"flex", justifyContent:"flex-end" }}>
-              <NeoButton kind="primary" icon={busy==="connect"?undefined:"link"} disabled={busy==="connect"} onClick={connect}>{busy==="connect"&&<Icon name="cog" size={16} className="audit-spin" />}Connect</NeoButton>
-            </div>
+            ) : (
+              <div style={{ display:"flex", gap:10, padding:"13px 15px", background:"var(--gold-bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-xs)" }}>
+                <Icon name="alert" size={18} style={{ color:"var(--gold)", flexShrink:0, marginTop:1 }} />
+                <div style={{ fontSize:12.5, color:"var(--ink-2)", lineHeight:1.55 }}>One-click Google sign-in isn't enabled on this server yet (no OAuth client configured). Use the service-account method below, or ask your admin to set <code>GOOGLE_OAUTH_CLIENT_ID</code>/<code>SECRET</code>.</div>
+              </div>
+            )}
+
+            {/* Advanced: service-account JSON (power users / unattended multi-site) */}
+            <button onClick={()=>setAdvanced(a=>!a)} className="neo-btn" style={{ alignSelf:"flex-start", display:"inline-flex", alignItems:"center", gap:7, padding:"7px 12px", borderRadius:9, background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5, fontWeight:600, color:"var(--muted)" }}>
+              <Icon name={advanced?"chevD":"chevR"} size={13} /> Advanced: connect with a service-account key
+            </button>
+            {advanced && (
+              <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                <div style={{ display:"flex", gap:10, padding:"13px 15px", background:"var(--t-50)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-xs)" }}>
+                  <Icon name="shield" size={18} style={{ color:"var(--t-700)", flexShrink:0, marginTop:1 }} />
+                  <div style={{ fontSize:12.5, color:"var(--t-800)", lineHeight:1.55 }}>
+                    In Google Cloud Console → create a <b>Service Account</b> → enable the <b>Search Console API</b> → create a <b>JSON key</b>. Then in Search Console → <b>Settings → Users → Add user</b> → add the service-account email (ends in <code>.gserviceaccount.com</code>). Paste the JSON key below.
+                  </div>
+                </div>
+                <textarea value={saText} onChange={e=>setSaText(e.target.value)} placeholder='Paste the full service-account JSON key here: { "type": "service_account", "project_id": "...", "client_email": "...", "private_key": "..." }'
+                  rows={5} className="search-in" style={{ width:"100%", resize:"vertical", padding:"12px 14px", borderRadius:"var(--r-md)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12, fontFamily:"var(--mono)", color:"var(--ink)", outline:"none" }} />
+                <div style={{ display:"flex", justifyContent:"flex-end" }}>
+                  <NeoButton kind="primary" icon={busy==="connect"?undefined:"link"} disabled={busy==="connect"} onClick={connect}>{busy==="connect"&&<Icon name="cog" size={16} className="audit-spin" />}Connect</NeoButton>
+                </div>
+              </div>
+            )}
           </div>
         </SoftCard>
       )}
@@ -3158,45 +3202,18 @@ function ChatScreen({ ctx }) {
 /* ---------------- AI Assistant (floating chatbot) ---------------- */
 function Assistant({ ctx, open, setOpen }) {
   const s = ctx.site;
-  const API = window.SentinelAPI;
-  const [msgs,setMsgs] = useState([]);     // [{role:'user'|'assistant', text}]
-  const [history,setHistory] = useState([]); // raw API messages for context
+  // Use the shared streaming chat hook (SSE) — same as the full chat screen — so
+  // the floating assistant shows progressive output and survives proxy timeouts
+  // instead of sitting on a blocking request that can drop with "Failed to fetch".
+  const { msgs, busy, send:sendChat, reset } = useChat(s.id);
   const [input,setInput] = useState("");
-  const [busy,setBusy] = useState(false);
-  const [listening,setListening] = useState(false);
   const bodyRef = useRef(null);
-  const recogRef = useRef(null);
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const voice = useVoice(setInput, ()=>input);
+  const listening = voice.listening;
+  const toggleMic = ()=>voice.toggle(ctx.toast);
   useEffect(()=>{ if(bodyRef.current) bodyRef.current.scrollTop=bodyRef.current.scrollHeight; },[msgs,busy]);
-  useEffect(()=>{ setMsgs([]); setHistory([]); },[s.id]);
 
-  // Voice input via the Web Speech API (browser-native, no deps).
-  const toggleMic = ()=>{
-    if(!SR){ ctx.toast("Voice input needs Chrome/Edge (Web Speech API)","gold"); return; }
-    if(listening){ try{ recogRef.current && recogRef.current.stop(); }catch(e){} return; }
-    const rec = new SR();
-    rec.lang = "en-US"; rec.interimResults = true; rec.continuous = false;
-    let base = input ? input + " " : "";
-    rec.onresult = (e)=>{
-      let txt = "";
-      for(let i=e.resultIndex;i<e.results.length;i++) txt += e.results[i][0].transcript;
-      setInput(base + txt);
-    };
-    rec.onerror = (e)=>{ setListening(false); if(e.error!=="aborted"&&e.error!=="no-speech") ctx.toast("Mic: "+e.error,"clay"); };
-    rec.onend = ()=>setListening(false);
-    recogRef.current = rec;
-    setListening(true); rec.start();
-  };
-
-  const send = (text)=>{
-    const t=(text||input).trim(); if(!t||busy) return;
-    const nd=[...msgs,{role:"user",text:t}];
-    setMsgs(nd); setInput(""); setBusy(true);
-    API.chat({ siteId:s.id, text:t, apiHistory:history, displayMessages:nd }).then(r=>{
-      setMsgs(m=>[...m,{role:"assistant",text:r.reply||"(no response)"}]);
-      if(r.messages) setHistory(r.messages);
-    }).catch(e=>setMsgs(m=>[...m,{role:"assistant",text:"⚠️ "+e.message}])).finally(()=>setBusy(false));
-  };
+  const send = (text)=>{ const t=(text||input).trim(); if(!t||busy) return; sendChat(t); setInput(""); };
   const quick = [
     "Extract keywords from a URL…",
     "Write an SEO article about…",
@@ -3221,7 +3238,7 @@ function Assistant({ ctx, open, setOpen }) {
             <div style={{ width:36, height:36, borderRadius:11, background:"linear-gradient(135deg,var(--t-500),var(--t-700))", color:"#F3EFE4", display:"grid", placeItems:"center", boxShadow:"var(--neo-sm)" }}><Icon name="sparkles" size={18} /></div>
             <div style={{ flex:1 }}><div style={{ fontSize:14.5, fontWeight:800 }}>SEO Assistant</div><div style={{ fontSize:11.5, color:"var(--muted)" }}>scoped to {s.name}</div></div>
             <button onClick={()=>{ setOpen(false); ctx.goto("chat"); }} className="neo-btn tip" data-tip="Open full chat" style={{ width:32, height:32, borderRadius:9, background:"var(--bg)", boxShadow:"var(--neo-in)", display:"grid", placeItems:"center", color:"var(--muted)" }}><Icon name="upload" size={15} /></button>
-            <button onClick={()=>{ setMsgs([]); setHistory([]); }} className="neo-btn tip" data-tip="New chat" style={{ width:32, height:32, borderRadius:9, background:"var(--bg)", boxShadow:"var(--neo-in)", display:"grid", placeItems:"center", color:"var(--muted)" }}><Icon name="edit" size={15} /></button>
+            <button onClick={reset} className="neo-btn tip" data-tip="New chat" style={{ width:32, height:32, borderRadius:9, background:"var(--bg)", boxShadow:"var(--neo-in)", display:"grid", placeItems:"center", color:"var(--muted)" }}><Icon name="edit" size={15} /></button>
           </div>
           {/* messages */}
           <div ref={bodyRef} className="scroll" style={{ flex:1, padding:"16px 16px 8px", display:"flex", flexDirection:"column", gap:12 }}>

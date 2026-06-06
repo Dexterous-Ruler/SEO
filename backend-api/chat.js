@@ -30,6 +30,40 @@ function key() {
   return k;
 }
 
+// Resilient Anthropic call: bounded by a timeout (so a stuck upstream can't hang
+// the request until a proxy kills it → "Failed to fetch") and retried on the
+// transient statuses Anthropic returns under load (429 rate-limit, 529 overloaded,
+// 5xx). For stream:true we only guard the connection (headers); the caller then
+// reads the body. Returns the raw Response.
+async function anthropicFetch(payload, { stream = false, timeoutMs = 90000, retries = 2 } = {}) {
+  const TRANSIENT = new Set([429, 500, 502, 503, 529]);
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(API, {
+        method: 'POST',
+        headers: { 'x-api-key': key(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: JSON.stringify(stream ? { ...payload, stream: true } : payload),
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (TRANSIENT.has(res.status) && attempt < retries) {
+        await new Promise((r) => setTimeout(r, 700 * Math.pow(2, attempt)));
+        continue;
+      }
+      return res;
+    } catch (e) {
+      clearTimeout(timer);
+      lastErr = e;
+      if (attempt < retries) { await new Promise((r) => setTimeout(r, 700 * Math.pow(2, attempt))); continue; }
+      throw new Error(e.name === 'AbortError' ? `Claude request timed out after ${Math.round(timeoutMs / 1000)}s — please retry` : e.message);
+    }
+  }
+  throw lastErr || new Error('Claude request failed');
+}
+
 async function sb(path) {
   const res = await fetch(`${SB}/rest/v1/${path}`, { headers: { apikey: SRV, Authorization: 'Bearer ' + SRV } });
   if (!res.ok) return [];
@@ -268,11 +302,7 @@ export async function chat({ messages = [], userText, images = [], siteId, siteC
 
   let guard = 0;
   while (guard++ < 8) {
-    const res = await fetch(API, {
-      method: 'POST',
-      headers: { 'x-api-key': key(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: MODEL, max_tokens: 3500, system, tools: TOOLS, messages: convo }),
-    });
+    const res = await anthropicFetch({ model: MODEL, max_tokens: 3500, system, tools: TOOLS, messages: convo });
     const data = await res.json();
     if (!res.ok) throw new Error(`Claude chat ${res.status}: ${data.error?.message || ''}`);
 
@@ -297,14 +327,10 @@ export async function chat({ messages = [], userText, images = [], siteId, siteC
 // Generate a short, smart conversation title from the first exchange.
 export async function generateTitle(userText, assistantText) {
   try {
-    const res = await fetch(API, {
-      method: 'POST',
-      headers: { 'x-api-key': key(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: MODEL, max_tokens: 24, temperature: 0.3,
-        messages: [{ role: 'user', content: `Write a 3-5 word title (no quotes, Title Case) summarizing this chat:\nUser: ${(userText || '').slice(0, 300)}\nAssistant: ${(assistantText || '').slice(0, 300)}\n\nTitle only:` }],
-      }),
-    });
+    const res = await anthropicFetch({
+      model: MODEL, max_tokens: 24, temperature: 0.3,
+      messages: [{ role: 'user', content: `Write a 3-5 word title (no quotes, Title Case) summarizing this chat:\nUser: ${(userText || '').slice(0, 300)}\nAssistant: ${(assistantText || '').slice(0, 300)}\n\nTitle only:` }],
+    }, { timeoutMs: 20000, retries: 1 });
     const data = await res.json();
     if (!res.ok) return null;
     const t = (data.content || []).map((b) => b.text || '').join('').trim().replace(/^["']|["']$/g, '').replace(/\.$/, '');
@@ -329,11 +355,7 @@ export async function chatStream({ messages = [], userText, images = [], siteId,
   const toolsUsed = [];
   let guard = 0;
   while (guard++ < 8) {
-    const res = await fetch(API, {
-      method: 'POST',
-      headers: { 'x-api-key': key(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: MODEL, max_tokens: 3500, system, tools: TOOLS, messages: convo, stream: true }),
-    });
+    const res = await anthropicFetch({ model: MODEL, max_tokens: 3500, system, tools: TOOLS, messages: convo }, { stream: true });
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(`Claude stream ${res.status}: ${e.error?.message || ''}`); }
 
     // Parse the SSE stream, reconstructing content blocks + emitting text deltas.

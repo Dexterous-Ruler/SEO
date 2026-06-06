@@ -25,26 +25,45 @@ function key() {
   return k;
 }
 
+// Resilient Anthropic POST: bounded by a timeout (a stuck upstream otherwise
+// hangs the request until a proxy kills it) and retried on the transient statuses
+// Anthropic returns under load (429 rate-limit, 529 overloaded, 5xx). This is why
+// the weekly briefing and other one-shot generations occasionally failed.
+async function anthropicPost(payload, { timeoutMs = 90000, retries = 2 } = {}) {
+  const TRANSIENT = new Set([429, 500, 502, 503, 529]);
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(API, {
+        method: 'POST',
+        headers: { 'x-api-key': key(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (TRANSIENT.has(res.status) && attempt < retries) {
+        await new Promise((r) => setTimeout(r, 700 * Math.pow(2, attempt)));
+        continue;
+      }
+      return res;
+    } catch (e) {
+      clearTimeout(timer);
+      lastErr = e;
+      if (attempt < retries) { await new Promise((r) => setTimeout(r, 700 * Math.pow(2, attempt))); continue; }
+      throw new Error(e.name === 'AbortError' ? `Claude request timed out after ${Math.round(timeoutMs / 1000)}s — please retry` : e.message);
+    }
+  }
+  throw lastErr || new Error('Claude request failed');
+}
+
 // Low-level call. Returns the assistant text. `promptKey` lets per-prompt admin
 // model/temperature overrides apply; explicit model/temperature still win.
 export async function complete({ system, messages, maxTokens = 1024, temperature, model, promptKey }) {
   const m = model || (promptKey ? modelFor(promptKey) : null) || MODEL;
   const t = temperature != null ? temperature : (promptKey && tempFor(promptKey) != null ? tempFor(promptKey) : 0.3);
-  const res = await fetch(API, {
-    method: 'POST',
-    headers: {
-      'x-api-key': key(),
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: m,
-      max_tokens: maxTokens,
-      temperature: t,
-      system,
-      messages,
-    }),
-  });
+  const res = await anthropicPost({ model: m, max_tokens: maxTokens, temperature: t, system, messages });
   const data = await res.json();
   if (!res.ok) throw new Error(`Claude ${res.status}: ${data.error?.message || JSON.stringify(data).slice(0, 200)}`);
   return (data.content || []).map((b) => b.text || '').join('').trim();
