@@ -6,11 +6,12 @@ FROM node:20-slim
 
 WORKDIR /app
 
-# Install only the runtime dependency (dotenv). Stripping the rest keeps the
-# image small and the build fast (no native sharp build, no lighthouse download).
+# Install the runtime deps only: dotenv + sharp (image→WebP compression).
+# sharp ships prebuilt linux-x64 binaries, so no native build is needed.
+# lighthouse/chrome/chalk/etc. are CLI-only and excluded → small, fast image.
 COPY package.json ./
 RUN npm pkg delete dependencies devDependencies scripts \
- && npm install dotenv@^16.4.5 --no-audit --no-fund --omit=dev
+ && npm install dotenv@^16.4.5 sharp@^0.33.5 --no-audit --no-fund --omit=dev
 
 # App code (server + shared engine libs + static console).
 COPY backend-api ./backend-api

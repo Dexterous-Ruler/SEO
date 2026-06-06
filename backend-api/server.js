@@ -40,6 +40,7 @@ import { generatePageSchema } from './schema-gen.js';
 import { generateCssFixes } from './css-fixes.js';
 import { findOpportunities } from './content-opportunities.js';
 import * as research from './research.js';
+import * as imageOpt from './image-optimize.js';
 import * as prompts from './prompts.js';
 import * as perplexity from './perplexity.js';
 
@@ -984,6 +985,29 @@ const routes = {
     const { buildFaqPage } = await import('./schema-gen.js');
     const faqSchema = buildFaqPage(url, facts.faqs);
     return { url, title, ...facts, grounded, faqSchema: faqSchema ? { '@context': 'https://schema.org', ...faqSchema } : null };
+  },
+
+  // Image optimization: scan the media library for heavy raster images.
+  'POST /media-scan': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    try { return await imageOpt.scanMedia(body.siteId, { minKB: body.minKB || 80, limit: body.limit || 60 }); }
+    catch (e) { return { error: 'Media scan failed: ' + e.message }; }
+  },
+  // Compress images to WebP. apply=false previews savings; apply=true uploads.
+  'POST /media-optimize': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    try { return await imageOpt.optimizeImages(body.siteId, { ids: body.ids || null, quality: body.quality || 80, max: body.max || 8, apply: !!body.apply }); }
+    catch (e) { return { error: 'Image optimization failed: ' + e.message }; }
+  },
+  // Speed test: run PageSpeed (median-of-N) on a URL for mobile + desktop.
+  'POST /speed-test': async (body) => {
+    const url = body.url;
+    if (!url) return { error: 'A URL is required.' };
+    const strat = body.strategy || 'mobile';
+    try {
+      const r = await runPsiMedian(url, { strategy: strat, n: body.n || 2, key: process.env.PSI_KEY });
+      return { url, strategy: strat, scores: r.scores, scoresIqr: r.scoresIqr, cwv: r.cwv, field: r.field, runs: r.runs };
+    } catch (e) { return { error: 'Speed test failed: ' + e.message }; }
   },
 
   // modern-css fix generator: turn audit findings into real, reviewable CSS.

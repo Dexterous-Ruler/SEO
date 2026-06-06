@@ -1383,15 +1383,21 @@ function OptimizeScreen({ ctx }) {
   const [css,setCss] = useState(null);
   const [pageUrl,setPageUrl] = useState("");
   const [pageType,setPageType] = useState("page");
-  useEffect(()=>{ setLinks(null); setSchema(null); setFacts(null); setCss(null); setErr(null); setPageUrl((s._rawUrl||s.url||"").replace(/\/$/,"")+"/"); },[s.id]);
+  const [media,setMedia] = useState(null);
+  const [speed,setSpeed] = useState(null);
+  const [speedStrat,setSpeedStrat] = useState("mobile");
+  useEffect(()=>{ setLinks(null); setSchema(null); setFacts(null); setCss(null); setMedia(null); setSpeed(null); setErr(null); setPageUrl((s._rawUrl||s.url||"").replace(/\/$/,"")+"/"); },[s.id]);
   const copy = (t)=>{ try{ navigator.clipboard.writeText(t); ctx.toast("Copied to clipboard","teal"); }catch(e){ ctx.toast("Copy failed","gold"); } };
 
   const findLinks = ()=>{ setBusy("links"); setErr(null); API.internalLinks(s.id,{maxSources:8}).then(r=>{ if(r.error){setErr(r.error);return;} setLinks(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const genSchema = ()=>{ if(!pageUrl){ctx.toast("Enter a page URL","gold");return;} setBusy("schema"); setErr(null); API.generateSchema(s.id,{url:pageUrl,type:pageType,title:""}).then(r=>{ if(r.error){setErr(r.error);return;} setSchema(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const genFacts = ()=>{ if(!pageUrl){ctx.toast("Enter a page URL","gold");return;} setBusy("facts"); setErr(null); API.aiSeoFacts(s.id,pageUrl).then(r=>{ if(r.error){setErr(r.error);return;} setFacts(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const genCss = ()=>{ setBusy("css"); setErr(null); API.generateCss(s.id).then(r=>{ if(r.error){setErr(r.error);return;} setCss(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
+  const scanMedia = ()=>{ setBusy("scan"); setErr(null); API.mediaScan(s.id).then(r=>{ if(r.error){setErr(r.error);return;} setMedia(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
+  const optimizeMedia = (apply)=>{ setBusy(apply?"apply":"preview"); API.mediaOptimize(s.id,{apply,max:8}).then(r=>{ if(r.error){ctx.toast("Images: "+r.error,"clay");return;} ctx.toast((apply?"Optimized + uploaded ":"Preview: ")+r.processed+" image(s) · "+r.savedKB+" KB saved","teal"); setMedia(m=>({...(m||{}),lastRun:r})); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
+  const runSpeed = ()=>{ if(!pageUrl){ctx.toast("Enter a URL","gold");return;} setBusy("speed"); setErr(null); API.speedTest(pageUrl,speedStrat).then(r=>{ if(r.error){setErr(r.error);return;} setSpeed(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
 
-  const TABS=[["links","Internal Links","link"],["schema","Schema","layers"],["facts","AI-SEO Facts","sparkles"],["css","CSS Fixes","bolt"]];
+  const TABS=[["links","Internal Links","link"],["schema","Schema","layers"],["facts","AI-SEO Facts","sparkles"],["css","CSS Fixes","bolt"],["images","Images","image"],["speed","Speed Test","gauge"]];
   const urlBar = (onGo,label,key)=>(
     <div style={{ display:"flex", gap:8, marginBottom:14, flexWrap:"wrap" }}>
       <input value={pageUrl} onChange={e=>setPageUrl(e.target.value)} placeholder="https://your-site.com/page/" style={{ flex:1, minWidth:240, padding:"10px 13px", borderRadius:"var(--r-md)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, fontFamily:"var(--mono)", color:"var(--ink)", outline:"none" }} />
@@ -1495,6 +1501,85 @@ function OptimizeScreen({ ctx }) {
                 </div>
               )}
               {!css && busy!=="css" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Generate reviewable CSS from your latest audit's fixable findings.</div>}
+            </div>
+          )}
+
+          {tab==="images" && (
+            <div>
+              <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:14, flexWrap:"wrap" }}>
+                <div style={{ flex:1, minWidth:220 }}>
+                  <div style={{ fontSize:13.5, fontWeight:700 }}>Image compression → WebP</div>
+                  <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Scans your media library for heavy JPEG/PNG images and converts them to WebP (≈60–80% smaller) to lift LCP &amp; Performance. Preview is safe; "Optimize" uploads WebP versions.</div>
+                </div>
+                <NeoButton kind="primary" size="sm" icon={busy==="scan"?undefined:"image"} disabled={busy==="scan"} onClick={scanMedia}>{busy==="scan"&&<Icon name="cog" size={15} className="audit-spin" />}{busy==="scan"?"Scanning…":"Scan media"}</NeoButton>
+              </div>
+              {media && media.images && (
+                <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14 }}>
+                    <PatternCard icon="image" tone="gold" value={media.heavyCount} title="Heavy images" sub={"of "+media.totalImages+" total"} />
+                    <PatternCard icon="layers" tone="plum" value={(media.totalHeavyKB/1024).toFixed(1)+" MB"} title="Current weight" sub="raster JPEG/PNG" />
+                    <PatternCard icon="bolt" tone="teal" value={"~"+(media.estSavingKB/1024).toFixed(1)+" MB"} title="Est. saving" sub="≈65% smaller as WebP" />
+                  </div>
+                  <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                    <NeoButton kind="soft" size="sm" icon={busy==="preview"?undefined:"eye"} disabled={busy==="preview"} onClick={()=>optimizeMedia(false)}>{busy==="preview"&&<Icon name="cog" size={14} className="audit-spin" />}Preview top 8 (no write)</NeoButton>
+                    <NeoButton kind="primary" size="sm" icon={busy==="apply"?undefined:"upload"} disabled={busy==="apply"} onClick={()=>optimizeMedia(true)}>{busy==="apply"&&<Icon name="cog" size={14} className="audit-spin" />}Optimize &amp; upload top 8</NeoButton>
+                  </div>
+                  {media.lastRun && (
+                    <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+                      <div style={{ fontSize:12.5, fontWeight:700, color:"var(--ink-2)" }}>{media.lastRun.applied?"Optimized":"Preview"} · {media.lastRun.savedKB} KB saved across {media.lastRun.processed} image(s)</div>
+                      {(media.lastRun.results||[]).map((r,i)=>(
+                        <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12 }}>
+                          <span style={{ flex:1, fontFamily:"var(--mono)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{r.filename||r.url||r.id}</span>
+                          {r.error?<Chip tone="clay" size="sm">err</Chip>:r.skip?<Chip tone="gray" size="sm">{r.skip}</Chip>:<><span style={{ color:"var(--muted)" }}>{r.fromKB}→{r.toKB} KB</span><Chip tone="teal" size="sm">−{r.pct}%</Chip></>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                    {media.images.slice(0,12).map((im,i)=>(
+                      <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 11px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12 }}>
+                        <a href={im.url} target="_blank" style={{ flex:1, fontFamily:"var(--mono)", color:"var(--ink)", textDecoration:"none", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{(im.url||"").split("/").pop()}</a>
+                        <span style={{ color:"var(--muted)" }}>{im.w}×{im.h}</span>
+                        <Chip tone={im.sizeKB>500?"clay":"gold"} size="sm">{im.sizeKB} KB</Chip>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--faint)", lineHeight:1.5 }}>Uploads WebP copies to your media library. Swapping references in existing pages (esp. Elementor) is a separate manual step for safety.</div>
+                </div>
+              )}
+              {!media && busy!=="scan" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Scan your media library to find heavy images and convert them to WebP.</div>}
+            </div>
+          )}
+
+          {tab==="speed" && (
+            <div>
+              <div style={{ fontSize:12, color:"var(--muted)", marginBottom:12 }}>Run a live PageSpeed test (median of 2 runs) for any URL. Shows the four Lighthouse scores + Core Web Vitals.</div>
+              <div style={{ display:"flex", gap:8, marginBottom:14, flexWrap:"wrap" }}>
+                <input value={pageUrl} onChange={e=>setPageUrl(e.target.value)} placeholder="https://your-site.com/page/" style={{ flex:1, minWidth:240, padding:"10px 13px", borderRadius:"var(--r-md)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, fontFamily:"var(--mono)", color:"var(--ink)", outline:"none" }} />
+                <div style={{ display:"flex", gap:3, padding:3, background:"var(--bg)", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-in)" }}>
+                  {[["mobile","Mobile"],["desktop","Desktop"]].map(([v,l])=>(<button key={v} onClick={()=>setSpeedStrat(v)} style={{ padding:"6px 13px", fontSize:12.5, fontWeight:700, borderRadius:99, background:speedStrat===v?"var(--surface)":"transparent", color:speedStrat===v?"var(--t-700)":"var(--muted)", boxShadow:speedStrat===v?"var(--neo-sm)":"none" }}>{l}</button>))}
+                </div>
+                <NeoButton kind="primary" size="sm" icon={busy==="speed"?undefined:"gauge"} disabled={busy==="speed"} onClick={runSpeed}>{busy==="speed"&&<Icon name="cog" size={15} className="audit-spin" />}{busy==="speed"?"Testing…":"Run speed test"}</NeoButton>
+              </div>
+              {speed && speed.scores && (
+                <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:14 }}>
+                    {[["Performance","performance"],["Accessibility","accessibility"],["Best Pr.","bestPractices"],["SEO","seo"]].map(([l,k])=>(
+                      <div key={k} style={{ padding:"14px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", textAlign:"center" }}>
+                        <div style={{ fontSize:24, fontWeight:800, color:tealForScore(speed.scores[k]||0) }}>{speed.scores[k]??"—"}</div>
+                        <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:2 }}>{l}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:10 }}>
+                    {[["LCP",speed.cwv.lcp!=null?(speed.cwv.lcp/1000).toFixed(1)+"s":"—"],["INP/TBT",speed.cwv.tbt!=null?Math.round(speed.cwv.tbt)+"ms":"—"],["CLS",speed.cwv.cls!=null?speed.cwv.cls.toFixed(2):"—"],["FCP",speed.cwv.fcp!=null?(speed.cwv.fcp/1000).toFixed(1)+"s":"—"],["TBT",speed.cwv.tbt!=null?Math.round(speed.cwv.tbt)+"ms":"—"]].map(([l,v])=>(
+                      <div key={l} style={{ padding:"11px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", textAlign:"center" }}><div style={{ fontSize:15, fontWeight:800 }}>{v}</div><div style={{ fontSize:10.5, color:"var(--muted)" }}>{l}</div></div>
+                    ))}
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--faint)" }}>{speed.strategy} · median of {speed.runs} run(s){speed.field?" · CrUX field data available":""}. Improve these with the Images tab (LCP) and CSS Fixes tab (CLS/INP).</div>
+                </div>
+              )}
+              {!speed && busy!=="speed" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Enter a URL and run a live PageSpeed test.</div>}
             </div>
           )}
         </SoftCard>
