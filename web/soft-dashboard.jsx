@@ -1,29 +1,120 @@
 /* ===========================================================
    Sentinel — Soft-UI dashboard, collapsible sidebar, app
    =========================================================== */
-const SNAV = [
-  { k:"overview", label:"Dashboard", icon:"grid" },
-  { k:"exec",     label:"Executive Scorecard", icon:"flag" },
-  { k:"sites",    label:"Sites",     icon:"globe" },
-  { k:"audits",   label:"Audits",    icon:"radar" },
-  { k:"history",  label:"Audit History", icon:"trend" },
-  { k:"plan",     label:"Content Plan", icon:"sparkles" },
-  { k:"content",  label:"Content Intel", icon:"sparkles" },
-  { k:"optimize", label:"On-Page Fixes", icon:"bolt" },
-  { k:"gsc",      label:"Search Console", icon:"search" },
-  { k:"semrush",  label:"DataForSEO", icon:"bolt" },
-  { k:"airtable", label:"Airtable Sync", icon:"layers" },
-  { k:"review",   label:"Review Queue", icon:"list", badge:true },
-  { k:"chat",     label:"AI Chat", icon:"sparkles" },
-  { k:"activity", label:"Activity",  icon:"clock" },
-  { k:"geo",      label:"AI Visibility", icon:"globe" },
-  { k:"admin",    label:"Admin Panel", icon:"gauge" },
-  { k:"settings", label:"Settings",  icon:"cog" },
+/* Sidebar grouped into clean, collapsible sections (sub-sections = the items). */
+const SNAV_GROUPS = [
+  { group:"Overview", items:[
+    { k:"overview", label:"Dashboard", icon:"grid" },
+    { k:"exec",     label:"Executive Scorecard", icon:"flag" },
+    { k:"activity", label:"Activity",  icon:"clock" },
+  ]},
+  { group:"Audit & Fix", items:[
+    { k:"audits",   label:"Audits",    icon:"radar" },
+    { k:"optimize", label:"On-Page Fixes", icon:"bolt" },
+    { k:"review",   label:"Review Queue", icon:"list", badge:true },
+    { k:"history",  label:"Audit History", icon:"trend" },
+  ]},
+  { group:"Content & Growth", items:[
+    { k:"plan",     label:"Content Plan", icon:"sparkles" },
+    { k:"content",  label:"Content Intel", icon:"sparkles" },
+    { k:"geo",      label:"AI Visibility", icon:"globe" },
+  ]},
+  { group:"Data Sources", items:[
+    { k:"gsc",      label:"Search Console", icon:"search" },
+    { k:"semrush",  label:"DataForSEO", icon:"bolt" },
+    { k:"airtable", label:"Airtable Sync", icon:"layers" },
+  ]},
+  { group:"Assistant", items:[
+    { k:"chat",     label:"AI Chat", icon:"sparkles" },
+  ]},
+  { group:"Manage", items:[
+    { k:"sites",    label:"Sites",     icon:"globe" },
+    { k:"admin",    label:"Admin Panel", icon:"gauge" },
+    { k:"settings", label:"Settings",  icon:"cog" },
+  ]},
 ];
+// Flat list kept for any code that needs label/icon lookup by screen key.
+const SNAV = SNAV_GROUPS.flatMap(g=>g.items);
+const SNAV_BY_KEY = Object.fromEntries(SNAV.map(it=>[it.k, it]));
+
+/* ---- Universal command index: every screen AND sub-tool, with synonyms, so
+   the search bar can jump straight to any function (e.g. "speed" → Speed Test).
+   `tab` deep-links into a screen's sub-tab via ctx.goto(screen, tab). ---- */
+const NAV_INDEX = [
+  { title:"Dashboard", screen:"overview", icon:"grid", kw:"home overview stats site health fix queue summary scores" },
+  { title:"Executive Scorecard", screen:"exec", icon:"flag", kw:"executive scorecard composite score organic value weekly briefing do next rice quick wins board report narrative" },
+  { title:"Activity Log", screen:"activity", icon:"clock", kw:"activity log audit trail history writes approvals rollbacks failures export changes" },
+  { title:"Audits", screen:"audits", icon:"radar", kw:"audit findings road to 100 propose fix ranked rice worklist lighthouse issues scan" },
+  { title:"On-Page Fixes", screen:"optimize", icon:"bolt", kw:"on page fixes optimize tools" },
+  { title:"Internal Links", screen:"optimize", tab:"links", icon:"link", kw:"internal links link building anchor text structure orphan" },
+  { title:"Schema Markup", screen:"optimize", tab:"schema", icon:"layers", kw:"schema structured data json-ld rich results markup generate" },
+  { title:"AI-SEO Facts", screen:"optimize", tab:"facts", icon:"sparkles", kw:"ai seo facts citable faq faqpage extract llm citation" },
+  { title:"CSS Fixes", screen:"optimize", tab:"css", icon:"bolt", kw:"css core web vitals render blocking unused styles generate" },
+  { title:"Images / WebP", screen:"optimize", tab:"images", icon:"image", kw:"images webp avif scan media compress optimization lazy load" },
+  { title:"Speed Test", screen:"optimize", tab:"speed", icon:"gauge", kw:"speed test pagespeed lighthouse performance lcp inp cls mobile desktop psi" },
+  { title:"Review Queue", screen:"review", icon:"list", kw:"review queue proposals approve reject edit diff verify pending changes" },
+  { title:"Audit History", screen:"history", icon:"trend", kw:"audit history past audits score trend regression timeline" },
+  { title:"Content Plan", screen:"plan", icon:"sparkles", kw:"content plan trending topics find opportunities keyword clusters gaps calendar ideas" },
+  { title:"Content Intel", screen:"content", icon:"sparkles", kw:"content intelligence analyze content topic clusters suggestions" },
+  { title:"AI Visibility (GEO)", screen:"geo", icon:"globe", kw:"ai visibility geo generative share of voice llms.txt ai robots chatgpt claude gemini perplexity citation competitors" },
+  { title:"Search Console", screen:"gsc", icon:"search", kw:"search console gsc google clicks impressions ctr position connect google properties first party" },
+  { title:"Top Queries", screen:"gsc", tab:"queries", icon:"search", kw:"top queries search terms gsc keywords" },
+  { title:"Top Pages", screen:"gsc", tab:"pages", icon:"search", kw:"top pages gsc landing" },
+  { title:"Quick Wins (positions 11–20)", screen:"gsc", tab:"striking", icon:"arrowUp", kw:"quick wins striking distance page 2 page two gsc near page 1" },
+  { title:"Content Decay", screen:"gsc", tab:"decay", icon:"trend", kw:"content decay declining pages clicks lost refresh stale traffic drop" },
+  { title:"GSC Anomalies", screen:"gsc", tab:"anomalies", icon:"alert", kw:"anomalies traffic drop ranking slip google update detection" },
+  { title:"Indexing & Drops", screen:"gsc", tab:"indexing", icon:"layers", kw:"indexing index health submit url deindex coverage ranking drops" },
+  { title:"DataForSEO", screen:"semrush", icon:"bolt", kw:"dataforseo semrush keyword data research" },
+  { title:"Top Keywords", screen:"semrush", tab:"keywords", icon:"bolt", kw:"top keywords organic ranking search volume" },
+  { title:"Traffic Value", screen:"semrush", tab:"value", icon:"flag", kw:"traffic value money roi revenue cpc estimated clicks worth" },
+  { title:"Striking Distance", screen:"semrush", tab:"striking", icon:"arrowUp", kw:"striking distance page 2 quick wins keywords almost ranking" },
+  { title:"Competitors", screen:"semrush", tab:"competitors", icon:"globe", kw:"competitors rivals domains track" },
+  { title:"Keyword Gap", screen:"semrush", tab:"gap", icon:"layers", kw:"keyword gap competitor gaps opportunities missing keywords" },
+  { title:"Airtable Sync", screen:"airtable", icon:"layers", kw:"airtable sync export base table connect" },
+  { title:"AI Chat", screen:"chat", icon:"sparkles", kw:"ai chat strategist assistant ask question advice" },
+  { title:"Admin Panel", screen:"admin", icon:"gauge", kw:"admin integrations system api keys connected anthropic supabase status" },
+  { title:"AI Prompts", screen:"admin", tab:"prompts", icon:"doc", kw:"ai prompts edit prompt diff history test save template" },
+  { title:"Sites", screen:"sites", icon:"globe", kw:"sites connect site wordpress account plugins theme run audit add site" },
+  { title:"Settings", screen:"settings", icon:"cog", kw:"settings capabilities toggles dry run staging write mode credentials app password safety kill switch" },
+];
+// Token-AND substring match over title+keywords, ranked by title relevance.
+function searchCommands(q){
+  const s=(q||"").trim().toLowerCase(); if(!s) return [];
+  const toks=s.split(/\s+/).filter(Boolean);
+  const out=[];
+  for(const c of NAV_INDEX){
+    const titleL=c.title.toLowerCase(); const hay=titleL+" "+(c.kw||"").toLowerCase();
+    let score=0, ok=true;
+    for(const t of toks){ if(!hay.includes(t)){ ok=false; break; } if(titleL.startsWith(t)) score+=3; else if(titleL.includes(t)) score+=2; else score+=1; }
+    if(ok) out.push({ c, score });
+  }
+  return out.sort((a,b)=>b.score-a.score).slice(0,8).map(x=>x.c);
+}
 
 /* ---------------- Collapsible Sidebar ---------------- */
 function Sidebar({ ctx, collapsed, setCollapsed }) {
   const W = collapsed ? 84 : 256;
+  // Collapsible section state (default: all open), persisted.
+  const [openGroups,setOpenGroups] = useState(()=>{ try{ return JSON.parse(localStorage.getItem("sentinel-navgroups")||"{}"); }catch(e){ return {}; } });
+  const isOpen=(g)=> openGroups[g]!==false;
+  const toggleGroup=(g)=>setOpenGroups(o=>{ const n=Object.assign({},o,{[g]: o[g]===false}); try{localStorage.setItem("sentinel-navgroups",JSON.stringify(n));}catch(e){} return n; });
+  const NavItem=(it)=>{
+    const active = ctx.screen===it.k;
+    const badge = it.badge ? ctx.proposals.filter(p=>p.status==="proposed").length : 0;
+    return (
+      <button key={it.k} onClick={()=>ctx.goto(it.k)} className={"nav-item "+(collapsed?"tip":"")} data-tip={it.label}
+        style={{ display:"flex", alignItems:"center", gap:13, justifyContent: collapsed?"center":"flex-start",
+          padding: collapsed?"12px":"11px 13px", borderRadius:14, position:"relative",
+          background: active?"var(--surface)":"transparent",
+          boxShadow: active?"var(--neo-sm)":"none",
+          color: active?"var(--t-700)":"var(--ink-2)", fontWeight: active?700:600, fontSize:14 }}>
+        <Icon name={it.icon} size={21} sw={active?2.2:1.9} />
+        {!collapsed && <span style={{ flex:1, textAlign:"left" }}>{it.label}</span>}
+        {!collapsed && badge>0 && <span style={{ fontSize:11, fontWeight:800, color:"#F3EFE4", background:"var(--t-600)", borderRadius:99, padding:"1px 7px", minWidth:20, textAlign:"center" }}>{badge}</span>}
+        {collapsed && badge>0 && <span style={{ position:"absolute", top:8, right:12, width:8, height:8, borderRadius:99, background:"var(--gold)" }} />}
+      </button>
+    );
+  };
   return (
     <aside style={{ width:W, flexShrink:0, padding: collapsed?"22px 14px":"24px 18px",
       display:"flex", flexDirection:"column", transition:"width .28s cubic-bezier(.4,.1,.2,1), padding .28s",
@@ -49,24 +140,23 @@ function Sidebar({ ctx, collapsed, setCollapsed }) {
         </button>
       </div>
 
-      {/* nav — scrollable so all items stay reachable on short screens */}
-      <nav className="scroll" style={{ flex:1, minHeight:0, overflowY:"auto", overflowX:"hidden", display:"flex", flexDirection:"column", gap:7, margin:"0 -6px", padding:"0 6px" }}>
-        {!collapsed && <div style={{ fontSize:10.5, fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--faint)", padding:"0 6px 6px" }}>Menu</div>}
-        {SNAV.map(it=>{
-          const active = ctx.screen===it.k;
-          const badge = it.badge ? ctx.proposals.filter(p=>p.status==="proposed").length : 0;
+      {/* nav — grouped into collapsible sections; scrollable on short screens */}
+      <nav className="scroll" style={{ flex:1, minHeight:0, overflowY:"auto", overflowX:"hidden", display:"flex", flexDirection:"column", gap: collapsed?7:2, margin:"0 -6px", padding:"0 6px" }}>
+        {SNAV_GROUPS.map((grp,gi)=>{
+          const open = collapsed ? true : isOpen(grp.group);
           return (
-            <button key={it.k} onClick={()=>ctx.goto(it.k)} className={"nav-item "+(collapsed?"tip":"")} data-tip={it.label}
-              style={{ display:"flex", alignItems:"center", gap:13, justifyContent: collapsed?"center":"flex-start",
-                padding: collapsed?"12px":"11px 13px", borderRadius:14, position:"relative",
-                background: active?"var(--surface)":"transparent",
-                boxShadow: active?"var(--neo-sm)":"none",
-                color: active?"var(--t-700)":"var(--ink-2)", fontWeight: active?700:600, fontSize:14 }}>
-              <Icon name={it.icon} size={21} sw={active?2.2:1.9} />
-              {!collapsed && <span style={{ flex:1, textAlign:"left" }}>{it.label}</span>}
-              {!collapsed && badge>0 && <span style={{ fontSize:11, fontWeight:800, color:"#F3EFE4", background:"var(--t-600)", borderRadius:99, padding:"1px 7px", minWidth:20, textAlign:"center" }}>{badge}</span>}
-              {collapsed && badge>0 && <span style={{ position:"absolute", top:8, right:12, width:8, height:8, borderRadius:99, background:"var(--gold)" }} />}
-            </button>
+            <div key={grp.group} style={{ display:"flex", flexDirection:"column", gap:5 }}>
+              {collapsed
+                ? (gi>0 && <div style={{ height:1, background:"var(--line-soft)", margin:"6px 12px" }} />)
+                : (
+                  <button onClick={()=>toggleGroup(grp.group)} className="nav-item"
+                    style={{ display:"flex", alignItems:"center", gap:6, padding:"11px 6px 5px", background:"transparent", boxShadow:"none", width:"100%" }}>
+                    <span style={{ flex:1, textAlign:"left", fontSize:10.5, fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--faint)" }}>{grp.group}</span>
+                    <Icon name={open?"chevD":"chevR"} size={13} style={{ color:"var(--faint)" }} />
+                  </button>
+                )}
+              {open && grp.items.map(it=>NavItem(it))}
+            </div>
           );
         })}
       </nav>
@@ -154,22 +244,38 @@ function SearchBox({ ctx }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const res = q.trim() ? window.SentinelHelpers.searchAll(q) : { findings:[], proposals:[], sites:[] };
-  const total = res.findings.length + res.proposals.length + res.sites.length;
+  const cmds = q.trim() ? searchCommands(q) : [];
+  const total = cmds.length + res.findings.length + res.proposals.length + res.sites.length;
   const go = (screen)=>{ setOpen(false); setQ(""); ctx.goto(screen); };
+  const goCmd = (c)=>{ setOpen(false); setQ(""); ctx.goto(c.screen, c.tab); };
   return (
-    <div style={{ position:"relative", width:260 }}>
+    <div style={{ position:"relative", width:300 }}>
       <Icon name="search" size={17} style={{ position:"absolute", left:15, top:12, color:"var(--faint)", zIndex:1 }} />
-      <input placeholder="Search findings, pages…" className="search-in" value={q}
+      <input placeholder="Search anything — pages, tools, findings…" className="search-in" value={q}
         onChange={e=>{ setQ(e.target.value); setOpen(true); }} onFocus={()=>setOpen(true)}
-        onKeyDown={e=>{ if(e.key==="Escape"){ setOpen(false); e.target.blur(); } }}
+        onKeyDown={e=>{ if(e.key==="Escape"){ setOpen(false); e.target.blur(); } else if(e.key==="Enter"){ if(cmds[0]){ goCmd(cmds[0]); e.target.blur(); } else if(res.sites[0]){ ctx.switchSite(res.sites[0].id); go("overview"); } } }}
         style={{ width:"100%", padding:"11px 14px 11px 42px", borderRadius:"var(--r-pill)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13.5, color:"var(--ink)", outline:"none" }} />
       {open && q.trim() && (
         <>
           <div onClick={()=>setOpen(false)} style={{ position:"fixed", inset:0, zIndex:40 }} />
-          <div className="scroll" style={{ position:"absolute", top:"calc(100% + 8px)", right:0, width:340, maxHeight:420, zIndex:50, padding:8,
+          <div className="scroll" style={{ position:"absolute", top:"calc(100% + 8px)", right:0, width:360, maxHeight:440, zIndex:50, padding:8,
             background:"var(--surface)", borderRadius:"var(--r-lg)", boxShadow:"var(--neo)", animation:"pop .16s both" }}>
             {total===0 && <div style={{ padding:"16px 12px", fontSize:13, color:"var(--muted)", textAlign:"center" }}>No matches for “{q}”.</div>}
-            {res.findings.length>0 && <div style={{ padding:"6px 10px 4px", fontSize:10, fontWeight:700, letterSpacing:".06em", textTransform:"uppercase", color:"var(--faint)" }}>Findings · {res.findings.length}</div>}
+            {cmds.length>0 && <div style={{ padding:"6px 10px 4px", fontSize:10, fontWeight:700, letterSpacing:".06em", textTransform:"uppercase", color:"var(--faint)" }}>Pages &amp; Tools · {cmds.length}</div>}
+            {cmds.map((c,i)=>{
+              const parent = c.tab ? (SNAV_BY_KEY[c.screen]||{}).label : null;
+              return (
+                <button key={c.title+i} className="nav-item" onClick={()=>goCmd(c)} style={{ width:"100%", textAlign:"left", display:"flex", gap:10, padding:"9px 10px", borderRadius:11, alignItems:"center" }}>
+                  <div style={{ width:28, height:28, borderRadius:9, background:"var(--t-50)", color:"var(--t-700)", display:"grid", placeItems:"center", flexShrink:0 }}><Icon name={c.icon} size={15} /></div>
+                  <div style={{ minWidth:0, flex:1 }}>
+                    <div style={{ fontSize:13, fontWeight:700, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{c.title}</div>
+                    {parent && <div style={{ fontSize:11, color:"var(--muted)" }}>{parent}</div>}
+                  </div>
+                  <Icon name="chevR" size={14} style={{ color:"var(--faint)", flexShrink:0 }} />
+                </button>
+              );
+            })}
+            {res.findings.length>0 && <div style={{ padding:"8px 10px 4px", fontSize:10, fontWeight:700, letterSpacing:".06em", textTransform:"uppercase", color:"var(--faint)" }}>Findings · {res.findings.length}</div>}
             {res.findings.slice(0,5).map(f=>(
               <button key={f.id} className="nav-item" onClick={()=>go("audits")} style={{ width:"100%", textAlign:"left", display:"flex", gap:9, padding:"9px 10px", borderRadius:11 }}>
                 <Icon name="flag" size={15} style={{ color:"var(--gold)", marginTop:2 }} />
@@ -999,6 +1105,7 @@ function AdminScreen({ ctx }) {
   const [cfg,setCfg] = useState({});          // key → {model, temperature} edits
   const [diffOpen,setDiffOpen] = useState("");
   const [tab,setTab] = useState("system");
+  useEffect(()=>{ if(ctx.navTab && ["system","prompts"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
   const [stat,setStat] = useState(null);
   const [statBusy,setStatBusy] = useState(false);
   const load = ()=>{ setBusy(true); setErr(null); API.promptsList().then(r=>{ if(r.error){setErr(r.error);return;} setData(r); setEdits({}); }).catch(e=>setErr(e.message)).finally(()=>setBusy(false)); };
@@ -1375,6 +1482,7 @@ function OptimizeScreen({ ctx }) {
   const API = window.SentinelAPI;
   const live = API && window.SENTINEL_LIVE;
   const [tab,setTab] = useState("links");
+  useEffect(()=>{ if(ctx.navTab && ["links","schema","facts","css","images","speed"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
   const [busy,setBusy] = useState("");
   const [err,setErr] = useState(null);
   const [links,setLinks] = useState(null);
@@ -2102,6 +2210,7 @@ function GscScreen({ ctx }) {
   const [data,setData] = useState(null);
   const [err,setErr] = useState(null);
   const [tab,setTab] = useState("queries");
+  useEffect(()=>{ if(ctx.navTab && ["queries","pages","striking","decay","anomalies","indexing"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
   const [saEmail,setSaEmail] = useState(null);
   const [advanced,setAdvanced] = useState(false);   // show service-account paste
   const [propMenu,setPropMenu] = useState(false);   // header property switcher
@@ -2534,6 +2643,7 @@ function SemrushScreen({ ctx }) {
   const [loading,setLoading] = useState(false);
   const [needsKey,setNeedsKey] = useState(false);
   const [tab,setTab] = useState("keywords");
+  useEffect(()=>{ if(ctx.navTab && ["keywords","value","striking","competitors","gap"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
   const [gapComp,setGapComp] = useState("");
   const [gaps,setGaps] = useState(null);
   const [gapBusy,setGapBusy] = useState(false);
@@ -3349,6 +3459,7 @@ function Assistant({ ctx, open, setOpen }) {
 function App() {
   const [collapsed, setCollapsed] = useState(()=>{ try{return localStorage.getItem("sentinel-collapsed")==="1";}catch(e){return false;} });
   const [screen, setScreen] = useState("overview");
+  const [navTab, setNavTab] = useState(null);   // deep-link target sub-tab for the next screen
   const [sites, setSites] = useState(window.SITES);
   const [siteId, setSiteId] = useState((window.SITES[0]&&window.SITES[0].id)||"atlas");
   const [proposals, setProposals] = useState(window.PROPOSALS);
@@ -3391,7 +3502,7 @@ function App() {
   const site = sites.find(s=>s.id===siteId)||sites[0];
   const isLive = ()=> API && window.SENTINEL_LIVE && site && site._rawUrl;
   const toast = useCallback((msg,tone="teal")=>{ const id=Math.random().toString(36).slice(2); setToasts(t=>[...t,{id,msg,tone}]); setTimeout(()=>setToasts(t=>t.filter(x=>x.id!==id)),3000); },[]);
-  const goto = useCallback((k)=>{ setScreen(k); if(scrollRef.current) scrollRef.current.scrollTop=0; },[]);
+  const goto = useCallback((k, tab)=>{ setScreen(k); setNavTab(tab||null); if(scrollRef.current) scrollRef.current.scrollTop=0; },[]);
 
   // Load this account's audit history whenever the active site changes (unique per account).
   const loadHistory = useCallback((sid)=>{
@@ -3406,7 +3517,7 @@ function App() {
   useEffect(()=>{ loadHistory(siteId); setIntel(null); setGeo(null); setGeoStatus(""); },[siteId]);
 
   const ctx = {
-    screen, goto, site, sites, proposals, killSwitch, toast, auditing, addSiteFor,
+    screen, navTab, goto, site, sites, proposals, killSwitch, toast, auditing, addSiteFor,
     notifOpen, setNotifOpen, searchQuery, setSearchQuery,
     history, historyLoading, reloadHistory:()=>loadHistory(siteId),
     intel, intelLoading,
