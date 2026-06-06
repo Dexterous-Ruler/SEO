@@ -31,6 +31,7 @@ import * as semrush from './dataforseo.js';
 import * as airtable from './airtable.js';
 import * as chatbot from './chat.js';
 import * as gsc from './gsc.js';
+import * as gscIndex from './gsc-index.js';
 import { detectGscDaily, detectAuditHistory } from './anomaly.js';
 import * as tv from './traffic-value.js';
 import { correlationMatrix } from './correlation.js';
@@ -600,6 +601,52 @@ const routes = {
     catch (e) { if (e.code === 'NO_ACCESS') return { error: e.message, noAccess: true }; return { error: e.message }; }
     const result = detectGscDaily(snap.daily || [], { window: body.window || 14, threshold: body.threshold || 3.5 });
     return { property, days: body.days || 90, ...result };
+  },
+
+  // ── GSC Index Health (auto-index, de-index detection, ranking drops) ────
+  // Shared resolver for the GSC service account + property.
+  // Auto-submit URLs to Google's Indexing API (beyond the manual 10/day limit).
+  'POST /gsc-submit-urls': async (body) => {
+    const saStr = await db.getGscSa(body.siteId).catch(() => null);
+    if (!saStr) return { error: 'Google Search Console not connected.', needsConnect: true };
+    let urls = Array.isArray(body.urls) ? body.urls : [];
+    // If none supplied, pull recent WP content (posts+pages) as the candidate set.
+    if (!urls.length) {
+      try {
+        const { baseUrl, username, appPassword } = await credsForSite(body.siteId);
+        const wp = new WordPressClient({ baseUrl, username, appPassword });
+        const [pg, ps] = await Promise.all([
+          wp.list('pages', { perPage: 50, fields: 'link' }).catch(() => []),
+          wp.list('posts', { perPage: 50, fields: 'link' }).catch(() => []),
+        ]);
+        urls = [...pg, ...ps].map((r) => r.link).filter(Boolean);
+      } catch (e) {}
+    }
+    if (!urls.length) return { error: 'No URLs to submit.' };
+    try { return await gscIndex.submitUrls(JSON.parse(saStr), urls, { type: body.type || 'URL_UPDATED' }); }
+    catch (e) { return { error: 'Indexing API: ' + e.message + ' — ensure the Indexing API is enabled and the service account is an OWNER of the property.' }; }
+  },
+
+  // Detect which top pages are NOT indexed (URL Inspection API).
+  'POST /gsc-index-health': async (body) => {
+    const saStr = await db.getGscSa(body.siteId).catch(() => null);
+    if (!saStr) return { error: 'Google Search Console not connected.', needsConnect: true };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    const property = body.property || (site && site.gsc_property);
+    if (!property) return { error: 'No GSC property selected.', needsProperty: true };
+    try { return await gscIndex.indexHealth(JSON.parse(saStr), property, { limit: body.limit || 40 }); }
+    catch (e) { if (e.code === 'NO_ACCESS') return { error: e.message, noAccess: true }; return { error: e.message }; }
+  },
+
+  // Surface queries whose ranking has dropped (refresh candidates).
+  'POST /gsc-ranking-drops': async (body) => {
+    const saStr = await db.getGscSa(body.siteId).catch(() => null);
+    if (!saStr) return { error: 'Google Search Console not connected.', needsConnect: true };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    const property = body.property || (site && site.gsc_property);
+    if (!property) return { error: 'No GSC property selected.', needsProperty: true };
+    try { return await gscIndex.rankingDrops(JSON.parse(saStr), property, { windowDays: body.windowDays || 28 }); }
+    catch (e) { return { error: e.message }; }
   },
 
   // Anomaly detection on this site's audit composite-score history (regression watch).

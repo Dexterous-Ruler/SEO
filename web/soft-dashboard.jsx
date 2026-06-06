@@ -2023,8 +2023,14 @@ function GscScreen({ ctx }) {
   const [briefFor,setBriefFor] = useState(null);
   const [anom,setAnom] = useState(null);
   const [anomBusy,setAnomBusy] = useState(false);
+  const [idxHealth,setIdxHealth] = useState(null);
+  const [drops,setDrops] = useState(null);
+  const [idxBusy,setIdxBusy] = useState("");
 
-  useEffect(()=>{ setData(null); setProps([]); setSaText(""); setErr(null); setDecay(null); setAnom(null); if(live) API.gscStatus(s.id).then(setStatus).catch(()=>{}); },[s.id]);
+  useEffect(()=>{ setData(null); setProps([]); setSaText(""); setErr(null); setDecay(null); setAnom(null); setIdxHealth(null); setDrops(null); if(live) API.gscStatus(s.id).then(setStatus).catch(()=>{}); },[s.id]);
+  const runIndexHealth = ()=>{ setIdxBusy("health"); setErr(null); API.gscIndexHealth(s.id).then(r=>{ if(r.error){setErr({msg:r.error,needsConnect:r.needsConnect});return;} setIdxHealth(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setIdxBusy("")); };
+  const runRankDrops = ()=>{ setIdxBusy("drops"); setErr(null); API.gscRankingDrops(s.id).then(r=>{ if(r.error){setErr({msg:r.error});return;} setDrops(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setIdxBusy("")); };
+  const submitIndex = ()=>{ setIdxBusy("submit"); API.gscSubmitUrls(s.id).then(r=>{ if(r.error){ctx.toast("Indexing: "+r.error,"clay");return;} ctx.toast(r.succeeded+"/"+r.submitted+" URLs submitted to Google for indexing","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setIdxBusy("")); };
   const loadAnom = ()=>{
     setAnomBusy(true); setErr(null);
     API.gscAnomalies(s.id, 90).then(r=>{ if(r.error){ setErr({ msg:r.error, needsConnect:r.needsConnect, needsProperty:r.needsProperty }); return; } setAnom(r); }).catch(e=>setErr({ msg:e.message })).finally(()=>setAnomBusy(false));
@@ -2139,7 +2145,7 @@ function GscScreen({ ctx }) {
 
           <SoftCard hover={false}>
             <div style={{ display:"flex", gap:3, padding:3, background:"var(--bg)", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-in)", width:"fit-content", marginBottom:16 }}>
-              {[["queries","Top Queries"],["pages","Top Pages"],["striking","Quick Wins (11–20)"],["decay","Content Decay"],["anomalies","Anomalies"]].map(([v,l])=>(
+              {[["queries","Top Queries"],["pages","Top Pages"],["striking","Quick Wins (11–20)"],["decay","Content Decay"],["anomalies","Anomalies"],["indexing","Indexing & Drops"]].map(([v,l])=>(
                 <button key={v} onClick={()=>setTab(v)} style={{ padding:"8px 15px", fontSize:12.5, fontWeight:700, borderRadius:99, background:tab===v?"var(--surface)":"transparent", color:tab===v?"var(--t-700)":"var(--muted)", boxShadow:tab===v?"var(--neo-sm)":"none" }}>{l}</button>
               ))}
             </div>
@@ -2254,6 +2260,67 @@ function GscScreen({ ctx }) {
                   </div>
                 )}
                 {!anom && !anomBusy && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Run the scan to detect statistically significant drops in clicks or slips in ranking over the trailing 90 days.</div>}
+              </div>
+            )}
+            {tab==="indexing" && (
+              <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+                {/* Auto-index */}
+                <div>
+                  <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:10, flexWrap:"wrap" }}>
+                    <div style={{ flex:1, minWidth:220 }}>
+                      <div style={{ fontSize:13.5, fontWeight:700 }}>Auto-index new content</div>
+                      <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Submit your pages to Google's Indexing API programmatically (≈200/day) — past the manual "Request indexing" 10/day limit.</div>
+                    </div>
+                    <NeoButton kind="primary" size="sm" icon={idxBusy==="submit"?undefined:"upload"} disabled={idxBusy==="submit"} onClick={submitIndex}>{idxBusy==="submit"&&<Icon name="cog" size={15} className="audit-spin" />}{idxBusy==="submit"?"Submitting…":"Submit pages to Google"}</NeoButton>
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--faint)" }}>Requires the Indexing API enabled + the service account set as an <b>Owner</b> of this property.</div>
+                </div>
+                {/* De-index health */}
+                <div style={{ borderTop:"1px solid var(--line-soft)", paddingTop:14 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:10, flexWrap:"wrap" }}>
+                    <div style={{ flex:1, minWidth:220 }}>
+                      <div style={{ fontSize:13.5, fontWeight:700 }}>Index health — what's de-indexed</div>
+                      <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Inspects your top pages and flags any Google is NOT indexing.</div>
+                    </div>
+                    <NeoButton kind="soft" size="sm" icon={idxBusy==="health"?undefined:"search"} disabled={idxBusy==="health"} onClick={runIndexHealth}>{idxBusy==="health"&&<Icon name="cog" size={15} className="audit-spin" />}{idxBusy==="health"?"Checking…":"Check index health"}</NeoButton>
+                  </div>
+                  {idxHealth && (
+                    <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                      <div style={{ display:"flex", gap:14, marginBottom:6 }}><Chip tone="teal" size="sm">{idxHealth.indexed} indexed</Chip><Chip tone={idxHealth.notIndexed.length?"clay":"gray"} size="sm">{idxHealth.notIndexed.length} not indexed</Chip><span style={{ fontSize:12, color:"var(--muted)" }}>of {idxHealth.checked} checked</span></div>
+                      {idxHealth.notIndexed.map((p,i)=>(
+                        <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5 }}>
+                          <Icon name="alert" size={15} style={{ color:"var(--clay)" }} />
+                          <a href={p.url} target="_blank" style={{ flex:1, fontFamily:"var(--mono)", color:"var(--ink)", textDecoration:"none", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{(p.url||"").replace(/^https?:\/\/[^/]+/,"")||"/"}</a>
+                          <Chip tone="clay" size="sm">{p.coverageState||p.verdict||"not indexed"}</Chip>
+                        </div>
+                      ))}
+                      {idxHealth.notIndexed.length===0 && <div style={{ padding:"10px", fontSize:13, color:"var(--muted)" }}>All checked pages are indexed. ✅</div>}
+                    </div>
+                  )}
+                </div>
+                {/* Ranking drops */}
+                <div style={{ borderTop:"1px solid var(--line-soft)", paddingTop:14 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:10, flexWrap:"wrap" }}>
+                    <div style={{ flex:1, minWidth:220 }}>
+                      <div style={{ fontSize:13.5, fontWeight:700 }}>Ranking drops — refresh candidates</div>
+                      <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Queries whose average position has slipped vs the prior period — update these pages first.</div>
+                    </div>
+                    <NeoButton kind="soft" size="sm" icon={idxBusy==="drops"?undefined:"trend"} disabled={idxBusy==="drops"} onClick={runRankDrops}>{idxBusy==="drops"&&<Icon name="cog" size={15} className="audit-spin" />}{idxBusy==="drops"?"Analyzing…":"Find ranking drops"}</NeoButton>
+                  </div>
+                  {drops && (
+                    <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+                      <div style={{ fontSize:12.5, fontWeight:700, color:"var(--ink-2)", marginBottom:4 }}>{drops.count} query/queries dropped</div>
+                      {(drops.drops||[]).map((d,i)=>(
+                        <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5 }}>
+                          <span style={{ flex:1, fontWeight:600, fontFamily:"var(--mono)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{d.query}</span>
+                          <span style={{ fontSize:11.5, color:"var(--muted)" }}>{d.from} → {d.to}</span>
+                          <Chip tone="clay" size="sm">▼ {d.slip}</Chip>
+                        </div>
+                      ))}
+                      {(drops.drops||[]).length===0 && <div style={{ padding:"10px", fontSize:13, color:"var(--muted)" }}>No significant ranking drops — positions are holding. ✅</div>}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </SoftCard>

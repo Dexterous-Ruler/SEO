@@ -20,12 +20,14 @@ function b64url(buf) {
 }
 
 // Mint an OAuth access token from a service-account key via a signed JWT.
-async function getAccessToken(sa) {
+// `scope` defaults to read-only Search Console; pass the Indexing scope for the
+// Indexing API.
+export async function getAccessToken(sa, scope = SCOPE) {
   if (!sa || !sa.client_email || !sa.private_key) throw new Error('Invalid service-account JSON (need client_email + private_key).');
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
   const claim = b64url(JSON.stringify({
-    iss: sa.client_email, scope: SCOPE, aud: TOKEN_URL, iat: now, exp: now + 3600,
+    iss: sa.client_email, scope, aud: TOKEN_URL, iat: now, exp: now + 3600,
   }));
   const signer = createSign('RSA-SHA256');
   signer.update(`${header}.${claim}`);
