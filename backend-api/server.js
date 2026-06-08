@@ -33,6 +33,7 @@ import * as airtable from './airtable.js';
 import * as chatbot from './chat.js';
 import * as gsc from './gsc.js';
 import * as gscIndex from './gsc-index.js';
+import { startScheduler } from './scheduler.js';
 import { detectGscDaily, detectAuditHistory } from './anomaly.js';
 import * as tv from './traffic-value.js';
 import { correlationMatrix } from './correlation.js';
@@ -1472,6 +1473,9 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`Sentinel up on :${PORT}  (console + API)  (PSI_KEY ${process.env.PSI_KEY ? 'set' : 'MISSING'})`);
   // Load editable prompt overrides from Supabase + seed the catalogue.
   prompts.init().then(() => console.log(`[prompts] ${prompts.status().count} registered, ${prompts.status().overridden} overridden`)).catch(() => {});
+  // Start the analysis-only automation scheduler (auto-index, GSC health alerts,
+  // content-gap keyword push). Never writes to live pages. Disable: AUTOMATION_ENABLED=false.
+  try { startScheduler(); } catch (e) { console.error('[scheduler] failed to start', e && e.message); }
 });
 
 // --- crash safety -----------------------------------------------------------

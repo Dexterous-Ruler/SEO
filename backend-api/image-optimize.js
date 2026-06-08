@@ -75,7 +75,10 @@ export async function optimizeImages(siteId, { ids = null, quality = 80, max = 8
     } catch (e) { results.push({ id: img.id, url: img.url, error: String(e.message || e) }); }
   }
   const savedKB = results.reduce((s, r) => s + (r.savedKB || 0), 0);
-  return { applied: !!apply, processed: results.length, savedKB, results };
+  const uploaded = results.filter((r) => r.uploaded).length;
+  const failed = results.filter((r) => r.error || r.skip).length;
+  const errors = results.filter((r) => r.error).map((r) => r.error).slice(0, 3);
+  return { applied: !!apply, processed: results.length, uploaded, failed, errors, savedKB, results };
 }
 
 export default { scanMedia, optimizeImages };

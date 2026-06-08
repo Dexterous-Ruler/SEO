@@ -3,6 +3,9 @@
    =========================================================== */
 /* Sidebar grouped into clean, collapsible sections (sub-sections = the items). */
 const SNAV_GROUPS = [
+  { group:"Start", items:[
+    { k:"playbook", label:"Playbook", icon:"check" },
+  ]},
   { group:"Overview", items:[
     { k:"overview", label:"Dashboard", icon:"grid" },
     { k:"exec",     label:"Executive Scorecard", icon:"flag" },
@@ -41,6 +44,7 @@ const SNAV_BY_KEY = Object.fromEntries(SNAV.map(it=>[it.k, it]));
    the search bar can jump straight to any function (e.g. "speed" → Speed Test).
    `tab` deep-links into a screen's sub-tab via ctx.goto(screen, tab). ---- */
 const NAV_INDEX = [
+  { title:"Playbook", screen:"playbook", icon:"check", kw:"playbook start here steps guide workflow checklist process standard get started 1 2 3 what to do next status live" },
   { title:"Dashboard", screen:"overview", icon:"grid", kw:"home overview stats site health fix queue summary scores" },
   { title:"Executive Scorecard", screen:"exec", icon:"flag", kw:"executive scorecard composite score organic value weekly briefing do next rice quick wins board report narrative" },
   { title:"Activity Log", screen:"activity", icon:"clock", kw:"activity log audit trail history writes approvals rollbacks failures export changes" },
@@ -1502,7 +1506,17 @@ function OptimizeScreen({ ctx }) {
   const genFacts = ()=>{ if(!pageUrl){ctx.toast("Enter a page URL","gold");return;} setBusy("facts"); setErr(null); API.aiSeoFacts(s.id,pageUrl).then(r=>{ if(r.error){setErr(r.error);return;} setFacts(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const genCss = ()=>{ setBusy("css"); setErr(null); API.generateCss(s.id).then(r=>{ if(r.error){setErr(r.error);return;} setCss(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const scanMedia = ()=>{ setBusy("scan"); setErr(null); API.mediaScan(s.id).then(r=>{ if(r.error){setErr(r.error);return;} setMedia(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
-  const optimizeMedia = (apply)=>{ setBusy(apply?"apply":"preview"); API.mediaOptimize(s.id,{apply,max:8}).then(r=>{ if(r.error){ctx.toast("Images: "+r.error,"clay");return;} ctx.toast((apply?"Optimized + uploaded ":"Preview: ")+r.processed+" image(s) · "+r.savedKB+" KB saved","teal"); setMedia(m=>({...(m||{}),lastRun:r})); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
+  const optimizeMedia = (apply)=>{ setBusy(apply?"apply":"preview"); API.mediaOptimize(s.id,{apply,max:8}).then(r=>{
+    if(r.error){ctx.toast("Images: "+r.error,"clay");return;}
+    if(apply){
+      const ok=r.uploaded||0, bad=r.failed||0;
+      const msg = ok>0 ? ("Uploaded "+ok+" WebP to media library · "+r.savedKB+" KB lighter"+(bad?" · "+bad+" failed":"")) : ("Nothing uploaded"+(bad?" — "+bad+" failed: "+((r.errors||[])[0]||"WP rejected the upload"):""));
+      ctx.toast(msg, ok>0?"teal":"clay");
+    } else {
+      ctx.toast("Preview: "+r.processed+" image(s) · ~"+r.savedKB+" KB potential saving (no write)","teal");
+    }
+    setMedia(m=>({...(m||{}),lastRun:r}));
+  }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
   const runSpeed = ()=>{ if(!pageUrl){ctx.toast("Enter a URL","gold");return;} setBusy("speed"); setErr(null); API.speedTest(pageUrl,speedStrat).then(r=>{ if(r.error){setErr(r.error);return;} setSpeed(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
 
   const TABS=[["links","Internal Links","link"],["schema","Schema","layers"],["facts","AI-SEO Facts","sparkles"],["css","CSS Fixes","bolt"],["images","Images","image"],["speed","Speed Test","gauge"]];
@@ -3478,10 +3492,132 @@ function Assistant({ ctx, open, setOpen }) {
   );
 }
 
+/* ---------------- Playbook (guided, numbered per-site workflow) ----------
+   ONE structured place: do step 1, then 2, then 3 — with a clear status for
+   every step and an explicit tag for whether it writes to the LIVE site. */
+function PlaybookScreen({ ctx }) {
+  const s = ctx.site;
+  const API = window.SentinelAPI;
+  const live = API && window.SENTINEL_LIVE && s && s._rawUrl;
+  const [gsc,setGsc] = useState(null);
+  const [air,setAir] = useState(null);
+  useEffect(()=>{ setGsc(null); setAir(null); if(API){ API.gscStatus(s.id).then(setGsc).catch(()=>{}); API.airtableStatus(s.id).then(setAir).catch(()=>{}); } },[s.id]);
+
+  const props = ctx.proposals||[];
+  const pending = props.filter(p=>p.status==="proposed"||p.status==="approved").length;
+  const liveApplied = props.filter(p=>p.status==="verified").length;
+  const lastAudit = (ctx.history&&ctx.history.length)? ctx.history[ctx.history.length-1] : null;
+  const sc = lastAudit && lastAudit.scores;
+  const composite = sc ? Math.round(((sc.performance||0)+(sc.accessibility||0)+(sc.bestPractices||0)+(sc.seo||0))/4) : null;
+
+  const connected = s.status==="connected";
+  const gscConn = !!(gsc && gsc.connected);
+  const gscOk = !!(gscConn && gsc.property);
+  const airOk = !!(air && air.connected && air.config && air.config.table_keywords);
+  const airPushed = !!(air && air.config && air.config.last_sync);
+
+  const STEPS = [
+    { phase:"1 · Connect — one-time per site", items:[
+      { title:"Connect the WordPress site", desc:"Securely link the site so the agent can read it (and write only when you arm it).", tag:"setup",
+        status: connected?"done":"todo", note: connected?"Connected":"Not connected yet", go:["sites"] },
+      { title:"Connect Google Search Console", desc:"Real clicks, impressions & rankings. Pick this site's GSC property.", tag:"read",
+        status: gscOk?"done":(gscConn?"progress":"todo"), note: gscOk?("Property: "+gsc.property.replace(/^sc-domain:/,"").replace(/^https?:\/\//,"")):(gscConn?"Connected — pick a property":"Not connected"), go:["gsc"] },
+      { title:"Connect the site's Airtable base", desc:"Pick this site's base + keyword column. Airtable then writes the articles.", tag:"offsite",
+        status: airOk?"done":"todo", note: airOk?"Base & keyword column set":"Not configured", go:["airtable"] },
+    ]},
+    { phase:"2 · Analyse — read-only, nothing goes live", items:[
+      { title:"Run a site audit", desc:"Lighthouse performance, SEO, accessibility & best-practices → a prioritised findings list.", tag:"read",
+        status: lastAudit?"done":"todo", note: lastAudit?("Latest composite "+composite+"/100"):"No audit run yet", go:["audits"] },
+      { title:"Review content opportunities", desc:"Keyword clusters & content gaps from your rankings, competitors and trends.", tag:"read",
+        status:"todo", note:"Find gaps for new articles", go:["plan"] },
+    ]},
+    { phase:"3 · Improve — this is where changes happen", items:[
+      { title:"Approve & apply on-page fixes", desc:"Meta, titles, schema, internal links — you review each, then it's written to the live site.", tag:"live",
+        status: pending>0?"progress":(liveApplied>0?"done":"todo"),
+        note: pending>0?(pending+" fix(es) awaiting your approval"):(liveApplied>0?(liveApplied+" fix(es) applied to the live site"):"Run an audit, then propose fixes"), go:["review"] },
+      { title:"Optimise images to WebP", desc:"Compress heavy images and upload WebP copies to the media library (60–80% lighter).", tag:"live",
+        status:"todo", note:"Scan & optimise the heaviest images", go:["optimize","images"] },
+      { title:"Push keywords to Airtable", desc:"Send content-gap keywords into the keyword column so Airtable generates the articles.", tag:"offsite",
+        status: airPushed?"done":"todo", note: airPushed?("Last pushed "+(window.timeAgo?window.timeAgo(air.config.last_sync):"recently")):(airOk?"Ready — push content-gap keywords":"Configure Airtable first"), go:["airtable"] },
+    ]},
+    { phase:"4 · Automate — hands-off from here", items:[
+      { title:"Automation is running", desc:"Daily auto-indexing to Google, ranking-drop & content-decay alerts, weekly keyword push — all logged.", tag:"auto",
+        status:"auto", note:"Active — results appear in Activity", go:["activity"] },
+    ]},
+  ];
+
+  const allItems = STEPS.flatMap(p=>p.items);
+  const doneCount = allItems.filter(i=>i.status==="done"||i.status==="auto").length;
+  const STATUS = {
+    done:{tone:"teal", icon:"check", label:"Done"},
+    todo:{tone:"gray", icon:"dots", label:"To do"},
+    progress:{tone:"gold", icon:"clock", label:"Action needed"},
+    auto:{tone:"plum", icon:"sparkles", label:"Automatic"},
+  };
+  const TAG = {
+    live:{tone:"clay", label:"Writes to LIVE site"},
+    offsite:{tone:"plum", label:"Off-site (Airtable/Google)"},
+    read:{tone:"teal", label:"Read-only"},
+    setup:{tone:"gray", label:"Setup"},
+    auto:{tone:"plum", label:"Automatic"},
+  };
+
+  let n=0;
+  return (
+    <div className="rise">
+      <PageHead title="Playbook" sub={`The standard step-by-step process for ${s.name}. Work top to bottom — each step shows its status and whether it touches the live site.`}>
+        <Chip tone={doneCount>=allItems.length?"teal":"gold"} size="sm" icon="check">{doneCount}/{allItems.length} done</Chip>
+      </PageHead>
+
+      {!live && <SoftCard hover={false}><div style={{ padding:"12px 4px", color:"var(--muted)", fontSize:13.5 }}>Connect a live WordPress site to begin — start with step 1 below.</div></SoftCard>}
+
+      {/* legend */}
+      <div style={{ display:"flex", flexWrap:"wrap", gap:8, alignItems:"center", margin:"2px 2px 18px", fontSize:11.5, color:"var(--muted)" }}>
+        <span style={{ fontWeight:700 }}>Tags:</span>
+        <Chip tone="clay" size="sm">Writes to LIVE site</Chip>
+        <Chip tone="plum" size="sm">Off-site (Airtable/Google)</Chip>
+        <Chip tone="teal" size="sm">Read-only</Chip>
+      </div>
+
+      <div style={{ display:"flex", flexDirection:"column", gap:22 }}>
+        {STEPS.map((ph,pi)=>(
+          <div key={pi}>
+            <div style={{ fontSize:12, fontWeight:800, letterSpacing:".03em", textTransform:"uppercase", color:"var(--t-700)", margin:"2px 2px 11px" }}>{ph.phase}</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:11 }}>
+              {ph.items.map((it,ii)=>{ n++; const st=STATUS[it.status]; const tg=TAG[it.tag]; const done=it.status==="done"||it.status==="auto";
+                return (
+                  <SoftCard key={ii} hover={false} style={{ padding:"15px 18px" }}>
+                    <div style={{ display:"flex", alignItems:"flex-start", gap:15 }}>
+                      <div style={{ width:40, height:40, borderRadius:13, flexShrink:0, display:"grid", placeItems:"center", fontWeight:800, fontSize:16,
+                        background: done?"var(--t-100)":"var(--bg)", color: done?"var(--t-700)":"var(--muted)", boxShadow: done?"var(--neo-xs)":"var(--neo-in)" }}>
+                        {done? <Icon name="check" size={20} /> : n}
+                      </div>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                          <span style={{ fontSize:14.5, fontWeight:800 }}>{it.title}</span>
+                          <Chip tone={st.tone} size="sm" icon={st.icon}>{st.label}</Chip>
+                          <Chip tone={tg.tone} size="sm">{tg.label}</Chip>
+                        </div>
+                        <div style={{ fontSize:12.5, color:"var(--muted)", marginTop:4, lineHeight:1.5 }}>{it.desc}</div>
+                        <div style={{ fontSize:12, color: it.status==="progress"?"var(--gold)":(it.status==="done"?"var(--t-700)":"var(--ink-2)"), marginTop:6, fontWeight:700 }}>{it.note}</div>
+                      </div>
+                      <NeoButton kind={done?"soft":"primary"} size="sm" iconR="chevR" onClick={()=>ctx.goto(it.go[0], it.go[1])}>{done?"View":"Open"}</NeoButton>
+                    </div>
+                  </SoftCard>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- App ---------------- */
 function App() {
   const [collapsed, setCollapsed] = useState(()=>{ try{return localStorage.getItem("sentinel-collapsed")==="1";}catch(e){return false;} });
-  const [screen, setScreen] = useState("overview");
+  const [screen, setScreen] = useState("playbook");
   const [navTab, setNavTab] = useState(null);   // deep-link target sub-tab for the next screen
   const [sites, setSites] = useState(window.SITES);
   const [siteId, setSiteId] = useState((window.SITES[0]&&window.SITES[0].id)||"atlas");
@@ -3797,7 +3933,7 @@ function App() {
     },
   };
 
-  const SCREENS = { overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen };
+  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen };
   const Screen = SCREENS[screen] || Dashboard;
 
   let content = <Screen ctx={ctx} run />;
