@@ -1507,6 +1507,9 @@ function OptimizeScreen({ ctx }) {
   const [speedStrat,setSpeedStrat] = useState("mobile");
   useEffect(()=>{ setLinks(null); setSchema(null); setFacts(null); setCss(null); setMedia(null); setSpeed(null); setErr(null); setPageUrl((s._rawUrl||s.url||"").replace(/\/$/,"")+"/"); },[s.id]);
   const copy = (t)=>{ try{ navigator.clipboard.writeText(t); ctx.toast("Copied to clipboard","teal"); }catch(e){ ctx.toast("Copy failed","gold"); } };
+  // Apply schema/CSS straight to the live site (needs the seo-agent-optimize mu-plugin).
+  const applySchemaLive = ()=>{ if(!schema){return;} setBusy("applySchema"); API.applySchema(s.id,{ url:pageUrl, jsonld:schema.json }).then(r=>{ if(r.error){ctx.toast("Schema: "+r.error,"clay");return;} ctx.toast("Schema applied to the live page ✓","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
+  const applyCssLive = ()=>{ if(!css){return;} setBusy("applyCss"); API.applyCss(s.id, css.css).then(r=>{ if(r.error){ctx.toast("CSS: "+r.error,"clay");return;} ctx.toast("CSS applied to the live site ✓","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
 
   const findLinks = ()=>{ setBusy("links"); setErr(null); API.internalLinks(s.id,{maxSources:8}).then(r=>{ if(r.error){setErr(r.error);return;} setLinks(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const genSchema = ()=>{ if(!pageUrl){ctx.toast("Enter a page URL","gold");return;} setBusy("schema"); setErr(null); API.generateSchema(s.id,{url:pageUrl,type:pageType,title:""}).then(r=>{ if(r.error){setErr(r.error);return;} setSchema(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
@@ -1588,6 +1591,7 @@ function OptimizeScreen({ ctx }) {
                     {(schema.types||[]).map((t,i)=>(<Chip key={i} tone={t==="LegalService"||t==="Person"?"plum":"teal"} size="sm">{t}</Chip>))}
                     {schema.isLegal && <Chip tone="gold" size="sm">legal/YMYL</Chip>}
                     <NeoButton kind="soft" size="sm" icon="doc" style={{ marginLeft:"auto" }} onClick={()=>copy(schema.json)}>Copy JSON-LD</NeoButton>
+                    <NeoButton kind="primary" size="sm" icon={busy==="applySchema"?undefined:"check"} disabled={busy==="applySchema"} onClick={applySchemaLive}>{busy==="applySchema"&&<Icon name="cog" size={14} className="audit-spin" />}Apply to live</NeoButton>
                   </div>
                   <pre style={{ margin:0, padding:"13px 15px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", fontSize:11.5, fontFamily:"var(--mono)", color:"var(--ink)", overflowX:"auto", maxHeight:420, lineHeight:1.5 }}>{schema.json}</pre>
                 </div>
@@ -1625,6 +1629,7 @@ function OptimizeScreen({ ctx }) {
                     <Chip tone="teal" size="sm">{css.fixableCount} ready</Chip>
                     {css.manualCount>0 && <Chip tone="gold" size="sm">{css.manualCount} need values</Chip>}
                     <NeoButton kind="soft" size="sm" icon="doc" style={{ marginLeft:"auto" }} onClick={()=>copy(css.css)}>Copy CSS</NeoButton>
+                    <NeoButton kind="primary" size="sm" icon={busy==="applyCss"?undefined:"check"} disabled={busy==="applyCss"} onClick={applyCssLive}>{busy==="applyCss"&&<Icon name="cog" size={14} className="audit-spin" />}Apply to live</NeoButton>
                   </div>
                   <pre style={{ margin:0, padding:"13px 15px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", fontSize:11.5, fontFamily:"var(--mono)", color:"var(--ink)", overflowX:"auto", maxHeight:460, lineHeight:1.5 }}>{css.css}</pre>
                 </div>
