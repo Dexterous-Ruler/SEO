@@ -1643,9 +1643,12 @@ function OptimizeScreen({ ctx }) {
               <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:14, flexWrap:"wrap" }}>
                 <div style={{ flex:1, minWidth:220 }}>
                   <div style={{ fontSize:13.5, fontWeight:700 }}>Image compression → WebP</div>
-                  <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Scans your media library for heavy JPEG/PNG images and converts them to WebP (≈60–80% smaller) to lift LCP &amp; Performance. Preview is safe; "Optimize" uploads WebP versions.</div>
+                  <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>For full automatic WebP/AVIF across all images (incl. CSS backgrounds), use <b>Enable auto-WebP</b> — installs &amp; activates Converter for Media, which converts and serves WebP server-side. "Scan/Optimize" is the manual fallback.</div>
                 </div>
-                <NeoButton kind="primary" size="sm" icon={busy==="scan"?undefined:"image"} disabled={busy==="scan"} onClick={scanMedia}>{busy==="scan"&&<Icon name="cog" size={15} className="audit-spin" />}{busy==="scan"?"Scanning…":"Scan media"}</NeoButton>
+                <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                  <NeoButton kind="primary" size="sm" icon={busy==="webpPlugin"?undefined:"bolt"} disabled={busy==="webpPlugin"} onClick={()=>{ setBusy("webpPlugin"); API.installWebpPlugin(s.id).then(r=>{ if(r.error){ctx.toast("WebP: "+r.error,"clay");return;} ctx.toast(r.already?"WebP plugin already active ✓":"Auto-WebP enabled ✓ (Converter for Media)","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); }}>{busy==="webpPlugin"&&<Icon name="cog" size={15} className="audit-spin" />}Enable auto-WebP</NeoButton>
+                  <NeoButton kind="soft" size="sm" icon={busy==="scan"?undefined:"image"} disabled={busy==="scan"} onClick={scanMedia}>{busy==="scan"&&<Icon name="cog" size={15} className="audit-spin" />}{busy==="scan"?"Scanning…":"Scan media"}</NeoButton>
+                </div>
               </div>
               {media && media.images && (
                 <div style={{ display:"flex", flexDirection:"column", gap:12 }}>

@@ -1044,6 +1044,27 @@ const routes = {
       return { installed: !!(r && r.ok), features: (r && r.features) || [] };
     } catch (e) { return { installed: false, error: e.message }; }
   },
+  // Auto-install + activate a server-level WebP plugin (Converter for Media) via
+  // the WP plugins REST API — the right tool for images (handles all paths, CSS
+  // backgrounds, AVIF). Needs an admin app-password with install_plugins.
+  'POST /install-webp-plugin': async (body) => {
+    const { creds, site } = await resolveCreds(body);
+    if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'site is read-only (write not armed)' };
+    const wp = clientFrom(creds);
+    const slug = body.slug || 'webp-converter-for-media';
+    try {
+      const list = await wp.request(`${wp.baseUrl}/wp-json/wp/v2/plugins`).catch(() => []);
+      const existing = Array.isArray(list) ? list.find((p) => (p.plugin || '').split('/')[0] === slug || p.textdomain === slug) : null;
+      if (existing) {
+        if (existing.status !== 'active') await wp.request(`${wp.baseUrl}/wp-json/wp/v2/plugins/${existing.plugin}`, { method: 'POST', body: { status: 'active' } });
+        return { ok: true, already: true, plugin: existing.plugin, status: 'active' };
+      }
+      const r = await wp.request(`${wp.baseUrl}/wp-json/wp/v2/plugins`, { method: 'POST', body: { slug, status: 'active' } });
+      if (site) await db.logActivity({ site_id: site.id, type: 'connection', actor: 'Agent', icon: 'check', text: 'Installed WebP plugin — Converter for Media', meta: 'auto image WebP/AVIF' }).catch(() => {});
+      return { ok: true, installed: true, plugin: r.plugin, status: r.status };
+    } catch (e) { return { error: 'Install failed — the WordPress app-password user needs admin (install_plugins). ' + e.message }; }
+  },
+
   // Resolve a page URL → post/page id (by slug) so schema can be attached.
   // Apply per-page JSON-LD schema to the live site via the mu-plugin.
   'POST /apply-schema': async (body) => {
