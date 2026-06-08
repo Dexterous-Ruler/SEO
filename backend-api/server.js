@@ -1071,7 +1071,8 @@ const routes = {
   // Compress images to WebP. apply=false previews savings; apply=true uploads.
   'POST /media-optimize': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    try { return await imageOpt.optimizeImages(body.siteId, { ids: body.ids || null, quality: body.quality || 80, max: body.max || 8, apply: !!body.apply }); }
+    // On a real apply, skip images already converted to WebP (no duplicate uploads).
+    try { return await imageOpt.optimizeImages(body.siteId, { ids: body.ids || null, quality: body.quality || 80, max: body.max || 8, apply: !!body.apply, skipExisting: body.skipExisting != null ? !!body.skipExisting : !!body.apply }); }
     catch (e) { return { error: 'Image optimization failed: ' + e.message }; }
   },
   // Speed test: run PageSpeed (median-of-N) on a URL for mobile + desktop.
