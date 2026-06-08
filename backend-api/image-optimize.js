@@ -42,6 +42,25 @@ async function fetchImages(wp, perPage = 100) {
     }));
 }
 
+// Stems of WebP files already in the media library, so we never re-upload a copy
+// we already made (important for unattended/scheduled runs). Paginates a few pages.
+async function existingWebpStems(wp, pages = 6) {
+  const set = new Set();
+  for (let p = 1; p <= pages; p++) {
+    const items = await wp.request(`/media?per_page=100&page=${p}&media_type=image&_fields=source_url,mime_type`).catch(() => []);
+    if (!Array.isArray(items) || !items.length) break;
+    for (const m of items) {
+      if (!/image\/webp/i.test(m.mime_type || '')) continue;
+      const fn = (m.source_url || '').split('/').pop() || '';
+      const stem = fn.replace(/(-\d+)?\.webp$/i, '').toLowerCase();
+      if (stem) set.add(stem);
+    }
+    if (items.length < 100) break;
+  }
+  return set;
+}
+const stemOf = (url) => (url.split('/').pop() || '').replace(/\.(jpe?g|png)$/i, '').toLowerCase();
+
 // Scan: list heavy raster images + the savings opportunity (read-only).
 export async function scanMedia(siteId, { minKB = 80, limit = 60 } = {}) {
   const { baseUrl, username, appPassword } = await credsForSite(siteId);
@@ -59,13 +78,18 @@ export async function scanMedia(siteId, { minKB = 80, limit = 60 } = {}) {
 // Optimize: compress to WebP. apply=false → preview savings (no write);
 // apply=true → upload WebP to the media library (force-bypasses DRY_RUN since
 // the click is the explicit approval). Capped + sequential for safety.
-export async function optimizeImages(siteId, { ids = null, quality = 80, max = 8, apply = false } = {}) {
+export async function optimizeImages(siteId, { ids = null, quality = 80, max = 8, apply = false, skipExisting = false } = {}) {
   const { baseUrl, username, appPassword } = await credsForSite(siteId);
   const wp = new WordPressClient({ baseUrl, username, appPassword });
   let targets = await fetchImages(wp);
   if (ids && ids.length) targets = targets.filter((i) => ids.includes(i.id));
+  // Idempotency for automated runs: skip images whose WebP already exists.
+  if (skipExisting) {
+    const have = await existingWebpStems(wp).catch(() => new Set());
+    targets = targets.filter((i) => !have.has(stemOf(i.url)));
+  }
   targets = targets.sort((a, b) => b.sizeKB - a.sizeKB).slice(0, Math.min(max, 20));
-  if (!targets.length) return { error: 'No matching images to optimize.' };
+  if (!targets.length) return apply ? { applied: true, processed: 0, uploaded: 0, failed: 0, errors: [], savedKB: 0, results: [], note: 'nothing new to optimize' } : { error: 'No matching images to optimize.' };
 
   const results = [];
   for (const img of targets) {

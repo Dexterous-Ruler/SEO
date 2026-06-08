@@ -17,6 +17,7 @@ import * as gsc from './gsc.js';
 import * as gscIndex from './gsc-index.js';
 import { findOpportunities } from './content-opportunities.js';
 import * as airtable from './airtable.js';
+import * as imageOpt from './image-optimize.js';
 import { WordPressClient } from '../src/wp/client.js';
 
 const DAY = 86400000;
@@ -83,10 +84,25 @@ async function jobKeywordPush(site) {
   } catch (e) { /* surface nothing on transient airtable errors */ }
 }
 
+// ── Job: auto-optimise images → WebP (write-armed sites only) ───────────────
+// Compresses the heaviest images and uploads WebP to the media library, skipping
+// any already converted. This is a media-library write (not a page-content edit),
+// so it's gated on write_armed. NOTE: it does NOT yet swap the references in
+// Elementor pages — that reference-swap is the remaining step to make pages
+// actually serve the WebP, and is built/tested separately for safety.
+async function jobAutoOptimizeImages(site) {
+  if (!site.write_armed) return;                 // only sites you've explicitly armed
+  try {
+    const r = await imageOpt.optimizeImages(site.id, { apply: true, max: 6, skipExisting: true });
+    if (r && r.uploaded) await note(site.id, `Auto-optimised ${r.uploaded} image(s) to WebP (${r.savedKB}KB lighter) — uploaded to media library`);
+  } catch (e) { console.error('[scheduler] auto-optimize-images', site.id, e && e.message); }
+}
+
 const JOBS = [
   { name: 'auto-index', every: DAY, run: jobAutoIndex },
   { name: 'gsc-health', every: DAY, run: jobGscHealth },
   { name: 'keyword-push', every: 7 * DAY, run: jobKeywordPush },
+  { name: 'image-optimize', every: 7 * DAY, run: jobAutoOptimizeImages },
 ];
 
 async function tick() {
@@ -109,7 +125,7 @@ export function startScheduler() {
   if (process.env.AUTOMATION_ENABLED === 'false') { console.log('[scheduler] disabled (AUTOMATION_ENABLED=false)'); return; }
   setTimeout(() => { tick().catch(() => {}); }, 20 * 1000);   // first sweep ~20s after boot
   setInterval(() => { tick().catch(() => {}); }, 60 * 60 * 1000); // hourly thereafter
-  console.log('[scheduler] automation enabled — analysis-only jobs (auto-index, gsc-health, keyword-push)');
+  console.log('[scheduler] automation enabled — auto-index, gsc-health, keyword-push, image-optimize (write-armed)');
 }
 
 export default { startScheduler };
