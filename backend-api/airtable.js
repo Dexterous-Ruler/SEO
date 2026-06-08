@@ -36,9 +36,40 @@ export async function listBases(pat) {
 }
 
 // List tables in a base (so the UI can let the user pick which table to write to).
+// Includes singleSelect/multiSelect choices so the embedded grid can render
+// proper dropdowns (e.g. the Status field that triggers the n8n workflow).
 export async function listTables(pat, baseId) {
   const data = await at(pat, `${META}/bases/${baseId}/tables`);
-  return (data.tables || []).map((t) => ({ id: t.id, name: t.name, fields: (t.fields || []).map((f) => ({ name: f.name, type: f.type })) }));
+  return (data.tables || []).map((t) => ({
+    id: t.id, name: t.name,
+    fields: (t.fields || []).map((f) => ({
+      name: f.name, type: f.type,
+      options: (f.options && Array.isArray(f.options.choices)) ? f.options.choices.map((c) => ({ name: c.name, color: c.color })) : undefined,
+    })),
+  }));
+}
+
+// ── Embedded grid: read/write individual records ───────────────────────────
+export async function listRecords(pat, baseId, table, { pageSize = 50, offset, fields } = {}) {
+  const enc = encodeURIComponent(table);
+  const params = new URLSearchParams({ pageSize: String(Math.min(pageSize, 100)) });
+  if (offset) params.set('offset', offset);
+  (fields || []).forEach((f) => params.append('fields[]', f));
+  const data = await at(pat, `${API}/${baseId}/${enc}?${params.toString()}`);
+  return { records: (data.records || []).map((r) => ({ id: r.id, fields: r.fields || {} })), offset: data.offset || null };
+}
+
+export async function updateRecord(pat, baseId, table, recordId, fields) {
+  const enc = encodeURIComponent(table);
+  const data = await at(pat, `${API}/${baseId}/${enc}/${recordId}`, { method: 'PATCH', body: { fields, typecast: true } });
+  return { id: data.id, fields: data.fields || {} };
+}
+
+export async function createRecord(pat, baseId, table, fields) {
+  const enc = encodeURIComponent(table);
+  const data = await at(pat, `${API}/${baseId}/${enc}`, { method: 'POST', body: { records: [{ fields }], typecast: true } });
+  const r = (data.records || [])[0] || {};
+  return { id: r.id, fields: r.fields || {} };
 }
 
 // Ensure a table exists with the given fields; create it if missing. Returns table.
@@ -195,4 +226,4 @@ function briefToText(b) {
   return lines.join('\n');
 }
 
-export default { listBases, listTables, ensureTable, createRecords, listFieldValues, pushKeywords, SCHEMAS, mapGaps, mapContent, mapGeo, mapOpportunities };
+export default { listBases, listTables, ensureTable, createRecords, listRecords, updateRecord, createRecord, listFieldValues, pushKeywords, SCHEMAS, mapGaps, mapContent, mapGeo, mapOpportunities };
