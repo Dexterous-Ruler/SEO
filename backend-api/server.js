@@ -1160,6 +1160,29 @@ const routes = {
     return { ok: true, bases };
   },
 
+  // Per-site setup completeness (for the site-switcher badge): the 4 setup steps
+  // — WP connected, GSC property chosen, Airtable base+column set, an audit run.
+  'POST /sites-setup': async () => {
+    const sites = await db.listSites().catch(() => []);
+    const out = [];
+    for (const s of (sites || [])) {
+      const [gscSa, air, pat, audits] = await Promise.all([
+        db.getGscSa(s.id).catch(() => null),
+        db.getAirtableConfig(s.id).catch(() => null),
+        db.getAirtablePat(s.id).catch(() => null),
+        db.listAudits(s.id, 1).catch(() => []),
+      ]);
+      out.push({
+        id: s.id,
+        connected: s.status === 'connected',
+        gsc: !!(gscSa && s.gsc_property),
+        airtable: !!(pat && air && air.table_gaps),
+        audit: Array.isArray(audits) && audits.length > 0,
+      });
+    }
+    return { sites: out };
+  },
+
   // List the bases this site's stored PAT can access (for the per-site dropdown).
   'POST /airtable-bases': async (body) => {
     const pat = await db.getAirtablePat(body.siteId);

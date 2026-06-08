@@ -144,6 +144,8 @@
     contentDecay(siteId, windowDays) { return engine("/content-decay", { siteId, windowDays }); },
     contentDecayBrief(page) { return engine("/content-decay-brief", { page }); },
     async listGeoRuns(siteId) { return sbSelect("geo_runs", "site_id=eq." + siteId + "&select=*&order=created_at.desc&limit=20"); },
+    // Per-site setup completeness (site-switcher badge)
+    sitesSetup() { return engine("/sites-setup", {}); },
     // Airtable
     airtableConnect(siteId, pat) { return engine("/airtable-connect", { siteId, pat }); },
     airtableBases(siteId) { return engine("/airtable-bases", { siteId }); },
