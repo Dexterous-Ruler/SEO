@@ -1,22 +1,32 @@
 # Sentinel — single-service image: the Node server serves BOTH the web console
-# (web/) and the API (backend-api/). Runtime needs only `dotenv`; all the heavy
-# CLI deps (sharp, lighthouse, chrome) are NOT in the server's import graph, so
-# we strip them for a tiny, fast image.
-FROM node:20-slim
+# (web/) and the API (backend-api/). Runtime needs only `dotenv` + `sharp`; all
+# the heavy CLI deps (lighthouse, chrome, chalk) are NOT in the server's import
+# graph, so we strip them for a tiny, fast image.
 
+# ---- Stage 1: precompile the web console (JSX → minified+gzipped JS) ----
+# Eliminates the ~3MB in-browser Babel + client-side transform on every load,
+# and ships React's production build. Output → web/dist (served in prod).
+FROM node:20-slim AS webbuild
+WORKDIR /build
+COPY web ./web
+RUN npm install --no-save --no-audit --no-fund esbuild@^0.21.5 \
+ && node web/build.mjs
+
+# ---- Stage 2: runtime ----
+FROM node:20-slim
 WORKDIR /app
 
 # Install the runtime deps only: dotenv + sharp (image→WebP compression).
 # sharp ships prebuilt linux-x64 binaries, so no native build is needed.
-# lighthouse/chrome/chalk/etc. are CLI-only and excluded → small, fast image.
 COPY package.json ./
 RUN npm pkg delete dependencies devDependencies scripts \
  && npm install dotenv@^16.4.5 sharp@^0.33.5 --no-audit --no-fund --omit=dev
 
-# App code (server + shared engine libs + static console).
+# App code (server + shared engine libs). The web console comes from the build
+# stage and already includes web/dist (the optimized bundle the server prefers).
 COPY backend-api ./backend-api
 COPY src ./src
-COPY web ./web
+COPY --from=webbuild /build/web ./web
 
 ENV NODE_ENV=production
 # Koyeb injects PORT; the server reads process.env.PORT. 8000 is the platform default.

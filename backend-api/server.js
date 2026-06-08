@@ -10,7 +10,8 @@
 import { createServer } from 'node:http';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { URL } from 'node:url';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join, normalize, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WordPressClient } from '../src/wp/client.js';
@@ -60,8 +61,11 @@ async function resolveCreds(body) {
 // Koyeb (and most PaaS) inject PORT; fall back to API_PORT then 8787 for local.
 const PORT = Number(process.env.PORT || process.env.API_PORT || 8787);
 
-// Static frontend (web/) so a single service serves the console + API in prod.
-const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'web');
+// Static frontend. Prefer the precompiled production build (web/dist — minified,
+// gzipped, no Babel) when present; fall back to web/ for local no-build dev.
+const WEB_SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'web');
+const WEB_DIST = join(WEB_SRC, 'dist');
+const WEB_DIR = existsSync(join(WEB_DIST, 'index.html')) ? WEB_DIST : WEB_SRC;
 const STATIC_MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.jsx': 'text/babel; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -69,18 +73,33 @@ const STATIC_MIME = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.ico': 'image/x-icon',
   '.woff': 'font/woff', '.woff2': 'font/woff2', '.map': 'application/json',
 };
+const GZIPPABLE = new Set(['.js', '.css', '.html', '.svg', '.json']);
 async function serveStatic(req, res, pathname) {
   let p = decodeURIComponent(pathname);
   if (p === '/' || p === '') p = '/index.html';
   const file = normalize(join(WEB_DIR, p));
   if (!file.startsWith(WEB_DIR)) { res.writeHead(403); return res.end('Forbidden'); }
   try {
-    const body = await readFile(file);
-    res.writeHead(200, { 'Content-Type': STATIC_MIME[extname(file).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+    const st = await stat(file);
+    if (!st.isFile()) throw new Error('not a file');
+    const ext = extname(file).toLowerCase();
+    const type = STATIC_MIME[ext] || 'application/octet-stream';
+    const lastMod = st.mtime.toUTCString();
+    // Cheap repeat-load: revalidate via Last-Modified → 304 (no body) when unchanged.
+    if (req.headers['if-modified-since'] === lastMod) { res.writeHead(304); return res.end(); }
+    // Serve a precompiled .gz sibling when the client accepts gzip.
+    let sendFile = file, encoding = null;
+    if (GZIPPABLE.has(ext) && /\bgzip\b/.test(req.headers['accept-encoding'] || '') && existsSync(file + '.gz')) {
+      sendFile = file + '.gz'; encoding = 'gzip';
+    }
+    const body = await readFile(sendFile);
+    const headers = { 'Content-Type': type, 'Cache-Control': 'no-cache', 'Last-Modified': lastMod, Vary: 'Accept-Encoding' };
+    if (encoding) headers['Content-Encoding'] = encoding;
+    res.writeHead(200, headers);
     res.end(body);
   } catch (e) {
     // SPA-ish fallback: unknown GET paths → index.html (so deep links work).
-    try { const idx = await readFile(join(WEB_DIR, 'index.html')); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(idx); }
+    try { const idx = await readFile(join(WEB_DIR, 'index.html')); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' }); res.end(idx); }
     catch (_) { res.writeHead(404); res.end('Not found'); }
   }
 }
