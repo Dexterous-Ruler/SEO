@@ -193,6 +193,12 @@ function Sidebar({ ctx, collapsed, setCollapsed }) {
 /* ---------------- Top bar ---------------- */
 function SiteSwitcher({ ctx }) {
   const [open,setOpen]=useState(false), s=ctx.site;
+  const API=window.SentinelAPI;
+  const [setup,setSetup]=useState({});   // id -> { connected, gsc, airtable, audit }
+  useEffect(()=>{ if(API&&API.sitesSetup) API.sitesSetup().then(r=>{ const m={}; (r.sites||[]).forEach(x=>m[x.id]=x); setSetup(m); }).catch(()=>{}); },[ctx.sites.length, open]);
+  const score=(id)=>{ const x=setup[id]; return x? ["connected","gsc","airtable","audit"].filter(k=>x[k]).length : null; };
+  // Setup-completeness badge: Auth (broken) / Ready (4/4) / Setup n/4.
+  const Badge=({id,fail})=>{ if(fail) return <Chip tone="clay" size="sm" dot>Auth</Chip>; const n=score(id); if(n==null) return <Chip tone="gray" size="sm" dot>…</Chip>; if(n>=4) return <Chip tone="teal" size="sm" icon="check">Ready</Chip>; return <Chip tone="gold" size="sm">Setup {n}/4</Chip>; };
   return (
     <div style={{ position:"relative" }}>
       <button className="neo-btn" onClick={()=>setOpen(!open)}
@@ -202,6 +208,7 @@ function SiteSwitcher({ ctx }) {
           <div style={{ fontSize:13.5, fontWeight:700, lineHeight:1.1 }}>{s.name}</div>
           <div style={{ fontSize:11, color:"var(--muted)", fontFamily:"var(--mono)" }}>{s.url}</div>
         </div>
+        <Badge id={s.id} fail={s.status!=="connected"} />
         <Icon name="chevD" size={16} style={{ color:"var(--faint)", marginLeft:2, transform:open?"rotate(180deg)":"none", transition:"transform .2s" }} />
       </button>
       {open && (
@@ -220,7 +227,7 @@ function SiteSwitcher({ ctx }) {
                     <div style={{ fontSize:13.5, fontWeight:700 }}>{site.name}</div>
                     <div style={{ fontSize:11, color:"var(--muted)", fontFamily:"var(--mono)" }}>{site.url}</div>
                   </div>
-                  <Chip tone={fail?"clay":"teal"} size="sm" dot>{fail?"Auth":"OK"}</Chip>
+                  <Badge id={site.id} fail={fail} />
                 </button>
               );
             })}
