@@ -13,6 +13,15 @@ import sharp from 'sharp';
 import { WordPressClient } from '../src/wp/client.js';
 import { credsForSite } from './supabase.js';
 
+// MEMORY SAFETY (small/nano instances): libvips will otherwise cache buffers and
+// run parallel workers, and a single 30+ megapixel JPEG can decode to hundreds of
+// MB — enough to OOM-kill the container. Disable the cache, force one worker, and
+// (below) shrink-on-load + cap dimensions so peak memory stays small.
+sharp.cache(false);
+sharp.concurrency(1);
+const MAX_DIM = 2560;            // plenty for web; caps the decoded bitmap
+const MAX_INPUT_PIXELS = 60_000_000; // refuse absurd images instead of crashing
+
 async function download(url) {
   const r = await fetch(url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } });
   if (!r.ok) throw new Error('download ' + r.status);
@@ -62,8 +71,13 @@ export async function optimizeImages(siteId, { ids = null, quality = 80, max = 8
   for (const img of targets) {
     try {
       const buf = await download(img.url);
-      if (buf.length > 8 * 1024 * 1024) { results.push({ id: img.id, url: img.url, skip: 'too large (>8MB)' }); continue; }
-      const out = await sharp(buf).webp({ quality, effort: 4 }).toBuffer();
+      if (buf.length > 12 * 1024 * 1024) { results.push({ id: img.id, url: img.url, skip: 'too large (>12MB)' }); continue; }
+      // shrink-on-load + cap dimensions so even a 30MP image never blows up RAM.
+      const out = await sharp(buf, { limitInputPixels: MAX_INPUT_PIXELS, failOn: 'none' })
+        .rotate()
+        .resize({ width: MAX_DIM, height: MAX_DIM, fit: 'inside', withoutEnlargement: true })
+        .webp({ quality, effort: 4 })
+        .toBuffer();
       const savedKB = kb(buf.length) - kb(out.length);
       const filename = (img.url.split('/').pop() || 'image').replace(/\.(jpe?g|png)$/i, '.webp');
       const row = { id: img.id, filename, fromKB: kb(buf.length), toKB: kb(out.length), savedKB, pct: Math.round((1 - out.length / buf.length) * 100) };
