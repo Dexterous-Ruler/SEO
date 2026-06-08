@@ -3157,7 +3157,10 @@ function AirtableScreen({ ctx }) {
   return (
     <div className="rise">
       <PageHead title="Airtable Sync" sub={`Push ${s.name}'s content-gap keywords into its Airtable base — Airtable writes the articles.`}>
-        {ready && <NeoButton kind="primary" icon={busy==="push"?undefined:"upload"} disabled={busy==="push"} onClick={pushKeywords}>{busy==="push"&&<Icon name="cog" size={17} className="audit-spin" />}{busy==="push"?"Pushing…":"Push keywords"}</NeoButton>}
+        <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+          {baseId && <NeoButton kind="soft" size="sm" iconR="upload" onClick={()=>window.open("https://airtable.com/"+baseId+(tableId?("/"+tableId):""),"_blank","noopener")}>Open in Airtable</NeoButton>}
+          {ready && <NeoButton kind="primary" icon={busy==="push"?undefined:"upload"} disabled={busy==="push"} onClick={pushKeywords}>{busy==="push"&&<Icon name="cog" size={17} className="audit-spin" />}{busy==="push"?"Pushing…":"Push keywords"}</NeoButton>}
+        </div>
       </PageHead>
 
       {!live && <SoftCard hover={false}><div style={{ padding:"14px 4px", color:"var(--muted)", fontSize:13.5 }}>Connect a live WordPress site first to configure Airtable for it.</div></SoftCard>}
