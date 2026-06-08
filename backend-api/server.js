@@ -1033,6 +1033,72 @@ const routes = {
     return { schema, json: JSON.stringify(schema, null, 2), isLegal, types: (schema['@graph'] || []).map((n) => n['@type']) };
   },
 
+  // ── Live "apply" layer (needs the seo-agent-optimize mu-plugin installed) ──
+  // Is the optimize mu-plugin present? (Tells the UI/automation whether schema/CSS
+  // can be auto-applied and WebP auto-served.)
+  'POST /optimize-status': async (body) => {
+    try {
+      const { creds } = await resolveCreds(body);
+      const wp = clientFrom(creds);
+      const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/optimize-selftest`).catch(() => null);
+      return { installed: !!(r && r.ok), features: (r && r.features) || [] };
+    } catch (e) { return { installed: false, error: e.message }; }
+  },
+  // Auto-install + activate a server-level WebP plugin (Converter for Media) via
+  // the WP plugins REST API — the right tool for images (handles all paths, CSS
+  // backgrounds, AVIF). Needs an admin app-password with install_plugins.
+  'POST /install-webp-plugin': async (body) => {
+    const { creds, site } = await resolveCreds(body);
+    if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'site is read-only (write not armed)' };
+    const wp = clientFrom(creds);
+    const slug = body.slug || 'webp-converter-for-media';
+    try {
+      const list = await wp.request(`${wp.baseUrl}/wp-json/wp/v2/plugins`).catch(() => []);
+      const existing = Array.isArray(list) ? list.find((p) => (p.plugin || '').split('/')[0] === slug || p.textdomain === slug) : null;
+      if (existing) {
+        if (existing.status !== 'active') await wp.request(`${wp.baseUrl}/wp-json/wp/v2/plugins/${existing.plugin}`, { method: 'POST', body: { status: 'active' } });
+        return { ok: true, already: true, plugin: existing.plugin, status: 'active' };
+      }
+      const r = await wp.request(`${wp.baseUrl}/wp-json/wp/v2/plugins`, { method: 'POST', body: { slug, status: 'active' } });
+      if (site) await db.logActivity({ site_id: site.id, type: 'connection', actor: 'Agent', icon: 'check', text: 'Installed WebP plugin — Converter for Media', meta: 'auto image WebP/AVIF' }).catch(() => {});
+      return { ok: true, installed: true, plugin: r.plugin, status: r.status };
+    } catch (e) { return { error: 'Install failed — the WordPress app-password user needs admin (install_plugins). ' + e.message }; }
+  },
+
+  // Resolve a page URL → post/page id (by slug) so schema can be attached.
+  // Apply per-page JSON-LD schema to the live site via the mu-plugin.
+  'POST /apply-schema': async (body) => {
+    const { creds, site } = await resolveCreds(body);
+    if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'site is read-only (write not armed)' };
+    const wp = clientFrom(creds);
+    let postId = body.postId;
+    if (!postId && body.url) {
+      const slug = decodeURIComponent((body.url.replace(/\/$/, '').split('/').pop() || '')).toLowerCase();
+      for (const type of ['pages', 'posts']) {
+        const rows = await wp.request(`/${type}?slug=${encodeURIComponent(slug)}&_fields=id`).catch(() => []);
+        if (Array.isArray(rows) && rows[0]) { postId = rows[0].id; break; }
+      }
+    }
+    if (!postId) return { error: 'Could not resolve the page — pass postId or a valid page URL.' };
+    const jsonld = typeof body.jsonld === 'string' ? body.jsonld : JSON.stringify(body.jsonld || body.schema || {});
+    try {
+      const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/schema`, { method: 'POST', body: { post_id: postId, jsonld } });
+      if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: 'Applied schema to live page #' + postId, meta: 'JSON-LD' }).catch(() => {});
+      return { ok: true, postId, ...r };
+    } catch (e) { return { error: 'Apply failed — is the seo-agent-optimize mu-plugin installed? ' + e.message }; }
+  },
+  // Apply site-wide custom CSS to the live site via the mu-plugin.
+  'POST /apply-css': async (body) => {
+    const { creds, site } = await resolveCreds(body);
+    if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'site is read-only (write not armed)' };
+    const wp = clientFrom(creds);
+    try {
+      const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/css`, { method: 'POST', body: { css: body.css || '' } });
+      if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: 'Applied custom CSS to live site', meta: (r && r.bytes) ? r.bytes + ' bytes' : '' }).catch(() => {});
+      return { ok: true, ...r };
+    } catch (e) { return { error: 'Apply failed — is the seo-agent-optimize mu-plugin installed? ' + e.message }; }
+  },
+
   // AI-SEO fact extraction: surface citable facts + FAQ from a page to improve
   // LLM/answer-engine citation; returns a ready FAQPage schema too.
   'POST /ai-seo-facts': async (body) => {

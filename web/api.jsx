@@ -136,6 +136,11 @@
     execNarrative(metrics) { return engine("/exec-narrative", { metrics }); },
     internalLinks(siteId, opts) { return engine("/internal-links", Object.assign({ siteId }, opts || {})); },
     generateSchema(siteId, page, schemaConfig, faqs) { return engine("/generate-schema", { siteId, page, schemaConfig, faqs }); },
+    // Live "apply" layer (needs the seo-agent-optimize mu-plugin)
+    optimizeStatus(siteId) { return engine("/optimize-status", { siteId }); },
+    installWebpPlugin(siteId) { return engine("/install-webp-plugin", { siteId }); },
+    applySchema(siteId, opts) { return engine("/apply-schema", Object.assign({ siteId }, opts || {})); },
+    applyCss(siteId, css) { return engine("/apply-css", { siteId, css }); },
     aiSeoFacts(siteId, url, title) { return engine("/ai-seo-facts", { siteId, url, title }); },
     generateCss(siteId, findings) { return engine("/generate-css", { siteId, findings }); },
     mediaScan(siteId) { return engine("/media-scan", { siteId }); },

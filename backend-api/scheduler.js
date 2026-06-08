@@ -18,10 +18,19 @@ import * as gscIndex from './gsc-index.js';
 import { findOpportunities } from './content-opportunities.js';
 import * as airtable from './airtable.js';
 import * as imageOpt from './image-optimize.js';
+import { generateCssFixes } from './css-fixes.js';
 import { WordPressClient } from '../src/wp/client.js';
 
 const DAY = 86400000;
 const mem = Object.create(null); // `${siteId}:${job}` -> last-run ms
+
+// Minimal Supabase REST read (for the latest audit's findings).
+async function sb(path) {
+  const SB = process.env.SUPABASE_URL, K = process.env.SUPABASE_SERVICE_ROLE;
+  const res = await fetch(`${SB}/rest/v1/${path}`, { headers: { apikey: K, Authorization: 'Bearer ' + K } });
+  if (!res.ok) return [];
+  return res.json().catch(() => []);
+}
 
 const due = (siteId, job, every) => (Date.now() - (mem[`${siteId}:${job}`] || 0)) >= every;
 const mark = (siteId, job) => { mem[`${siteId}:${job}`] = Date.now(); };
@@ -98,11 +107,36 @@ async function jobAutoOptimizeImages(site) {
   } catch (e) { console.error('[scheduler] auto-optimize-images', site.id, e && e.message); }
 }
 
+// ── Job: auto-apply accessibility/perf CSS fixes to the live site ───────────
+// Generates CSS from the latest audit and pushes it via the seo-agent-optimize
+// mu-plugin (injected in <head>, reversible). Gated on write_armed AND the plugin
+// being installed — no-ops safely otherwise. WebP serving + schema are handled by
+// the same mu-plugin (WebP automatically; schema per-page via the apply action).
+async function jobAutoApplyCss(site) {
+  if (!site.write_armed) return;
+  let creds; try { creds = await credsForSite(site.id); } catch (e) { return; }
+  const wp = new WordPressClient({ baseUrl: creds.baseUrl, username: creds.username, appPassword: creds.appPassword });
+  // Only proceed if the optimize mu-plugin is present.
+  const self = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/optimize-selftest`).catch(() => null);
+  if (!self || !self.ok) return;
+  const audits = await sb(`audits?site_id=eq.${site.id}&select=findings&order=created_at.desc&limit=1`).catch(() => []);
+  const findings = (audits && audits[0] && audits[0].findings) || [];
+  if (!findings.length) return;
+  const res = generateCssFixes(findings);
+  if (!res.rules || !res.rules.length) return;
+  const css = res.css.replace('{{DATE}}', new Date().toISOString().slice(0, 10));
+  try {
+    await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/css`, { method: 'POST', body: { css } });
+    await note(site.id, `Auto-applied ${res.rules.length} CSS fix(es) to the live site`);
+  } catch (e) { console.error('[scheduler] auto-apply-css', site.id, e && e.message); }
+}
+
 const JOBS = [
   { name: 'auto-index', every: DAY, run: jobAutoIndex },
   { name: 'gsc-health', every: DAY, run: jobGscHealth },
   { name: 'keyword-push', every: 7 * DAY, run: jobKeywordPush },
   { name: 'image-optimize', every: 7 * DAY, run: jobAutoOptimizeImages },
+  { name: 'apply-css', every: 7 * DAY, run: jobAutoApplyCss },
 ];
 
 async function tick() {

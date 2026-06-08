@@ -108,9 +108,19 @@ export async function optimizeImages(siteId, { ids = null, quality = 80, max = 8
       if (apply) {
         const up = await wp.uploadMedia(out, filename, 'image/webp', { force: true });
         row.uploaded = !(up && up.dryRun); row.newId = up?.id; row.newUrl = up?.source_url;
+        if (row.uploaded && row.newUrl) row.origUrl = img.url;   // for the WebP map
       } else { row.preview = true; }
       results.push(row);
     } catch (e) { results.push({ id: img.id, url: img.url, error: String(e.message || e) }); }
+  }
+  // Tell the seo-agent-optimize mu-plugin which original URL → which WebP, so it
+  // can rewrite live pages (the WebP is a separate media item, not a sibling file).
+  if (apply) {
+    const map = {};
+    for (const r of results) if (r.uploaded && r.origUrl && r.newUrl) map[r.origUrl] = r.newUrl;
+    if (Object.keys(map).length) {
+      try { await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/webp-map`, { method: 'POST', body: { map } }); } catch (e) { /* plugin may be absent */ }
+    }
   }
   const savedKB = results.reduce((s, r) => s + (r.savedKB || 0), 0);
   const uploaded = results.filter((r) => r.uploaded).length;
