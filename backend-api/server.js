@@ -1183,6 +1183,45 @@ const routes = {
     return { sites: out };
   },
 
+  // ── Embedded Airtable grid: read & edit the site's table from the dashboard ──
+  // Shared resolver: returns the PAT + base + table for the site, or an error obj.
+  // Lists a page of records + the table's field schema (with select options) so
+  // the grid can render proper editable cells (esp. the Status dropdown → n8n).
+  'POST /airtable-records': async (body) => {
+    const { siteId } = body;
+    const pat = await db.getAirtablePat(siteId);
+    if (!pat) return { error: 'Airtable not connected', needsConnect: true };
+    const cfg = await db.getAirtableConfig(siteId);
+    if (!cfg || !cfg.base_id || !cfg.table_gaps) return { error: 'Configure the Airtable base + table first.', needsConfig: true };
+    try {
+      const [tables, page] = await Promise.all([
+        airtable.listTables(pat, cfg.base_id),
+        airtable.listRecords(pat, cfg.base_id, cfg.table_gaps, { pageSize: body.pageSize || 50, offset: body.offset }),
+      ]);
+      const table = tables.find((t) => t.id === cfg.table_gaps || t.name === cfg.table_gaps);
+      return { fields: table ? table.fields : [], tableName: table && table.name, records: page.records, offset: page.offset, keywordField: cfg.table_content || 'Keyword' };
+    } catch (e) { return { error: e.message }; }
+  },
+  // Patch one record's fields (inline cell edit / Status change that triggers n8n).
+  'POST /airtable-update-record': async (body) => {
+    const pat = await db.getAirtablePat(body.siteId);
+    if (!pat) return { error: 'Airtable not connected' };
+    const cfg = await db.getAirtableConfig(body.siteId);
+    if (!cfg || !cfg.base_id || !cfg.table_gaps) return { error: 'Not configured' };
+    if (!body.recordId) return { error: 'recordId required' };
+    try { return { record: await airtable.updateRecord(pat, cfg.base_id, cfg.table_gaps, body.recordId, body.fields || {}) }; }
+    catch (e) { return { error: e.message }; }
+  },
+  // Add a new row.
+  'POST /airtable-create-record': async (body) => {
+    const pat = await db.getAirtablePat(body.siteId);
+    if (!pat) return { error: 'Airtable not connected' };
+    const cfg = await db.getAirtableConfig(body.siteId);
+    if (!cfg || !cfg.base_id || !cfg.table_gaps) return { error: 'Not configured' };
+    try { return { record: await airtable.createRecord(pat, cfg.base_id, cfg.table_gaps, body.fields || {}) }; }
+    catch (e) { return { error: e.message }; }
+  },
+
   // List the bases this site's stored PAT can access (for the per-site dropdown).
   'POST /airtable-bases': async (body) => {
     const pat = await db.getAirtablePat(body.siteId);

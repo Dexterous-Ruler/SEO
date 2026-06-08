@@ -2976,6 +2976,98 @@ function SemrushScreen({ ctx }) {
   );
 }
 
+/* ---------------- Embedded Airtable grid (view + edit in-place) ----------
+   One editable cell. Text commits on blur/Enter; singleSelect (e.g. Status →
+   triggers the n8n workflow) commits immediately. Read-only for computed types. */
+const GRID_EDITABLE = new Set(["singleLineText","multilineText","richText","number","currency","percent","url","email","phoneNumber","date","dateTime","singleSelect"]);
+function GridCell({ field, value, onSave }) {
+  const init = value==null?"":(Array.isArray(value)?value.join(", "):String(value));
+  const [v,setV] = useState(init);
+  useEffect(()=>{ setV(init); },[init]);
+  const base = { width:"100%", border:"none", outline:"none", background:"transparent", font:"inherit", fontSize:12.5, color:"var(--ink)", padding:"7px 9px" };
+  if(field.type==="singleSelect"){
+    const isStatus=/status/i.test(field.name);
+    return (
+      <select value={v||""} onChange={e=>{ setV(e.target.value); onSave(e.target.value||null); }}
+        style={{ ...base, cursor:"pointer", fontWeight:isStatus?700:500, color:isStatus&&v?"var(--t-700)":"var(--ink)", appearance:"auto" }}>
+        <option value="">—</option>
+        {(field.options||[]).map(o=><option key={o.name} value={o.name}>{o.name}</option>)}
+      </select>
+    );
+  }
+  if(!GRID_EDITABLE.has(field.type)) return <span style={{ ...base, display:"block", color:"var(--muted)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }} title={init}>{init}</span>;
+  const commit=()=>{ if(v!==init) onSave(v===""?null:v); };
+  return <input value={v} onChange={e=>setV(e.target.value)} onBlur={commit} onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); if(e.key==="Escape"){ setV(init); e.target.blur(); } }}
+    style={base} title={v} />;
+}
+
+function AirtableGrid({ ctx, siteId }) {
+  const API = window.SentinelAPI;
+  const [d,setD] = useState(null);          // { fields, records, offset, tableName, keywordField }
+  const [loading,setLoading] = useState(false);
+  const [err,setErr] = useState(null);
+  const [saving,setSaving] = useState(0);
+  const load = (offset)=>{
+    setLoading(true); setErr(null);
+    API.airtableRecords(siteId,{ offset, pageSize:50 }).then(r=>{
+      if(r.error){ setErr(r.error); return; }
+      setD(prev=> (offset&&prev) ? { ...r, records:[...prev.records, ...r.records] } : r);
+    }).catch(e=>setErr(e.message)).finally(()=>setLoading(false));
+  };
+  useEffect(()=>{ setD(null); load(); },[siteId]);
+  const saveCell=(recId, fieldName, value)=>{
+    setD(p=>({ ...p, records:p.records.map(r=>r.id===recId?{ ...r, fields:{ ...r.fields, [fieldName]:value } }:r) }));
+    setSaving(c=>c+1);
+    API.airtableUpdateRecord(siteId, recId, { [fieldName]:value })
+      .then(r=>{ if(r.error) ctx.toast("Save failed: "+r.error,"clay"); })
+      .catch(e=>ctx.toast("Save failed: "+e.message,"clay")).finally(()=>setSaving(c=>c-1));
+  };
+  const addRow=()=>{
+    API.airtableCreateRecord(siteId,{}).then(r=>{ if(r.error){ ctx.toast("Add failed: "+r.error,"clay"); return; } setD(p=>({ ...p, records:[r.record, ...p.records] })); ctx.toast("Row added — fill it in","teal"); }).catch(e=>ctx.toast(e.message,"clay"));
+  };
+
+  if(err) return <SoftCard hover={false}><ErrBanner msg={err} onRetry={()=>{ setErr(null); load(); }} /></SoftCard>;
+  if(!d) return <SoftCard hover={false}><div style={{ padding:"14px 4px", color:"var(--muted)", fontSize:13.5, display:"flex", alignItems:"center", gap:10 }}><Icon name="cog" size={16} className="audit-spin" />Loading records…</div></SoftCard>;
+  const fields = d.fields||[];
+  return (
+    <SoftCard hover={false} style={{ padding:0, overflow:"hidden" }}>
+      <div style={{ display:"flex", alignItems:"center", gap:12, padding:"15px 18px", borderBottom:"1px solid var(--line-soft)", flexWrap:"wrap" }}>
+        <div style={{ flex:1, minWidth:160 }}>
+          <div style={{ fontSize:15.5, fontWeight:800 }}>{d.tableName||"Records"}</div>
+          <div style={{ fontSize:11.5, color:"var(--muted)" }}>{d.records.length} loaded{d.offset?" · more available":""} · edits save live to Airtable</div>
+        </div>
+        {saving>0 && <Chip tone="gold" size="sm"><Icon name="cog" size={11} className="audit-spin" />Saving…</Chip>}
+        <NeoButton kind="primary" size="sm" icon="plus" onClick={addRow}>Add row</NeoButton>
+      </div>
+      <div className="scroll" style={{ overflowX:"auto", maxHeight:560, overflowY:"auto" }}>
+        <table style={{ borderCollapse:"collapse", width:"max-content", minWidth:"100%" }}>
+          <thead><tr style={{ position:"sticky", top:0, zIndex:1 }}>
+            {fields.map(f=>(
+              <th key={f.name} style={{ textAlign:"left", padding:"9px 9px", fontSize:11, fontWeight:800, letterSpacing:".02em", textTransform:"uppercase", color: /status/i.test(f.name)?"var(--t-700)":"var(--muted)", background:"var(--bg-2)", borderBottom:"1px solid var(--line)", borderRight:"1px solid var(--line-soft)", whiteSpace:"nowrap", minWidth: f.type==="multilineText"?220:130 }}>{f.name}</th>
+            ))}
+          </tr></thead>
+          <tbody>
+            {d.records.map((rec,ri)=>(
+              <tr key={rec.id} style={{ background: ri%2?"var(--surface)":"var(--bg)" }}>
+                {fields.map(f=>(
+                  <td key={f.name} style={{ borderBottom:"1px solid var(--line-soft)", borderRight:"1px solid var(--line-soft)", verticalAlign:"middle", maxWidth:320 }}>
+                    <GridCell field={f} value={rec.fields[f.name]} onSave={(val)=>saveCell(rec.id, f.name, val)} />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {d.offset && (
+        <div style={{ padding:"12px 18px", borderTop:"1px solid var(--line-soft)", textAlign:"center" }}>
+          <NeoButton kind="soft" size="sm" icon={loading?undefined:"chevD"} disabled={loading} onClick={()=>load(d.offset)}>{loading&&<Icon name="cog" size={14} className="audit-spin" />}{loading?"Loading…":"Load 50 more"}</NeoButton>
+        </div>
+      )}
+    </SoftCard>
+  );
+}
+
 /* ---------------- Airtable Sync screen ---------------- */
 /* Controls the whole Airtable flow: connect (PAT) → pick base → map tables →
    sync DataForSEO keyword gaps + content suggestions + GEO results. Reuses UI atoms. */
@@ -3143,6 +3235,15 @@ function AirtableScreen({ ctx }) {
                 <div style={{ fontSize:13, color:"var(--muted)" }}>Choose a base, table and keyword column above to enable pushing.</div>
               )}
             </SoftCard>
+          )}
+
+          {/* Embedded editable grid — manage the table without leaving the app.
+              Change a row's Status (e.g. "Write Article") to trigger the n8n flow. */}
+          {ready && (
+            <div>
+              <SectionHead sub="View & edit your Airtable records here. Set Status to trigger the n8n article workflow — no need to open Airtable.">Records — manage in-place</SectionHead>
+              <AirtableGrid ctx={ctx} siteId={s.id} />
+            </div>
           )}
 
           {/* sync log */}

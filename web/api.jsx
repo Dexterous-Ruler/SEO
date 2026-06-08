@@ -153,6 +153,10 @@
     airtableConfig(siteId, opts) { return engine("/airtable-config", Object.assign({ siteId }, opts || {})); },
     airtableStatus(siteId) { return engine("/airtable-status", { siteId }); },
     airtablePushKeywords(siteId, keywords) { return engine("/airtable-push-keywords", { siteId, keywords }); },
+    // Embedded editable grid
+    airtableRecords(siteId, opts) { return engine("/airtable-records", Object.assign({ siteId }, opts || {})); },
+    airtableUpdateRecord(siteId, recordId, fields) { return engine("/airtable-update-record", { siteId, recordId, fields }); },
+    airtableCreateRecord(siteId, fields) { return engine("/airtable-create-record", { siteId, fields }); },
     airtableSync(siteId, opts) { return engine("/airtable-sync", Object.assign({ siteId }, opts || {})); },
     async listAirtableLog(siteId) { return sbSelect("airtable_sync_log", "site_id=eq." + siteId + "&select=*&order=created_at.desc&limit=15"); },
     connect(creds) { return engine("/connect", { creds }); },
