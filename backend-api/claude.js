@@ -248,6 +248,22 @@ export async function externalLinkSuggestions({ url, title, text, niche, siteId 
   } catch (e) { return []; }
 }
 
+// Link-building OUTREACH email drafter. Personalised pitch for one prospect,
+// based on the tactic (competitor gap / broken link / unlinked mention). Honest,
+// concise, non-spammy. Returns { subject, body }. Sending stays human-approved.
+export async function outreachEmail({ siteName, siteUrl, niche, prospectDomain, tactic, targetPage, siteId }) {
+  const txt = await complete({
+    system: sys('backlinks.outreach', siteId),
+    promptKey: 'backlinks.outreach',
+    maxTokens: 700,
+    messages: [{ role: 'user', content: `OUR SITE: ${siteName || ''} (${siteUrl || ''})\nNICHE: ${niche || ''}\nPROSPECT DOMAIN: ${prospectDomain}\nTACTIC: ${tactic}\nOUR RELEVANT PAGE: ${targetPage || '(suggest the most relevant one)'}\n\nWrite the outreach email. Return ONLY JSON: {"subject":"...","body":"..."}.` }],
+  });
+  try {
+    const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
+    return { subject: String(o.subject || '').slice(0, 160), body: String(o.body || '') };
+  } catch (e) { return { subject: '', body: txt.trim() }; }
+}
+
 // AI-SEO fact extraction. Pull the citable, extractable facts from a page and
 // propose a FAQPage JSON-LD + concrete factual additions that make the page
 // easier for LLMs/answer engines to cite. Returns { facts, faqs, suggestions }.

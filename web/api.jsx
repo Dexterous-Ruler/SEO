@@ -137,6 +137,10 @@
     execNarrative(metrics) { return engine("/exec-narrative", { metrics }); },
     internalLinks(siteId, opts) { return engine("/internal-links", Object.assign({ siteId }, opts || {})); },
     externalLinks(siteId, targetUrl) { return engine("/external-links", { siteId, targetUrl }); },
+    backlinksSummary(siteId) { return engine("/backlinks/summary", { siteId }); },
+    backlinksGap(siteId) { return engine("/backlinks/gap", { siteId }); },
+    backlinksDraftOutreach(siteId, prospectDomain, tactic, targetPage) { return engine("/backlinks/draft-outreach", { siteId, prospectDomain, tactic, targetPage }); },
+    backlinksPushProspects(siteId, prospects) { return engine("/backlinks/push-prospects", { siteId, prospects }); },
     applyLink(siteId, sourcePage, anchor, targetUrl) { return engine("/apply-link", { siteId, sourcePage, anchor, targetUrl }); },
     generateSchema(siteId, page, schemaConfig, faqs) { return engine("/generate-schema", { siteId, page, schemaConfig, faqs }); },
     // Live "apply" layer (needs the seo-agent-optimize mu-plugin)

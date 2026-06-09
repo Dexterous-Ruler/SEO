@@ -145,6 +145,40 @@ export async function pushKeywords(pat, baseId, table, fieldName, keywords, { ex
   return { pushed, skipped: clean.length - fresh.length, withExtras };
 }
 
+// Push link-building PROSPECTS into an "Outreach" table so n8n can send +
+// sequence (mirrors pushKeywords → the article loop). Auto-creates the table if
+// the PAT has schema-write; de-dupes by Domain. Returns { pushed, skipped }.
+export async function pushProspects(pat, baseId, table, prospects) {
+  const tbl = table || 'Outreach';
+  const clean = (prospects || []).filter((p) => p && p.domain);
+  if (!clean.length) return { pushed: 0, skipped: 0 };
+  await ensureTable(pat, baseId, tbl, [
+    { name: 'Domain', type: 'singleLineText' },
+    { name: 'Rank', type: 'number', options: { precision: 0 } },
+    { name: 'Competitors Linked', type: 'number', options: { precision: 0 } },
+    { name: 'Link Value Score', type: 'number', options: { precision: 0 } },
+    { name: 'Tactic', type: 'singleLineText' },
+    { name: 'Status', type: 'singleLineText' },
+    { name: 'Subject', type: 'singleLineText' },
+    { name: 'Email', type: 'multilineText' },
+  ]).catch(() => {});
+  let existing = new Set();
+  try { existing = await listFieldValues(pat, baseId, tbl, 'Domain'); } catch (e) {}
+  const fresh = clean.filter((p) => !existing.has(String(p.domain).trim().toLowerCase()));
+  if (!fresh.length) return { pushed: 0, skipped: clean.length };
+  const rows = fresh.map((p) => {
+    const f = { Domain: p.domain, Tactic: p.tactic || 'competitor_gap', Status: 'To review' };
+    if (p.rank != null) f.Rank = p.rank;
+    if (p.competitorsLinked != null) f['Competitors Linked'] = p.competitorsLinked;
+    if (p.lvs != null) f['Link Value Score'] = p.lvs;
+    if (p.subject) f.Subject = p.subject;
+    if (p.body || p.email) f.Email = p.body || p.email;
+    return f;
+  });
+  const pushed = await createRecords(pat, baseId, tbl, rows);
+  return { pushed, skipped: clean.length - fresh.length };
+}
+
 // ── field schemas for auto-created tables ──────────────────────────────────
 export const SCHEMAS = {
   gaps: [
