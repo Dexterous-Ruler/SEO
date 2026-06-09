@@ -228,6 +228,26 @@ export async function internalLinkSuggestions({ sourceUrl, sourceTitle, sourceTe
   } catch (e) { return []; }
 }
 
+// External-link suggestions: propose authoritative OUTBOUND links (to high-trust
+// sources — official/gov, standards bodies, established publications) for a page,
+// using anchor text that already appears in the page so it can be applied cleanly.
+// Returns [{ anchor, targetUrl, source, reason }].
+export async function externalLinkSuggestions({ url, title, text, niche, siteId }) {
+  const txt = await complete({
+    system: sys('seo.externalLinks', siteId),
+    promptKey: 'seo.externalLinks',
+    maxTokens: 900,
+    messages: [{ role: 'user', content: `PAGE URL: ${url}\nTITLE: ${title || ''}\nNICHE: ${niche || ''}\n\nPAGE TEXT (excerpt):\n${(text || '').slice(0, 5000)}\n\nReturn the JSON array of authoritative external-link suggestions.` }],
+  });
+  try {
+    const arr = JSON.parse(txt.slice(txt.indexOf('['), txt.lastIndexOf(']') + 1));
+    return (Array.isArray(arr) ? arr : [])
+      .filter((s) => s && s.anchor && s.targetUrl && /^https?:\/\//i.test(s.targetUrl))
+      .map((s) => ({ anchor: String(s.anchor).slice(0, 80), targetUrl: String(s.targetUrl), source: String(s.source || '').slice(0, 60), reason: String(s.reason || '').slice(0, 140) }))
+      .slice(0, 20);
+  } catch (e) { return []; }
+}
+
 // AI-SEO fact extraction. Pull the citable, extractable facts from a page and
 // propose a FAQPage JSON-LD + concrete factual additions that make the page
 // easier for LLMs/answer engines to cite. Returns { facts, faqs, suggestions }.

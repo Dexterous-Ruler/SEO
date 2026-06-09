@@ -50,7 +50,8 @@ const NAV_INDEX = [
   { title:"Activity Log", screen:"activity", icon:"clock", kw:"activity log audit trail history writes approvals rollbacks failures export changes" },
   { title:"Audits", screen:"audits", icon:"radar", kw:"audit findings road to 100 propose fix ranked rice worklist lighthouse issues scan" },
   { title:"On-Page Fixes", screen:"optimize", icon:"bolt", kw:"on page fixes optimize tools" },
-  { title:"Internal Links", screen:"optimize", tab:"links", icon:"link", kw:"internal links link building anchor text structure orphan" },
+  { title:"Internal Links", screen:"optimize", tab:"links", icon:"link", kw:"internal links link building anchor text structure orphan approve push apply" },
+  { title:"External Links", screen:"optimize", tab:"ext", icon:"globe", kw:"external outbound links authoritative sources citations gov official approve push apply" },
   { title:"Schema Markup", screen:"optimize", tab:"schema", icon:"layers", kw:"schema structured data json-ld rich results markup generate" },
   { title:"AI-SEO Facts", screen:"optimize", tab:"facts", icon:"sparkles", kw:"ai seo facts citable faq faqpage extract llm citation" },
   { title:"CSS Fixes", screen:"optimize", tab:"css", icon:"bolt", kw:"css core web vitals render blocking unused styles generate" },
@@ -1501,10 +1502,12 @@ function OptimizeScreen({ ctx }) {
   const API = window.SentinelAPI;
   const live = API && window.SENTINEL_LIVE;
   const [tab,setTab] = useState("links");
-  useEffect(()=>{ if(ctx.navTab && ["links","schema","facts","css","images","speed"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
+  useEffect(()=>{ if(ctx.navTab && ["links","ext","schema","facts","css","images","speed"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
   const [busy,setBusy] = useState("");
   const [err,setErr] = useState(null);
   const [links,setLinks] = useState(null);
+  const [ext,setExt] = useState(null);
+  const [applied,setApplied] = useState({});   // linkKey -> { busy, status, reason }
   const [schema,setSchema] = useState(null);
   const [facts,setFacts] = useState(null);
   const [css,setCss] = useState(null);
@@ -1513,13 +1516,36 @@ function OptimizeScreen({ ctx }) {
   const [media,setMedia] = useState(null);
   const [speed,setSpeed] = useState(null);
   const [speedStrat,setSpeedStrat] = useState("mobile");
-  useEffect(()=>{ setLinks(null); setSchema(null); setFacts(null); setCss(null); setMedia(null); setSpeed(null); setErr(null); setPageUrl((s._rawUrl||s.url||"").replace(/\/$/,"")+"/"); },[s.id]);
+  useEffect(()=>{ setLinks(null); setExt(null); setApplied({}); setSchema(null); setFacts(null); setCss(null); setMedia(null); setSpeed(null); setErr(null); setPageUrl((s._rawUrl||s.url||"").replace(/\/$/,"")+"/"); },[s.id]);
   const copy = (t)=>{ try{ navigator.clipboard.writeText(t); ctx.toast("Copied to clipboard","teal"); }catch(e){ ctx.toast("Copy failed","gold"); } };
   // Apply schema/CSS straight to the live site (needs the seo-agent-optimize mu-plugin).
   const applySchemaLive = ()=>{ if(!schema){return;} setBusy("applySchema"); API.applySchema(s.id,{ url:pageUrl, jsonld:schema.json }).then(r=>{ if(r.error){ctx.toast("Schema: "+r.error,"clay");return;} ctx.toast("Schema applied to the live page ✓","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
   const applyCssLive = ()=>{ if(!css){return;} setBusy("applyCss"); API.applyCss(s.id, css.css).then(r=>{ if(r.error){ctx.toast("CSS: "+r.error,"clay");return;} ctx.toast("CSS applied to the live site ✓","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
 
   const findLinks = ()=>{ setBusy("links"); setErr(null); API.internalLinks(s.id,{maxSources:8}).then(r=>{ if(r.error){setErr(r.error);return;} setLinks(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
+  const genExt = ()=>{ if(!pageUrl){ctx.toast("Enter a page URL","gold");return;} setBusy("ext"); setErr(null); API.externalLinks(s.id,pageUrl).then(r=>{ if(r.error){setErr(r.error);return;} setExt(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
+  // Approve & push a single link (internal or external) into the live page.
+  const linkKey = (l)=> (l.sourcePage||"")+"|"+l.anchor+"|"+l.targetUrl;
+  const applyOne = (l)=> new Promise((res)=>{
+    const k=linkKey(l); setApplied(a=>({...a,[k]:{busy:true}}));
+    API.applyLink(s.id, l.sourcePage, l.anchor, l.targetUrl).then(r=>{
+      setApplied(a=>({...a,[k]:{status:r.status||(r.error?"error":"?"), reason:r.reason||r.error}}));
+      res(r||{});
+    }).catch(e=>{ setApplied(a=>({...a,[k]:{status:"error", reason:e.message}})); res({error:e.message}); });
+  });
+  const applyAll = (sugs)=>{
+    if(!sugs||!sugs.length) return;
+    ctx.toast("Pushing "+sugs.length+" link(s) to the live site…","teal");
+    (async()=>{ let ok=0,manual=0,blocked=0; for(const l of sugs){ const r=await applyOne(l); if(r.status==="verified")ok++; else if(r.status==="manual")manual++; else if(r.status==="blocked")blocked++; }
+      ctx.toast(blocked? "Site is read-only — arm writes on the Admin screen first." : (ok+" link(s) applied"+(manual?" · "+manual+" need the page-builder editor":"")), ok?"teal":(blocked?"clay":"gold")); })();
+  };
+  const linkStatus = (l)=>{
+    const st=applied[linkKey(l)]; if(!st) return null;
+    if(st.busy) return <span style={{ fontSize:11, color:"var(--muted)", display:"inline-flex", alignItems:"center", gap:4 }}><Icon name="cog" size={12} className="audit-spin" />Applying…</span>;
+    const tones={verified:["✓ Applied to live","var(--t-700)"],dry:["Dry-run","var(--muted)"],"dry-run":["Dry-run","var(--muted)"],manual:["Add in editor","var(--gold)"],blocked:["Read-only","var(--clay)"],error:["Failed","var(--clay)"],"silent-failure":["Didn’t stick","var(--clay)"]};
+    const t=tones[st.status]||["—","var(--muted)"];
+    return <span title={st.reason||""} style={{ fontSize:11, fontWeight:700, color:t[1] }}>{t[0]}</span>;
+  };
   const genSchema = ()=>{ if(!pageUrl){ctx.toast("Enter a page URL","gold");return;} setBusy("schema"); setErr(null); API.generateSchema(s.id,{url:pageUrl,type:pageType,title:""}).then(r=>{ if(r.error){setErr(r.error);return;} setSchema(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const genFacts = ()=>{ if(!pageUrl){ctx.toast("Enter a page URL","gold");return;} setBusy("facts"); setErr(null); API.aiSeoFacts(s.id,pageUrl).then(r=>{ if(r.error){setErr(r.error);return;} setFacts(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const genCss = ()=>{ setBusy("css"); setErr(null); API.generateCss(s.id).then(r=>{ if(r.error){setErr(r.error);return;} setCss(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
@@ -1537,7 +1563,7 @@ function OptimizeScreen({ ctx }) {
   }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
   const runSpeed = ()=>{ if(!pageUrl){ctx.toast("Enter a URL","gold");return;} setBusy("speed"); setErr(null); API.speedTest(pageUrl,speedStrat).then(r=>{ if(r.error){setErr(r.error);return;} setSpeed(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
 
-  const TABS=[["links","Internal Links","link"],["schema","Schema","layers"],["facts","AI-SEO Facts","sparkles"],["css","CSS Fixes","bolt"],["images","Images","image"],["speed","Speed Test","gauge"]];
+  const TABS=[["links","Internal Links","link"],["ext","External Links","globe"],["schema","Schema","layers"],["facts","AI-SEO Facts","sparkles"],["css","CSS Fixes","bolt"],["images","Images","image"],["speed","Speed Test","gauge"]];
   const urlBar = (onGo,label,key)=>(
     <div style={{ display:"flex", gap:8, marginBottom:14, flexWrap:"wrap" }}>
       <input value={pageUrl} onChange={e=>setPageUrl(e.target.value)} placeholder="https://your-site.com/page/" style={{ flex:1, minWidth:240, padding:"10px 13px", borderRadius:"var(--r-md)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, fontFamily:"var(--mono)", color:"var(--ink)", outline:"none" }} />
@@ -1568,15 +1594,22 @@ function OptimizeScreen({ ctx }) {
               </div>
               {links && (
                 <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-                  <div style={{ fontSize:12.5, fontWeight:700, color:"var(--ink-2)", marginBottom:4 }}>{links.count} suggestion(s) across {links.analyzed} page(s) · {links.corpusSize} pages in corpus</div>
+                  <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4, flexWrap:"wrap" }}>
+                    <span style={{ fontSize:12.5, fontWeight:700, color:"var(--ink-2)" }}>{links.count} suggestion(s) across {links.analyzed} page(s) · {links.corpusSize} pages in corpus</span>
+                    {(links.suggestions||[]).length>0 && <NeoButton kind="soft" size="sm" icon="check" style={{ marginLeft:"auto" }} onClick={()=>applyAll(links.suggestions)}>Approve &amp; push all</NeoButton>}
+                  </div>
                   {(links.suggestions||[]).map((l,i)=>(
                     <div key={i} style={{ padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
                       <div style={{ display:"flex", alignItems:"center", gap:9, flexWrap:"wrap", fontSize:13 }}>
-                        <span style={{ fontFamily:"var(--mono)", color:"var(--muted)", fontSize:11.5 }}>{(l.sourcePage||"").replace(/^https?:\/\/[^/]+/,"")||"/"}</span>
+                        <a href={l.sourcePage} target="_blank" rel="noopener" title="Open source page in a new tab" style={{ fontFamily:"var(--mono)", color:"var(--muted)", fontSize:11.5, textDecoration:"none" }}>{(l.sourcePage||"").replace(/^https?:\/\/[^/]+/,"")||"/"}</a>
                         <Icon name="arrowUp" size={13} style={{ transform:"rotate(90deg)", color:"var(--faint)" }} />
                         <span style={{ fontWeight:700, color:"var(--t-700)" }}>“{l.anchor}”</span>
                         <Icon name="arrowUp" size={13} style={{ transform:"rotate(90deg)", color:"var(--faint)" }} />
-                        <a href={l.targetUrl} target="_blank" style={{ fontFamily:"var(--mono)", color:"var(--ink)", textDecoration:"none", fontSize:11.5 }}>{(l.targetUrl||"").replace(/^https?:\/\/[^/]+/,"")||"/"}</a>
+                        <a href={l.targetUrl} target="_blank" rel="noopener" style={{ fontFamily:"var(--mono)", color:"var(--ink)", textDecoration:"none", fontSize:11.5 }}>{(l.targetUrl||"").replace(/^https?:\/\/[^/]+/,"")||"/"}</a>
+                        <span style={{ marginLeft:"auto", display:"inline-flex", alignItems:"center", gap:8 }}>
+                          {linkStatus(l)}
+                          <NeoButton kind="ghost" size="sm" icon="check" disabled={(applied[linkKey(l)]||{}).busy} onClick={()=>applyOne(l).then(r=>{ if(r.status==="verified")ctx.toast("Link applied to live ✓","teal"); else if(r.status==="blocked")ctx.toast("Site is read-only — arm writes on Admin first.","clay"); else if(r.status==="manual")ctx.toast(r.reason||"Add this one in your page-builder editor.","gold"); else if(r.error||r.reason)ctx.toast(r.error||r.reason,"clay"); })}>Approve</NeoButton>
+                        </span>
                       </div>
                       {l.reason && <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:5 }}>{l.reason}</div>}
                     </div>
@@ -1584,7 +1617,44 @@ function OptimizeScreen({ ctx }) {
                   {(links.suggestions||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No strong internal-link opportunities found — pages are already well interlinked.</div>}
                 </div>
               )}
-              {!links && busy!=="links" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Analyze your pages to surface contextual internal-link opportunities (anchor → target), then add them in your editor.</div>}
+              {!links && busy!=="links" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Analyze your pages to surface contextual internal-link opportunities (anchor → target). <b>Approve</b> pushes the link straight into the live page (Classic/Gutenberg); page-builder pages (Elementor) are flagged to add in the editor. Links open in a new tab so this stays open.</div>}
+            </div>
+          )}
+
+          {tab==="ext" && (
+            <div>
+              <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:6, flexWrap:"wrap" }}>
+                <div style={{ flex:1, minWidth:220 }}>
+                  <div style={{ fontSize:13.5, fontWeight:700 }}>External-link opportunities</div>
+                  <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Authoritative outbound links (gov/official/established sources) for a page — anchors are drawn from the page text so they apply cleanly. Builds topical trust.</div>
+                </div>
+              </div>
+              {urlBar(genExt,"Find external links","ext")}
+              {ext && (
+                <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4, flexWrap:"wrap" }}>
+                    <span style={{ fontSize:12.5, fontWeight:700, color:"var(--ink-2)" }}>{ext.count} authoritative link(s) suggested</span>
+                    {(ext.suggestions||[]).length>0 && <NeoButton kind="soft" size="sm" icon="check" style={{ marginLeft:"auto" }} onClick={()=>applyAll((ext.suggestions||[]).map(l=>({sourcePage:ext.sourcePage,anchor:l.anchor,targetUrl:l.targetUrl})))}>Approve &amp; push all</NeoButton>}
+                  </div>
+                  {(ext.suggestions||[]).map((l,i)=>{ const row={sourcePage:ext.sourcePage,anchor:l.anchor,targetUrl:l.targetUrl}; return (
+                    <div key={i} style={{ padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:9, flexWrap:"wrap", fontSize:13 }}>
+                        <span style={{ fontWeight:700, color:"var(--t-700)" }}>“{l.anchor}”</span>
+                        <Icon name="arrowUp" size={13} style={{ transform:"rotate(90deg)", color:"var(--faint)" }} />
+                        <a href={l.targetUrl} target="_blank" rel="noopener nofollow" style={{ fontFamily:"var(--mono)", color:"var(--ink)", textDecoration:"none", fontSize:11.5, maxWidth:340, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{l.targetUrl}</a>
+                        {l.source && <Chip tone="teal" size="sm">{l.source}</Chip>}
+                        <span style={{ marginLeft:"auto", display:"inline-flex", alignItems:"center", gap:8 }}>
+                          {linkStatus(row)}
+                          <NeoButton kind="ghost" size="sm" icon="check" disabled={(applied[linkKey(row)]||{}).busy} onClick={()=>applyOne(row).then(r=>{ if(r.status==="verified")ctx.toast("External link applied to live ✓","teal"); else if(r.status==="blocked")ctx.toast("Site is read-only — arm writes on Admin first.","clay"); else if(r.status==="manual")ctx.toast(r.reason||"Add this one in your page-builder editor.","gold"); else if(r.error||r.reason)ctx.toast(r.error||r.reason,"clay"); })}>Approve</NeoButton>
+                        </span>
+                      </div>
+                      {l.reason && <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:5 }}>{l.reason}</div>}
+                    </div>
+                  );})}
+                  {(ext.suggestions||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No strong authoritative outbound links found for this page.</div>}
+                </div>
+              )}
+              {!ext && busy!=="ext" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Enter a page URL to find authoritative outbound links. <b>Approve</b> pushes the link into the live page (Classic/Gutenberg); page-builder pages are flagged for the editor. Links open in a new tab.</div>}
             </div>
           )}
 
@@ -1616,7 +1686,19 @@ function OptimizeScreen({ ctx }) {
                   {(facts.facts||[]).length>0 && <div><div style={{ fontSize:12.5, fontWeight:700, marginBottom:6 }}>Citable facts</div><div style={{ display:"flex", flexDirection:"column", gap:5 }}>{facts.facts.map((f,i)=>(<div key={i} style={{ fontSize:12.5, padding:"8px 11px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)" }}>• {f}</div>))}</div></div>}
                   {(facts.faqs||[]).length>0 && <div><div style={{ fontSize:12.5, fontWeight:700, marginBottom:6 }}>Suggested FAQ</div><div style={{ display:"flex", flexDirection:"column", gap:6 }}>{facts.faqs.map((q,i)=>(<div key={i} style={{ padding:"9px 12px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)" }}><div style={{ fontSize:12.5, fontWeight:700 }}>{q.q}</div><div style={{ fontSize:12, color:"var(--muted)", marginTop:3 }}>{q.a}</div></div>))}</div></div>}
                   {(facts.suggestions||[]).length>0 && <div><div style={{ fontSize:12.5, fontWeight:700, marginBottom:6 }}>Additions to improve citability</div><div style={{ display:"flex", flexDirection:"column", gap:5 }}>{facts.suggestions.map((sug,i)=>(<div key={i} style={{ fontSize:12.5, padding:"8px 11px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", color:"var(--t-800)" }}>→ {sug}</div>))}</div></div>}
-                  {facts.faqSchema && <div><div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:6 }}><span style={{ fontSize:12.5, fontWeight:700 }}>FAQPage schema</span><NeoButton kind="soft" size="sm" icon="doc" style={{ marginLeft:"auto" }} onClick={()=>copy(JSON.stringify(facts.faqSchema,null,2))}>Copy</NeoButton></div><pre style={{ margin:0, padding:"12px 14px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", fontSize:11, fontFamily:"var(--mono)", overflowX:"auto", maxHeight:300 }}>{JSON.stringify(facts.faqSchema,null,2)}</pre></div>}
+                  {facts.faqSchema && <div><div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:6 }}><span style={{ fontSize:12.5, fontWeight:700 }}>FAQPage schema</span>
+                    <NeoButton kind="soft" size="sm" icon="doc" style={{ marginLeft:"auto" }} onClick={()=>copy(JSON.stringify(facts.faqSchema,null,2))}>Copy</NeoButton>
+                    <NeoButton kind="primary" size="sm" icon={busy==="applyFacts"?undefined:"check"} disabled={busy==="applyFacts"} onClick={()=>{
+                      if(!pageUrl){ctx.toast("Enter the page URL above first","gold");return;}
+                      setBusy("applyFacts"); ctx.toast("Applying FAQ schema to the live page…","teal");
+                      API.applySchema(s.id,{ url:pageUrl, jsonld:facts.faqSchema }).then(r=>{
+                        if(r.status==="blocked"){ ctx.toast("Site is read-only — arm writes on the Admin screen first.","gold"); return; }
+                        if(r.error){ ctx.toast(r.error,"clay"); return; }
+                        ctx.toast("FAQPage schema applied to the live page ✓ (reversible)","teal");
+                      }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
+                    }}>{busy==="applyFacts"?"Applying…":"Apply to live page"}</NeoButton></div>
+                    <pre style={{ margin:0, padding:"12px 14px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", fontSize:11, fontFamily:"var(--mono)", overflowX:"auto", maxHeight:300 }}>{JSON.stringify(facts.faqSchema,null,2)}</pre>
+                    <div style={{ fontSize:11, color:"var(--muted)", marginTop:5 }}>Injects the schema into the page via the seo-agent-optimize plugin — no manual paste. Needs the plugin installed and the site write-armed.</div></div>}
                 </div>
               )}
             </div>
@@ -2713,8 +2795,18 @@ function SemrushScreen({ ctx }) {
   const [negatives,setNegatives] = useState(s.negative_keywords||[]);
   const [newComp,setNewComp] = useState("");
   const [newNeg,setNewNeg] = useState("");
+  const [dbVal,setDbVal] = useState(s.semrush_db||"uk");
+  const [dbList,setDbList] = useState(null);
 
-  useEffect(()=>{ setData(null); setGaps(null); setErr(null); setNeedsKey(false); setTval(null); setCompetitors(s.competitors||[]); setNegatives(s.negative_keywords||[]); },[s.id]);
+  useEffect(()=>{ setData(null); setGaps(null); setErr(null); setNeedsKey(false); setTval(null); setCompetitors(s.competitors||[]); setNegatives(s.negative_keywords||[]); setDbVal(s.semrush_db||"uk"); },[s.id]);
+  useEffect(()=>{ if(live&&!dbList) API.siteDatabase(s.id).then(r=>{ if(r&&r.countries) setDbList(r.countries); }).catch(()=>{}); },[live]);
+  const changeDb = (db)=>{
+    if(!db||db===dbVal) return;
+    setDbVal(db); s.semrush_db=db;
+    var site=window.SITES.find(x=>x.id===s.id); if(site) site.semrush_db=db;
+    setData(null); setStriking(null); setTval(null); setGaps(null);   // stale to the old market
+    if(live) API.siteDatabase(s.id, db).then(()=>ctx.toast("Keyword market set to "+db.toUpperCase()+" — click Refresh to reload data","teal")).catch(()=>{});
+  };
   const loadTval = ()=>{
     // Reuse already-loaded keywords → zero DataForSEO units spent.
     const kws=(data&&data.topKeywords)||[];
@@ -2775,7 +2867,14 @@ function SemrushScreen({ ctx }) {
     <div className="rise">
       <PageHead title="DataForSEO" sub={`Live search-performance data for ${domain}.`}>
         <div style={{ display:"flex", gap:10 }}>
-          <Chip tone="gray" size="sm" icon="globe">{(s.semrush_db||"uk").toUpperCase()} database</Chip>
+          <div title="Keyword data market — pick the country DataForSEO pulls rankings, volumes & competitors from" style={{ display:"inline-flex", alignItems:"center", gap:5, padding:"5px 9px 5px 11px", borderRadius:99, background:"var(--surface)", boxShadow:"var(--neo-xs)", fontSize:12, fontWeight:700, color:"var(--ink)" }}>
+            <Icon name="globe" size={13} style={{ color:"var(--muted)" }} />
+            <select value={dbVal} onChange={e=>changeDb(e.target.value)}
+              style={{ appearance:"none", WebkitAppearance:"none", border:"none", background:"transparent", fontSize:12, fontWeight:700, fontFamily:"inherit", color:"var(--ink)", cursor:"pointer", outline:"none", paddingRight:1 }}>
+              {(dbList||[{db:dbVal,label:dbVal.toUpperCase()}]).map(c=>(<option key={c.db} value={c.db}>{c.label} database</option>))}
+            </select>
+            <span style={{ color:"var(--muted)", fontSize:10, marginLeft:-2 }}>▾</span>
+          </div>
           {units!=null && <Chip tone={units<100?"clay":units<1000?"gold":"teal"} size="sm" icon="bolt">${(units/100).toFixed(2)} balance</Chip>}
           {data && <NeoButton kind="soft" size="sm" icon="trend" onClick={load}>Refresh</NeoButton>}
         </div>

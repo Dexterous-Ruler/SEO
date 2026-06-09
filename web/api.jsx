@@ -110,6 +110,7 @@
     semrushUnits() { return engine("/semrush-units", {}); },
     trafficValue(siteId, keywords, db) { return engine("/traffic-value", { siteId, keywords, db: db || "uk" }); },
     saveSiteCompetitors(siteId, competitors, negativeKeywords) { return engine("/site-competitors", { siteId, competitors, negativeKeywords }); },
+    siteDatabase(siteId, db) { return engine("/site-database", { siteId, db }); },
     chat(opts) { return engine("/chat", opts); },
     chatList(siteId) { return engine("/chat-list", { siteId }); },
     chatLoad(conversationId) { return engine("/chat-load", { conversationId }); },
@@ -135,6 +136,8 @@
     execScorecard(siteId) { return engine("/exec-scorecard", { siteId }); },
     execNarrative(metrics) { return engine("/exec-narrative", { metrics }); },
     internalLinks(siteId, opts) { return engine("/internal-links", Object.assign({ siteId }, opts || {})); },
+    externalLinks(siteId, targetUrl) { return engine("/external-links", { siteId, targetUrl }); },
+    applyLink(siteId, sourcePage, anchor, targetUrl) { return engine("/apply-link", { siteId, sourcePage, anchor, targetUrl }); },
     generateSchema(siteId, page, schemaConfig, faqs) { return engine("/generate-schema", { siteId, page, schemaConfig, faqs }); },
     // Live "apply" layer (needs the seo-agent-optimize mu-plugin)
     optimizeStatus(siteId) { return engine("/optimize-status", { siteId }); },

@@ -25,10 +25,31 @@ function authHeader() {
   return 'Basic ' + Buffer.from(`${login}:${password}`).toString('base64');
 }
 
-// UK-ONLY: the platform targets the United Kingdom exclusively, so every query
-// is geo-locked to the UK regardless of any `db` argument passed by callers.
+// Per-site target market. Each site stores a `semrush_db` key (default 'uk');
+// callers pass it as `db`. We map it to a DataForSEO location/language. UK stays
+// the default so existing behaviour is unchanged when no country is chosen.
 import { UK } from './uk.js';
-const locale = () => ({ location_name: UK.location_name, language_name: UK.language_name });
+export const COUNTRIES = [
+  { db: 'uk', label: 'United Kingdom', location_name: 'United Kingdom',        language_name: 'English',    currency: 'GBP' },
+  { db: 'us', label: 'United States',  location_name: 'United States',          language_name: 'English',    currency: 'USD' },
+  { db: 'ca', label: 'Canada',         location_name: 'Canada',                 language_name: 'English',    currency: 'CAD' },
+  { db: 'au', label: 'Australia',      location_name: 'Australia',              language_name: 'English',    currency: 'AUD' },
+  { db: 'ie', label: 'Ireland',        location_name: 'Ireland',                language_name: 'English',    currency: 'EUR' },
+  { db: 'nz', label: 'New Zealand',    location_name: 'New Zealand',            language_name: 'English',    currency: 'NZD' },
+  { db: 'in', label: 'India',          location_name: 'India',                  language_name: 'English',    currency: 'INR' },
+  { db: 'ae', label: 'UAE',            location_name: 'United Arab Emirates',   language_name: 'English',    currency: 'AED' },
+  { db: 'za', label: 'South Africa',   location_name: 'South Africa',           language_name: 'English',    currency: 'ZAR' },
+  { db: 'sg', label: 'Singapore',      location_name: 'Singapore',              language_name: 'English',    currency: 'SGD' },
+  { db: 'de', label: 'Germany',        location_name: 'Germany',                language_name: 'German',     currency: 'EUR' },
+  { db: 'fr', label: 'France',         location_name: 'France',                 language_name: 'French',     currency: 'EUR' },
+  { db: 'es', label: 'Spain',          location_name: 'Spain',                  language_name: 'Spanish',    currency: 'EUR' },
+  { db: 'it', label: 'Italy',          location_name: 'Italy',                  language_name: 'Italian',    currency: 'EUR' },
+  { db: 'nl', label: 'Netherlands',    location_name: 'Netherlands',            language_name: 'Dutch',      currency: 'EUR' },
+];
+const COUNTRY_BY_DB = Object.fromEntries(COUNTRIES.map((c) => [c.db, c]));
+export function countryFor(db) { return COUNTRY_BY_DB[(db || 'uk').toLowerCase()] || COUNTRY_BY_DB.uk; }
+export function currencyFor(db) { return countryFor(db).currency; }
+const locale = (db) => { const c = countryFor(db); return { location_name: c.location_name, language_name: c.language_name }; };
 const cleanDomain = (d) => (d || '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '');
 
 // Low-level POST to a Labs endpoint. DataForSEO wraps results in tasks[].result[].
