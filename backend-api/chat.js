@@ -96,9 +96,35 @@ const TOOLS = [
   { name: 'get_prioritized_worklist', description: "Get the site's audit findings ranked by RICE score ((Reach × Impact × Confidence) ÷ Effort), weighted by real GSC clicks-per-page when connected, with impact×effort quadrants (Quick win / Major project / Fill-in / Deprioritize). Use when asked 'what should I fix first', 'what's the priority', or for a worklist/roadmap.", input_schema: { type: 'object', properties: {} } },
   { name: 'get_traffic_value', description: "Model the £/$ value of the site's organic rankings: estimated monthly clicks (volume × CTR-by-position) × CPC, per keyword and total, plus value-at-risk on page-2 keywords and the £ uplift of pushing them to page 1. Use for ROI/business-value questions ('what's our organic traffic worth', 'what's the biggest money opportunity'). CTR curve is calibrated from the site's own Search Console data when available.", input_schema: { type: 'object', properties: {} } },
   { name: 'fetch_url', description: 'Fetch any web page and return its title + main text (e.g. a competitor or a reference article the user links).', input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
-  // ── ACTION (write) tool — performs a real change when the user asks for it ──
+  // ── ACTION (write) tools — perform REAL changes on the live site when the user asks ──
   { name: 'push_keywords_to_airtable', description: "ACTION: push keywords into the site's configured Airtable keyword column — this feeds the n8n article writer and creates real rows. Use ONLY when the user explicitly asks to push/add keywords or topics to Airtable (or 'send these to the writer'). Pass `keywords` to push specific ones; omit to auto-derive the site's content-gap keywords. De-dupes against existing rows.", input_schema: { type: 'object', properties: { keywords: { type: 'array', items: { type: 'string' }, description: 'optional explicit keywords; omit to auto-derive content gaps' } } } },
+  { name: 'apply_page_meta', description: "ACTION: write an SEO meta field to a LIVE page/post and verify it stuck (read-back). Use when the user approves a title / meta-description / canonical change and asks you to push/apply/make it live. `url` = the page to change; `field` = title | meta_description | canonical; `value` = the new text. The site must be write-armed. This is a real, reversible change.", input_schema: { type: 'object', properties: { url: { type: 'string', description: 'the live page URL to update' }, field: { type: 'string', enum: ['title', 'meta_description', 'canonical'], description: 'which meta field' }, value: { type: 'string', description: 'the new value to write' } }, required: ['url', 'field', 'value'] } },
+  { name: 'apply_schema_to_page', description: "ACTION: inject JSON-LD structured data (e.g. a FAQPage / Article / Organization schema) into a LIVE page via the seo-agent-optimize plugin. Use after extract_citable_facts produces a FAQPage, or when the user asks to add/push schema to a page. `url` = the page; `jsonld` = the JSON-LD object or string. The site must be write-armed.", input_schema: { type: 'object', properties: { url: { type: 'string', description: 'the live page URL' }, jsonld: { type: 'string', description: 'the JSON-LD as a string (or object)' } }, required: ['url', 'jsonld'] } },
+  { name: 'apply_site_css', description: "ACTION: apply site-wide custom CSS to the LIVE site via the seo-agent-optimize plugin (e.g. an accessibility/contrast fix). Use only when the user explicitly approves a CSS change. The site must be write-armed.", input_schema: { type: 'object', properties: { css: { type: 'string', description: 'the CSS to inject site-wide' } }, required: ['css'] } },
 ];
+
+// Resolve a write-capable WP client for a site, enforcing the write-armed gate.
+// Returns { wp, site } or a string error message (so tools can return it verbatim).
+async function wpForSite(siteId) {
+  let creds;
+  try { creds = await credsForSite(siteId); }
+  catch (e) { return 'This site has no stored WordPress credentials — connect it on the Sites screen first.'; }
+  if (creds.site && creds.site.write_armed === false) {
+    return 'This site is READ-ONLY (write not armed). Tell the user to arm writes for "' + (creds.site.name || 'this site') + '" on the Admin/Sites screen before I can push changes to the live site.';
+  }
+  const wp = new WordPressClient({ baseUrl: creds.baseUrl, username: creds.username, appPassword: creds.appPassword });
+  return { wp, site: creds.site };
+}
+async function resolvePostId(wp, url) {
+  const slug = decodeURIComponent((String(url || '').replace(/\/$/, '').split('/').pop() || '')).toLowerCase();
+  if (!slug) return null;
+  for (const type of ['pages', 'posts']) {
+    const rows = await wp.request(`/${type}?slug=${encodeURIComponent(slug)}&_fields=id`).catch(() => []);
+    if (Array.isArray(rows) && rows[0]) return { postId: rows[0].id, objectType: type };
+  }
+  return null;
+}
+const META_FIELD_MAP = { title: 'rank_math_title', meta_description: 'rank_math_description', canonical: 'rank_math_canonical_url' };
 
 // Execute a tool call for a given siteId. Returns a string result.
 async function runTool(name, input, siteId) {
@@ -274,6 +300,39 @@ async function runTool(name, input, siteId) {
       await db.logAirtableSync({ site_id: siteId, kind: 'keywords', records_pushed: res.pushed, status: 'ok' }).catch(() => {});
       await db.upsertAirtableConfig(siteId, { last_sync: new Date().toISOString() }).catch(() => {});
       return JSON.stringify({ done: true, pushed: res.pushed, skippedAlreadyThere: res.skipped, candidates: keywords.length });
+    }
+    if (name === 'apply_page_meta') {
+      const field = META_FIELD_MAP[input.field];
+      if (!field) return 'Invalid field — use title, meta_description, or canonical.';
+      if (!input.value) return 'No value supplied to write.';
+      const g = await wpForSite(siteId); if (typeof g === 'string') return g;
+      const found = await resolvePostId(g.wp, input.url);
+      if (!found) return 'Could not find a live page matching ' + input.url + ' — check the URL.';
+      try {
+        const r = await g.wp.updateMetaVerified(found.objectType, found.postId, field, input.value, { force: true });
+        if (g.site) await db.logActivity({ site_id: g.site.id, type: 'verified', actor: 'AI chat', icon: 'check', text: 'Applied ' + input.field + ' to live page #' + found.postId, meta: 'read-back ' + r.status }).catch(() => {});
+        return JSON.stringify({ done: true, page: input.url, field: input.field, newValue: input.value, previous: r.old, status: r.status, reversible: true });
+      } catch (e) { return 'Write failed: ' + e.message; }
+    }
+    if (name === 'apply_schema_to_page') {
+      const g = await wpForSite(siteId); if (typeof g === 'string') return g;
+      const found = await resolvePostId(g.wp, input.url);
+      if (!found) return 'Could not find a live page matching ' + input.url + '.';
+      const jsonld = typeof input.jsonld === 'string' ? input.jsonld : JSON.stringify(input.jsonld || {});
+      try {
+        const r = await g.wp.request(`${g.wp.baseUrl}/wp-json/seoagent/v1/schema`, { method: 'POST', body: { post_id: found.postId, jsonld } });
+        if (g.site) await db.logActivity({ site_id: g.site.id, type: 'verified', actor: 'AI chat', icon: 'check', text: 'Applied schema to live page #' + found.postId, meta: 'JSON-LD' }).catch(() => {});
+        return JSON.stringify({ done: true, page: input.url, postId: found.postId, ...r });
+      } catch (e) { return 'Apply failed — is the seo-agent-optimize plugin installed on this site? ' + e.message; }
+    }
+    if (name === 'apply_site_css') {
+      if (!input.css) return 'No CSS supplied.';
+      const g = await wpForSite(siteId); if (typeof g === 'string') return g;
+      try {
+        const r = await g.wp.request(`${g.wp.baseUrl}/wp-json/seoagent/v1/css`, { method: 'POST', body: { css: input.css } });
+        if (g.site) await db.logActivity({ site_id: g.site.id, type: 'verified', actor: 'AI chat', icon: 'check', text: 'Applied custom CSS to live site', meta: (r && r.bytes) ? r.bytes + ' bytes' : '' }).catch(() => {});
+        return JSON.stringify({ done: true, ...r });
+      } catch (e) { return 'Apply failed — is the seo-agent-optimize plugin installed? ' + e.message; }
     }
     return 'Unknown tool';
   } catch (e) { return 'Error: ' + e.message; }

@@ -2920,21 +2920,34 @@ function SemrushScreen({ ctx }) {
               </div>
             )}
 
-            {tab==="competitors" && (
+            {tab==="competitors" && (() => {
+              // Generic giants that rank for everything — not real SEO rivals. Hidden by default.
+              const JUNK = /(^|\.)(google|youtube|facebook|instagram|twitter|x|linkedin|tiktok|pinterest|reddit|wikipedia|amazon|ebay|apple|microsoft|yahoo|bing|gov\.uk|service\.gov\.uk|nhs\.uk|.*\.gov|.*\.edu|quora|medium|wordpress|wix|squarespace|trustpilot|glassdoor|indeed|yelp)(\.|$)/i;
+              const all = data.competitors || [];
+              const real = all.filter(c => c.domain && !JUNK.test(c.domain) && c.domain.replace(/^www\./,"") !== domain);
+              const hidden = all.length - real.length;
+              return (
               <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
-                {(data.competitors||[]).map((c,i)=>(
+                <div style={{ padding:"11px 14px", borderRadius:"var(--r-md)", background:"var(--t-50,#eef6f4)", boxShadow:"var(--neo-in)", marginBottom:4, fontSize:12.5, color:"var(--ink-2)", lineHeight:1.5 }}>
+                  <b>What is this?</b> These are websites that rank on Google for the <b>same keywords as {domain}</b> — auto-discovered from your shared search results. They're <i>suggestions</i>, not yet tracked. Click <b>Track as competitor</b> on the real rivals and they move to your watch list (Gap tab), where their keywords feed your gap analysis.{hidden>0 && <> <span style={{ color:"var(--muted)" }}>{hidden} generic site(s) like Google/YouTube/Gov.uk hidden — they rank for everything and aren't useful rivals.</span></>}
+                </div>
+                {real.map((c,i)=>{
+                  const tracked = competitors.includes(c.domain) || competitors.includes(c.domain.replace(/^www\./,""));
+                  return (
                   <div key={i} style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
                     <div style={{ width:32, height:32, borderRadius:9, background:"var(--clay-bg)", color:"var(--clay)", display:"grid", placeItems:"center", fontSize:13, fontWeight:800, flexShrink:0 }}>{(c.domain||"?")[0].toUpperCase()}</div>
                     <div style={{ flex:1, minWidth:0 }}>
                       <div style={{ fontSize:13.5, fontWeight:700, fontFamily:"var(--mono)" }}>{c.domain}</div>
                       <div style={{ fontSize:11.5, color:"var(--muted)" }}>{fmt(c.commonKeywords)} common keywords · {fmt(c.organicKeywords)} total</div>
                     </div>
-                    <NeoButton kind="soft" size="sm" icon="plus" onClick={()=>{ saveCompetitors([...new Set([...competitors,c.domain])], negatives); setTab("gap"); ctx.toast("Added "+c.domain+" to competitors","teal"); }}>Track as competitor</NeoButton>
+                    {tracked
+                      ? <span style={{ display:"inline-flex", alignItems:"center", gap:5, padding:"6px 11px", borderRadius:99, background:"var(--t-50,#eef6f4)", color:"var(--t-700)", fontSize:12, fontWeight:700 }}><Icon name="check" size={13} />Tracked</span>
+                      : <NeoButton kind="soft" size="sm" icon="plus" onClick={()=>{ saveCompetitors([...new Set([...competitors,c.domain])], negatives); ctx.toast("Now tracking "+c.domain+" — find their gaps in the Gap tab","teal"); }}>Track as competitor</NeoButton>}
                   </div>
-                ))}
-                {(data.competitors||[]).length===0 && <div style={{ padding:"14px", color:"var(--muted)", fontSize:13 }}>No competitor data returned.</div>}
+                );})}
+                {real.length===0 && <div style={{ padding:"14px", color:"var(--muted)", fontSize:13 }}>{all.length? "Only generic sites were found — add a real rival manually in the Gap tab." : "No competitor data returned — load DataForSEO keyword data first."}</div>}
               </div>
-            )}
+            );})()}
 
             {tab==="gap" && (
               <div>
