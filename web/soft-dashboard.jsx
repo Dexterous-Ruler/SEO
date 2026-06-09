@@ -1104,7 +1104,7 @@ function AdminScreen({ ctx }) {
   const API = window.SentinelAPI;
   const live = API && window.SENTINEL_LIVE;
   const s = ctx.site;
-  const [scope,setScope] = useState("global");   // "global" = all sites, "site" = this site only
+  const scope = "site";   // prompts are per-site only (no universal/all-sites editing)
   const [data,setData] = useState(null);
   const [busy,setBusy] = useState(false);
   const [err,setErr] = useState(null);
@@ -1233,16 +1233,12 @@ function AdminScreen({ ctx }) {
 
       {live && data && (
         <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-          {/* Scope: edit prompts for ALL sites, or override them just for the active site. */}
-          <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
-            <div style={{ display:"flex", gap:4, padding:4, borderRadius:"var(--r-pill)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
-              {[["global","All sites"],["site",s.name+" only"]].map(([v,l])=>(
-                <button key={v} onClick={()=>setScope(v)} style={{ padding:"6px 14px", fontSize:12.5, fontWeight:700, borderRadius:99, background:scope===v?"var(--surface)":"transparent", color:scope===v?"var(--t-700)":"var(--muted)", boxShadow:scope===v?"var(--neo-sm)":"none" }}>{l}</button>
-              ))}
-            </div>
-            <span style={{ fontSize:12, color:"var(--muted)" }}>{scope==="site"?("Editing per-site overrides for "+s.name+" — these win over the global prompt for this site only."):"Editing the shared prompts used by every site."}</span>
+          {/* Prompts are per-site: every site has its own. */}
+          <div style={{ display:"flex", alignItems:"center", gap:9, padding:"10px 14px", background:"var(--t-50)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-xs)" }}>
+            <Icon name="doc" size={16} style={{ color:"var(--t-700)", flexShrink:0 }} />
+            <span style={{ fontSize:12.5, color:"var(--t-800)", lineHeight:1.5 }}>Editing the AI prompts for <b>{s.name}</b>. Each site has its own prompts — switch site (top bar) to edit another. Saving a prompt sets it for this site only.</span>
           </div>
-          <div style={{ fontSize:12, color:"var(--muted)" }}>{prompts.length} prompt(s) · {scope==="site"?(prompts.filter(p=>p.siteOverridden).length+" site override(s)"):(data.status.overridden||0)+" customised"} · changes apply on the next AI call.</div>
+          <div style={{ fontSize:12, color:"var(--muted)" }}>{prompts.length} prompt(s) · {prompts.filter(p=>p.siteOverridden).length} customised for {s.name} · changes apply on the next AI call.</div>
           {cats.map(cat=>(
             <div key={cat}>
               <div style={{ fontSize:11, fontWeight:700, letterSpacing:".06em", textTransform:"uppercase", color:"var(--t-700)", margin:"6px 2px 8px" }}>{cat}</div>
