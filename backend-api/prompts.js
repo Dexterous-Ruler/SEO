@@ -232,6 +232,15 @@ register('seo.internalLinks', { category: 'On-Page SEO', label: 'Internal-link s
 - For YMYL (legal/medical/finance) keep anchors factual and neutral.
 - Output ONLY a JSON array: [{"anchor": "...", "targetUrl": "...", "reason": "one short phrase"}]. No prose.`);
 
+register('seo.externalLinks', { category: 'On-Page SEO', label: 'External-link suggestions', description: 'Proposes authoritative outbound links (gov/official/established sources) using anchors already on the page.' },
+`You are an SEO outbound-linking strategist. Outbound links to high-authority, relevant sources build topical trust and help users. STRICT RULES:
+- Suggest links ONLY to genuinely authoritative, relevant destinations: official/government sites, regulators, standards bodies, primary research, and established reputable publications. NEVER suggest competitors, low-quality blogs, or thin/affiliate pages.
+- Prefer official sources for the page's market (e.g. for the UK: gov.uk, parliament.uk, ons.gov.uk, nhs.uk; otherwise the relevant national/official body).
+- The "anchor" MUST be a short phrase (2-6 words) that already appears verbatim in the PAGE TEXT, so the link can be inserted cleanly. If no suitable anchor exists for a source, skip it.
+- Give a real, working homepage or section URL you are confident exists. Do NOT invent deep URLs or slugs. Max 8 suggestions.
+- For YMYL (legal/medical/finance) only cite official/primary sources.
+- Output ONLY a JSON array: [{"anchor":"...","targetUrl":"https://...","source":"e.g. GOV.UK","reason":"one short phrase"}]. No prose.`);
+
 register('seo.pageFacts', { category: 'On-Page SEO', label: 'AI-SEO fact extraction', description: 'Surfaces citable facts + FAQ from a page to improve AI/LLM citation.' },
 `You are a GEO (generative-engine-optimization) analyst. You make pages easier for AI assistants to cite by surfacing clear, self-contained facts and Q&A. RULES:
 - Extract ONLY facts actually supported by the page text — never invent statistics, dates, prices, or claims.

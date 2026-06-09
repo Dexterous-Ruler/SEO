@@ -176,6 +176,29 @@ function clientFrom(creds) {
   });
 }
 
+// Insert an <a> link into raw post HTML at the first plain-text occurrence of
+// `anchor`, never nesting inside an existing <a>…</a> and never if a link to the
+// same target already exists. Returns { html, changed, reason }.
+function insertAnchorLink(html, anchor, href) {
+  if (!html || !anchor) return { html, changed: false, reason: 'Empty content or anchor.' };
+  if (html.includes('href="' + href + '"') || html.includes("href='" + href + "'")) {
+    return { html, changed: false, reason: 'A link to that target already exists on this page.' };
+  }
+  const esc = anchor.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp('(^|[\\s>(\\[“"\'])(' + esc + ')([\\s<).,;:!?”"\'])', 'i');
+  // Split out existing anchors and HTML tags so we only match visible text.
+  const parts = html.split(/(<a\b[^>]*>[\s\S]*?<\/a>|<[^>]+>)/i);
+  for (let i = 0; i < parts.length; i++) {
+    const seg = parts[i];
+    if (!seg || seg[0] === '<') continue;              // skip tags + existing links
+    if (re.test(seg)) {
+      parts[i] = seg.replace(re, (m, p1, p2, p3) => p1 + '<a href="' + href + '">' + p2 + '</a>' + p3);
+      return { html: parts.join(''), changed: true };
+    }
+  }
+  return { html, changed: false, reason: 'The anchor text was not found in the page’s editable text (it may live in a page-builder widget).' };
+}
+
 // Representative sample inputs for the "Test this prompt" preview. Each runs the
 // prompt as the SYSTEM with this user message, on the right engine.
 const PROMPT_SAMPLES = {
@@ -187,6 +210,7 @@ const PROMPT_SAMPLES = {
   'research.trending': { engine: 'perplexity', user: 'Niche: UK visas and immigration. What is trending in the UK this week?' },
   'research.facts': { engine: 'perplexity', user: 'Topic: UK spouse visa. List the current UK facts most useful to cite.' },
   'seo.internalLinks': { engine: 'claude', user: 'SOURCE PAGE: Divorce process explained (/divorce-process)\n\nSOURCE TEXT: A guide to the UK divorce process, financial settlements and child arrangements.\n\nCANDIDATE TARGET PAGES:\n1. Financial settlement guide → /financial-settlement\n2. Child arrangements → /child-arrangements\n\nReturn the JSON array.' },
+  'seo.externalLinks': { engine: 'claude', user: 'PAGE URL: /uk-spouse-visa\nTITLE: UK Spouse Visa Guide\nNICHE: UK immigration\n\nPAGE TEXT (excerpt):\nThe UK spouse visa lets partners of British citizens live in the UK. Applicants must meet a financial requirement and apply through GOV.UK. Processing times are published by UK Visas and Immigration.\n\nReturn the JSON array of authoritative external-link suggestions.' },
   'seo.pageFacts': { engine: 'claude', user: 'URL: /uk-spouse-visa\nTITLE: UK Spouse Visa Guide\n\nPAGE TEXT: The UK spouse visa lets partners of British citizens live in the UK. It is valid for 33 months and requires meeting a financial requirement.\n\nReturn the JSON.' },
   'report.narrate': { engine: 'claude', user: 'Site: Go Legal\n\nComputed metrics:\n{"trafficValue":{"totalEstValue":4200,"currency":"GBP","valueAtRisk":900},"audit":{"latestComposite":78,"delta":-3},"search":{"clicks28":1200}}\n\nWrite the weekly executive briefing.' },
   'plan.project': { engine: 'claude', user: 'Site: Go Legal (https://go-legal.ai)\nNiche: UK legal\nGoals: reach 100/100 Lighthouse + improve content.\nCurrent scores: {"performance":62,"seo":85}\n\nWrite the plan.' },
@@ -1007,6 +1031,62 @@ const routes = {
       const r = await suggestInternalLinks(body.siteId, { maxSources: body.maxSources || 8, targetUrl: body.targetUrl || null });
       return r;
     } catch (e) { return { error: 'Internal-link analysis failed: ' + e.message }; }
+  },
+
+  // Suggest authoritative EXTERNAL (outbound) links for a page — links to
+  // high-authority sources (gov/official/established) that strengthen the page.
+  // Read-only: returns suggestions; applying is a separate, approved action.
+  'POST /external-links': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const url = body.targetUrl;
+    if (!url) return { error: 'A page URL is required.' };
+    try {
+      const site = await db.getSite(body.siteId).catch(() => null);
+      let title = '', text = '';
+      try {
+        const r = await fetch(url, { headers: { 'User-Agent': 'SentinelSEO/1.0' } });
+        const htmlRaw = await r.text();
+        title = (htmlRaw.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
+        text = htmlRaw.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 5000);
+      } catch (e) {}
+      const niche = (site && site.niche) || '';
+      const arr = await claude.externalLinkSuggestions({ url, title: title.trim(), text, niche, siteId: body.siteId });
+      return { sourcePage: url, count: arr.length, suggestions: arr };
+    } catch (e) { return { error: 'External-link analysis failed: ' + e.message }; }
+  },
+
+  // Apply ONE approved link (internal or external) into a live page's content.
+  // Safe on Classic/Gutenberg; detects Elementor/page-builder & empty bodies and
+  // returns status:'manual' (their content lives outside the standard WP field).
+  'POST /apply-link': async (body) => {
+    const { creds, site } = await resolveCreds(body);
+    if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'site is read-only (write not armed)' };
+    const wp = clientFrom(creds);
+    const { sourcePage, anchor, targetUrl } = body;
+    if (!sourcePage || !anchor || !targetUrl) return { error: 'sourcePage, anchor and targetUrl are required.' };
+    const slug = decodeURIComponent((String(sourcePage).replace(/[?#].*$/, '').replace(/\/$/, '').split('/').pop() || '')).toLowerCase();
+    let found = null;
+    for (const type of ['pages', 'posts']) {
+      const rows = await wp.request(`/${type}?slug=${encodeURIComponent(slug)}&_fields=id`).catch(() => []);
+      if (Array.isArray(rows) && rows[0]) { found = { id: rows[0].id, type }; break; }
+    }
+    if (!found) return { status: 'manual', reason: 'Could not resolve the source page on WordPress.' };
+    const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content`).catch(() => null);
+    const raw = (post && post.content && (post.content.raw != null ? post.content.raw : '')) || '';
+    const builder = (site && site.stack && site.stack.builder) || '';
+    if (/elementor|beaver|divi|bricks|wpbakery/i.test(builder) || raw.trim().length < 40) {
+      return { status: 'manual', reason: /elementor|beaver|divi|bricks|wpbakery/i.test(builder)
+        ? `This page is built with ${builder} — its content lives outside WordPress’s standard field, so the link must be added in the page-builder editor.`
+        : 'This page has no editable standard content (likely a page-builder layout) — add the link in your editor.' };
+    }
+    const ins = insertAnchorLink(raw, anchor, targetUrl);
+    if (!ins.changed) return { status: 'manual', reason: ins.reason };
+    const upd = await wp.update(found.type, found.id, { content: ins.html }, { force: true });
+    if (upd && upd.dryRun) return { status: 'dry-run', wouldLink: { sourcePage, anchor, targetUrl } };
+    const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content`).catch(() => null);
+    const stuck = !!(after && after.content && String(after.content.raw || '').includes(targetUrl));
+    if (site) await db.logActivity({ site_id: site.id, type: stuck ? 'verified' : 'failed', actor: 'Agent', icon: 'link', text: `Linked “${anchor}” → ${targetUrl}`, meta: sourcePage }).catch(() => {});
+    return { status: stuck ? 'verified' : 'silent-failure', sourcePage, anchor, targetUrl, postId: found.id, reversible: true };
   },
 
   // Per-page schema generator: builds a JSON-LD @graph (WebPage + BreadcrumbList,
