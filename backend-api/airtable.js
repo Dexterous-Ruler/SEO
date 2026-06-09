@@ -49,6 +49,15 @@ export async function listTables(pat, baseId) {
   }));
 }
 
+// Ensure a field exists on a table; create it if missing (needs schema.bases:write).
+// Returns the field name to use, or null if it can't be created.
+export async function ensureField(pat, baseId, tableId, name, type = 'multilineText') {
+  try {
+    const data = await at(pat, `${META}/bases/${baseId}/tables/${tableId}/fields`, { method: 'POST', body: { name, type } });
+    return data && data.name ? data.name : name;
+  } catch (e) { return null; }
+}
+
 // ── Embedded grid: read/write individual records ───────────────────────────
 export async function listRecords(pat, baseId, table, { pageSize = 50, offset, fields } = {}) {
   const enc = encodeURIComponent(table);
@@ -120,7 +129,9 @@ export async function listFieldValues(pat, baseId, table, fieldName, { max = 800
 // Push keywords into ONE column of a table — one row per keyword, that field only.
 // De-dupes (case-insensitive) against keywords already in the column so we never
 // create duplicate rows. Returns { pushed, skipped }.
-export async function pushKeywords(pat, baseId, table, fieldName, keywords) {
+// `extras` (optional) = { keyword: { fieldName: value } } extra cells per row —
+// e.g. an "Internal Links" column so new articles ship with relevant links.
+export async function pushKeywords(pat, baseId, table, fieldName, keywords, { extras = null } = {}) {
   const field = fieldName || 'Keyword';
   const clean = [...new Set((keywords || []).map((k) => String(k || '').trim()).filter(Boolean))];
   if (!clean.length) return { pushed: 0, skipped: 0 };
@@ -128,8 +139,10 @@ export async function pushKeywords(pat, baseId, table, fieldName, keywords) {
   try { existing = await listFieldValues(pat, baseId, table, field); } catch (e) { /* if read fails, push anyway */ }
   const fresh = clean.filter((k) => !existing.has(k.toLowerCase()));
   if (!fresh.length) return { pushed: 0, skipped: clean.length };
-  const pushed = await createRecords(pat, baseId, table, fresh.map((k) => ({ [field]: k })));
-  return { pushed, skipped: clean.length - fresh.length };
+  const rows = fresh.map((k) => Object.assign({ [field]: k }, (extras && extras[k]) || {}));
+  const pushed = await createRecords(pat, baseId, table, rows);
+  const withExtras = extras ? fresh.filter((k) => extras[k]).length : 0;
+  return { pushed, skipped: clean.length - fresh.length, withExtras };
 }
 
 // ── field schemas for auto-created tables ──────────────────────────────────
@@ -226,4 +239,4 @@ function briefToText(b) {
   return lines.join('\n');
 }
 
-export default { listBases, listTables, ensureTable, createRecords, listRecords, updateRecord, createRecord, listFieldValues, pushKeywords, SCHEMAS, mapGaps, mapContent, mapGeo, mapOpportunities };
+export default { listBases, listTables, ensureTable, ensureField, createRecords, listRecords, updateRecord, createRecord, listFieldValues, pushKeywords, SCHEMAS, mapGaps, mapContent, mapGeo, mapOpportunities };
