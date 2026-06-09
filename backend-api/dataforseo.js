@@ -265,6 +265,101 @@ export async function relatedKeywords(seed, { db = 'uk', limit = 100, depth = 2 
   return items.map((it) => mapIdea(it.keyword_data ? it : { keyword_data: it })).filter((k) => k.keyword);
 }
 
+// ===========================================================================
+// BACKLINKS API (Link Engine) — separate DataForSEO product, same account/auth.
+// Backlinks are global (not geo-locked), so no locale is applied here.
+// ===========================================================================
+async function blRaw(path, task) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST', headers: { Authorization: authHeader(), 'Content-Type': 'application/json' },
+    body: JSON.stringify([task]),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401 || data.status_code === 40100) throw new Error('DataForSEO auth failed — check DATAFORSEO_LOGIN + API password.');
+  if (data.status_code === 40200 || /payment|balance|insufficient|funds/i.test(data.status_message || '')) { const e = new Error('DataForSEO balance exhausted — top up at app.dataforseo.com'); e.code = 'NO_UNITS'; throw e; }
+  if (data.status_code !== 20000) throw new Error(`DataForSEO ${data.status_code}: ${data.status_message || res.status}`);
+  const t = (data.tasks || [])[0];
+  if (!t) return null;
+  if (t.status_code === 40200) { const e = new Error('DataForSEO balance exhausted'); e.code = 'NO_UNITS'; throw e; }
+  if (t.status_code !== 20000) throw new Error(`DataForSEO task ${t.status_code}: ${t.status_message}`);
+  return (t.result && t.result[0]) || null;
+}
+
+// Full backlink-profile overview: rank (0–1000), backlink & referring-domain
+// counts, spam score, do-follow ratio.
+export async function backlinksSummary(domain) {
+  const r = await blRaw('/backlinks/summary/live', { target: cleanDomain(domain), internal_list_limit: 1, backlinks_status_type: 'live', include_subdomains: true });
+  if (!r) return null;
+  const total = r.backlinks || 0;
+  const dofollow = r.referring_links_attributes && r.referring_links_attributes.dofollow != null ? r.referring_links_attributes.dofollow : (r.dofollow || null);
+  return {
+    target: r.target,
+    rank: r.rank ?? null,
+    backlinks: total,
+    referringDomains: r.referring_domains ?? 0,
+    referringMainDomains: r.referring_main_domains ?? r.referring_domains ?? 0,
+    referringPages: r.referring_pages ?? 0,
+    spamScore: r.backlinks_spam_score ?? null,
+    dofollow: dofollow,
+    dofollowRatio: total && dofollow != null ? Math.round((dofollow / total) * 100) : null,
+    brokenBacklinks: r.broken_backlinks ?? 0,
+    referringIps: r.referring_ips ?? 0,
+  };
+}
+
+// Referring domains (the unit that drives DR/DA): domain, its rank, link count,
+// spam score, first-seen / lost.
+export async function referringDomains(domain, { limit = 100 } = {}) {
+  const r = await blRaw('/backlinks/referring_domains/live', {
+    target: cleanDomain(domain), limit: Math.min(limit, 1000), backlinks_status_type: 'live',
+    order_by: ['rank,desc'], include_subdomains: true,
+  });
+  const items = (r && r.items) || [];
+  return items.map((it) => ({
+    domain: it.domain,
+    rank: it.rank ?? null,
+    backlinks: it.backlinks ?? 0,
+    dofollow: it.referring_links_attributes ? (it.referring_links_attributes.dofollow || 0) : null,
+    spamScore: it.backlink_spam_score ?? null,
+    firstSeen: it.first_seen || null,
+    lostDate: it.lost_date || null,
+    isLost: !!it.lost_date,
+  })).filter((d) => d.domain);
+}
+
+// Anchor-text distribution — used to flag exact-match over-optimisation (spam risk).
+export async function backlinkAnchors(domain, { limit = 50 } = {}) {
+  const r = await blRaw('/backlinks/anchors/live', { target: cleanDomain(domain), limit: Math.min(limit, 1000), backlinks_status_type: 'live' });
+  const items = (r && r.items) || [];
+  return items.map((it) => ({ anchor: it.anchor, referringDomains: it.referring_domains ?? 0, backlinks: it.backlinks ?? 0 })).filter((a) => a.anchor != null);
+}
+
+// Competitor LINK GAP (flagship): domains linking to >=1 of the competitor
+// targets but NOT to `site`. Returns prospects with the referring domain, its
+// rank, and how many competitors it links to.
+export async function domainIntersection(site, competitors, { limit = 100 } = {}) {
+  const comps = (competitors || []).map(cleanDomain).filter(Boolean).slice(0, 20);
+  if (!comps.length) return [];
+  const targets = {}; comps.forEach((c, i) => { targets[String(i + 1)] = c; });
+  const r = await blRaw('/backlinks/domain_intersection/live', {
+    targets, exclude_targets: [cleanDomain(site)], limit: Math.min(limit, 1000),
+    backlinks_status_type: 'live', order_by: ['1.rank,desc'],
+  });
+  const items = (r && r.items) || [];
+  return items.map((it) => {
+    const inter = it.intersection_result || it.intersection || {};
+    const linkedTargets = Object.keys(inter).filter((k) => inter[k] != null);
+    const first = inter[linkedTargets[0]] || {};
+    return {
+      domain: it.domain || first.domain || null,
+      rank: it.rank ?? first.rank ?? null,
+      spamScore: it.backlink_spam_score ?? first.backlink_spam_score ?? null,
+      competitorsLinked: linkedTargets.length,
+      competitorDomains: linkedTargets.map((k) => targets[k]).filter(Boolean),
+    };
+  }).filter((d) => d.domain);
+}
+
 export function hasKey() { return Boolean(process.env.DATAFORSEO_LOGIN && process.env.DATAFORSEO_PASSWORD); }
 
-export default { domainOverview, organicKeywords, competitors, backlinks, keywordGap, fullSnapshot, strikingDistance, keywordIdeas, relatedKeywords, apiUnits, hasKey };
+export default { domainOverview, organicKeywords, competitors, backlinks, keywordGap, fullSnapshot, strikingDistance, keywordIdeas, relatedKeywords, apiUnits, hasKey, backlinksSummary, referringDomains, backlinkAnchors, domainIntersection };

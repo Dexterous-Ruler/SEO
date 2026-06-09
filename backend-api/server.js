@@ -31,6 +31,7 @@ import * as geo from './geo.js';
 // the module exposes the identical interface + return shapes.
 import * as semrush from './dataforseo.js';
 import * as airtable from './airtable.js';
+import * as linkengine from './backlinks.js';
 import * as chatbot from './chat.js';
 import * as gsc from './gsc.js';
 import * as gscIndex from './gsc-index.js';
@@ -211,6 +212,7 @@ const PROMPT_SAMPLES = {
   'research.facts': { engine: 'perplexity', user: 'Topic: UK spouse visa. List the current UK facts most useful to cite.' },
   'seo.internalLinks': { engine: 'claude', user: 'SOURCE PAGE: Divorce process explained (/divorce-process)\n\nSOURCE TEXT: A guide to the UK divorce process, financial settlements and child arrangements.\n\nCANDIDATE TARGET PAGES:\n1. Financial settlement guide → /financial-settlement\n2. Child arrangements → /child-arrangements\n\nReturn the JSON array.' },
   'seo.externalLinks': { engine: 'claude', user: 'PAGE URL: /uk-spouse-visa\nTITLE: UK Spouse Visa Guide\nNICHE: UK immigration\n\nPAGE TEXT (excerpt):\nThe UK spouse visa lets partners of British citizens live in the UK. Applicants must meet a financial requirement and apply through GOV.UK. Processing times are published by UK Visas and Immigration.\n\nReturn the JSON array of authoritative external-link suggestions.' },
+  'backlinks.outreach': { engine: 'claude', user: 'OUR SITE: Go Visa (https://go-visa.co.uk)\nNICHE: UK immigration\nPROSPECT DOMAIN: ukimmigrationblog.com\nTACTIC: competitor_gap\nOUR RELEVANT PAGE: /uk-skilled-worker-visa\n\nWrite the outreach email. Return ONLY JSON: {"subject":"...","body":"..."}.' },
   'seo.pageFacts': { engine: 'claude', user: 'URL: /uk-spouse-visa\nTITLE: UK Spouse Visa Guide\n\nPAGE TEXT: The UK spouse visa lets partners of British citizens live in the UK. It is valid for 33 months and requires meeting a financial requirement.\n\nReturn the JSON.' },
   'report.narrate': { engine: 'claude', user: 'Site: Go Legal\n\nComputed metrics:\n{"trafficValue":{"totalEstValue":4200,"currency":"GBP","valueAtRisk":900},"audit":{"latestComposite":78,"delta":-3},"search":{"clicks28":1200}}\n\nWrite the weekly executive briefing.' },
   'plan.project': { engine: 'claude', user: 'Site: Go Legal (https://go-legal.ai)\nNiche: UK legal\nGoals: reach 100/100 Lighthouse + improve content.\nCurrent scores: {"performance":62,"seo":85}\n\nWrite the plan.' },
@@ -1053,6 +1055,44 @@ const routes = {
       const arr = await claude.externalLinkSuggestions({ url, title: title.trim(), text, niche, siteId: body.siteId });
       return { sourcePage: url, count: arr.length, suggestions: arr };
     } catch (e) { return { error: 'External-link analysis failed: ' + e.message }; }
+  },
+
+  // ── Link Engine (backlinks) ──────────────────────────────────────────────
+  // Backlink-authority profile for the active site (read-only).
+  'POST /backlinks/summary': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    if (!semrush.hasKey()) return { error: 'DataForSEO is not configured (DATAFORSEO_LOGIN / API password).' };
+    try { return await linkengine.profile(body.siteId); }
+    catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted — top up to pull backlinks.' : e.message, noUnits: e.code === 'NO_UNITS' }; }
+  },
+  // Competitor Link Gap — scored prospects (read-only).
+  'POST /backlinks/gap': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    if (!semrush.hasKey()) return { error: 'DataForSEO is not configured.' };
+    try { return await linkengine.linkGap(body.siteId, { limit: body.limit || 80 }); }
+    catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted — top up to run the link gap.' : e.message, noUnits: e.code === 'NO_UNITS' }; }
+  },
+  // Draft a personalised outreach email for one prospect (Claude).
+  'POST /backlinks/draft-outreach': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    try { return await linkengine.draftOutreach(body.siteId, { prospectDomain: body.prospectDomain, tactic: body.tactic || 'competitor_gap', targetPage: body.targetPage || '' }); }
+    catch (e) { return { error: e.message }; }
+  },
+  // Push selected prospects (+ optional drafts) into the site's Airtable as an
+  // "Outreach" table so n8n can send + sequence — same handoff as the article loop.
+  'POST /backlinks/push-prospects': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const pat = await db.getAirtablePat(body.siteId).catch(() => null);
+    if (!pat) return { error: 'Connect Airtable first (Airtable Sync screen).' };
+    const cfg = await db.getAirtableConfig(body.siteId).catch(() => null);
+    if (!cfg || !cfg.base_id) return { error: 'Set the Airtable base for this site first.' };
+    const rows = (body.prospects || []).filter((p) => p && p.domain);
+    if (!rows.length) return { error: 'No prospects to push.' };
+    try {
+      const res = await airtable.pushProspects(pat, cfg.base_id, 'Outreach', rows);
+      await db.logActivity({ site_id: body.siteId, type: 'off-site', actor: 'You', icon: 'link', text: 'Pushed ' + res.pushed + ' link prospect(s) to Airtable (Outreach)', meta: 'n8n outreach' }).catch(() => {});
+      return { done: true, pushed: res.pushed, skipped: res.skipped, table: 'Outreach' };
+    } catch (e) { return { error: 'Airtable push failed: ' + e.message }; }
   },
 
   // Apply ONE approved link (internal or external) into a live page's content.
