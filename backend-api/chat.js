@@ -16,6 +16,7 @@ import * as tv from './traffic-value.js';
 import { prioritizeFindings } from './prioritization.js';
 import { suggestForSite as suggestInternalLinks } from './internal-links.js';
 import { findOpportunities } from './content-opportunities.js';
+import * as airtable from './airtable.js';
 import { P } from './prompts.js';
 import { discoverUrls } from '../src/lib/crawler.js';
 
@@ -95,6 +96,8 @@ const TOOLS = [
   { name: 'get_prioritized_worklist', description: "Get the site's audit findings ranked by RICE score ((Reach × Impact × Confidence) ÷ Effort), weighted by real GSC clicks-per-page when connected, with impact×effort quadrants (Quick win / Major project / Fill-in / Deprioritize). Use when asked 'what should I fix first', 'what's the priority', or for a worklist/roadmap.", input_schema: { type: 'object', properties: {} } },
   { name: 'get_traffic_value', description: "Model the £/$ value of the site's organic rankings: estimated monthly clicks (volume × CTR-by-position) × CPC, per keyword and total, plus value-at-risk on page-2 keywords and the £ uplift of pushing them to page 1. Use for ROI/business-value questions ('what's our organic traffic worth', 'what's the biggest money opportunity'). CTR curve is calibrated from the site's own Search Console data when available.", input_schema: { type: 'object', properties: {} } },
   { name: 'fetch_url', description: 'Fetch any web page and return its title + main text (e.g. a competitor or a reference article the user links).', input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
+  // ── ACTION (write) tool — performs a real change when the user asks for it ──
+  { name: 'push_keywords_to_airtable', description: "ACTION: push keywords into the site's configured Airtable keyword column — this feeds the n8n article writer and creates real rows. Use ONLY when the user explicitly asks to push/add keywords or topics to Airtable (or 'send these to the writer'). Pass `keywords` to push specific ones; omit to auto-derive the site's content-gap keywords. De-dupes against existing rows.", input_schema: { type: 'object', properties: { keywords: { type: 'array', items: { type: 'string' }, description: 'optional explicit keywords; omit to auto-derive content gaps' } } } },
 ];
 
 // Execute a tool call for a given siteId. Returns a string result.
@@ -255,13 +258,30 @@ async function runTool(name, input, siteId) {
         .sort((a, b) => b.gain.gainValue - a.gain.gainValue).slice(0, 8);
       return JSON.stringify({ curveSource, summary, topPage1Uplift: striking });
     }
+    if (name === 'push_keywords_to_airtable') {
+      const pat = await db.getAirtablePat(siteId).catch(() => null);
+      if (!pat) return 'Airtable is not connected. Tell the user to connect it on the Airtable Sync screen first.';
+      const cfg = await db.getAirtableConfig(siteId).catch(() => null);
+      if (!cfg || !cfg.base_id || !cfg.table_gaps) return 'The Airtable base / table / keyword column is not configured for this site yet. Tell the user to set it on the Airtable Sync screen.';
+      let keywords = Array.isArray(input.keywords) && input.keywords.length ? input.keywords : null;
+      if (!keywords) {
+        const r = await findOpportunities(siteId, { maxKeywords: 160 });
+        if (r.error) return r.error;
+        keywords = (r.clusters || []).filter((c) => c.isGap).map((c) => c.primaryKeyword).filter(Boolean);
+      }
+      if (!keywords.length) return 'No content-gap keywords found to push.';
+      const res = await airtable.pushKeywords(pat, cfg.base_id, cfg.table_gaps, cfg.table_content || 'Keyword', keywords);
+      await db.logAirtableSync({ site_id: siteId, kind: 'keywords', records_pushed: res.pushed, status: 'ok' }).catch(() => {});
+      await db.upsertAirtableConfig(siteId, { last_sync: new Date().toISOString() }).catch(() => {});
+      return JSON.stringify({ done: true, pushed: res.pushed, skippedAlreadyThere: res.skipped, candidates: keywords.length });
+    }
     return 'Unknown tool';
   } catch (e) { return 'Error: ' + e.message; }
 }
 
 // Build the system prompt with the site already injected (so it's site-aware
 // from message 1, even before any tool call).
-function buildSystem(siteCtx) {
+function buildSystem(siteCtx, siteId) {
   const s = siteCtx || {};
   return `You are Sentinel's senior SEO & content strategist, working on a SPECIFIC WordPress site.
 
@@ -271,7 +291,7 @@ ${s.scale ? `Scale: ${s.scale.posts || 0} posts, ${s.scale.pages || 0} pages.` :
 ${s.scores ? `Latest scores — Perf ${s.scores.performance}, A11y ${s.scores.accessibility}, SEO ${s.scores.seo}.` : ''}
 ${s.competitors && s.competitors.length ? 'Tracked competitors: ' + s.competitors.join(', ') + '.' : ''}
 
-${P('chat.assistant')}`;
+${P('chat.assistant', siteId)}`;
 }
 
 // Build a user message content array supporting text + images.
@@ -294,7 +314,7 @@ export async function chat({ messages = [], userText, images = [], siteId, siteC
     const s = await db.getSite(siteId).catch(() => null);
     if (s) ctx = { name: s.name, url: s.url, stack: s.stack, scale: s.scale, scores: s.scores, competitors: s.competitors };
   }
-  const system = buildSystem(ctx);
+  const system = buildSystem(ctx, siteId);
 
   const convo = [...messages];
   const userContent = buildUserContent(userText, images);
@@ -347,7 +367,7 @@ export async function chatStream({ messages = [], userText, images = [], siteId,
     const s = await db.getSite(siteId).catch(() => null);
     if (s) ctx = { name: s.name, url: s.url, stack: s.stack, scale: s.scale, scores: s.scores, competitors: s.competitors };
   }
-  const system = buildSystem(ctx);
+  const system = buildSystem(ctx, siteId);
   const convo = [...messages];
   const userContent = buildUserContent(userText, images);
   if (userContent) convo.push({ role: 'user', content: userContent });

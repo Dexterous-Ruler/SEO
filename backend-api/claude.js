@@ -259,10 +259,10 @@ export async function projectPlan({ siteName, niche, baseUrl, keyPages, scores, 
 // and a suggested content title/format. Claude ONLY groups + labels — it must
 // use the EXACT keyword strings provided (no inventing keywords); volumes/gaps
 // are computed deterministically by the caller.
-export async function clusterKeywords({ keywords, siteName, niche }) {
+export async function clusterKeywords({ keywords, siteName, niche, siteId }) {
   const list = (keywords || []).slice(0, 140).map((k) => `${k.keyword}${k.volume ? ` (${k.volume})` : ''}`).join('\n');
   const txt = await complete({
-    system: sys('content.cluster'),
+    system: [{ type: 'text', text: P('content.cluster', siteId) }],   // per-site prompt when set
     promptKey: 'content.cluster',
     maxTokens: 8000,
     messages: [{ role: 'user', content: `Site: ${siteName || ''}\nNiche: ${niche || ''}\n\nKeywords (with volume):\n${list}\n\nReturn the clustered JSON.` }],

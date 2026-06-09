@@ -935,15 +935,15 @@ const routes = {
   'POST /research-status': async () => research.status(),
 
   // ── Prompt admin (editable system prompts, live via Supabase) ───────────
-  'POST /prompts-list': async () => ({ prompts: prompts.list(), status: prompts.status() }),
+  'POST /prompts-list': async (body) => ({ prompts: prompts.list(body && body.siteId), status: prompts.status() }),
   'POST /prompt-save': async (body) => {
     if (!body.key || body.content == null) return { error: 'key and content required' };
-    try { await prompts.save(body.key, body.content, { model: body.model, temperature: body.temperature }); return { ok: true, key: body.key }; }
+    try { await prompts.save(body.key, body.content, { model: body.model, temperature: body.temperature, siteId: body.siteId || null }); return { ok: true, key: body.key, siteId: body.siteId || null }; }
     catch (e) { return { error: e.message }; }
   },
   'POST /prompt-reset': async (body) => {
     if (!body.key) return { error: 'key required' };
-    try { const def = await prompts.resetToDefault(body.key); return { ok: true, content: def }; }
+    try { const def = await prompts.resetToDefault(body.key, body.siteId || null); return { ok: true, content: def }; }
     catch (e) { return { error: e.message }; }
   },
   'POST /prompts-status': async () => prompts.status(),
@@ -1361,19 +1361,54 @@ const routes = {
     // Keywords: use the list the UI passed, else derive content-GAP keywords
     // (clusters with no existing page) from the opportunity engine.
     let keywords = Array.isArray(body.keywords) && body.keywords.length ? body.keywords : null;
-    let derived = false;
+    let gapClusters = null, derived = false;
     if (!keywords) {
       const r = await findOpportunities(siteId, { maxKeywords: body.maxKeywords || 160 });
       if (r.error) return { error: r.error };
-      keywords = (r.clusters || []).filter((c) => c.isGap).map((c) => c.primaryKeyword).filter(Boolean);
+      gapClusters = (r.clusters || []).filter((c) => c.isGap);
+      keywords = gapClusters.map((c) => c.primaryKeyword).filter(Boolean);
       derived = true;
     }
     if (!keywords.length) return { error: 'No content-gap keywords found to push — run a Content Plan first, or add competitors/connect Search Console.', pushed: 0 };
+
+    // Internal Links column: for each keyword, attach 2-3 relevant EXISTING pages
+    // (topic match) so n8n's article writer can link to them. Best-effort — needs
+    // the PAT to allow creating the field (schema.bases:write) if it's missing.
+    let extras = null, linkField = null;
+    if (body.includeInternalLinks !== false) {
+      try {
+        const tables = await airtable.listTables(pat, cfg.base_id);
+        const tbl = tables.find((t) => t.id === table || t.name === table);
+        let f = tbl && (tbl.fields || []).find((x) => /internal\s*link/i.test(x.name));
+        if (!f && tbl) { const created = await airtable.ensureField(pat, cfg.base_id, tbl.id, 'Internal Links', 'multilineText'); if (created) f = { name: created }; }
+        if (f) {
+          linkField = f.name;
+          const { baseUrl, username, appPassword } = await credsForSite(siteId);
+          const wp = new WordPressClient({ baseUrl, username, appPassword });
+          const [pg, ps] = await Promise.all([
+            wp.list('pages', { perPage: 100, fields: 'title,link' }).catch(() => []),
+            wp.list('posts', { perPage: 100, fields: 'title,link' }).catch(() => []),
+          ]);
+          const STOP = new Set('the and for you your our how what why best top guide vs are can with from into a an of to in on at is it this that'.split(' '));
+          const tok = (s) => (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !STOP.has(t));
+          const pages = [...pg, ...ps].map((p) => ({ title: (p.title?.rendered || '').replace(/&[a-z]+;/g, ' ').trim(), url: p.link })).filter((p) => p.title && p.url).map((p) => ({ url: p.url, toks: new Set(tok(p.title)) }));
+          extras = {};
+          const clusters = gapClusters || keywords.map((k) => ({ primaryKeyword: k }));
+          for (const c of clusters) {
+            const kw = c.primaryKeyword || c; if (!kw) continue;
+            const ct = new Set(tok(kw + ' ' + (c.suggestedTitle || '')));
+            const top = pages.map((p) => ({ url: p.url, score: [...ct].filter((t) => p.toks.has(t)).length })).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 3);
+            if (top.length) extras[kw] = { [linkField]: top.map((x) => x.url).join('\n') };
+          }
+        }
+      } catch (e) { extras = null; /* push keywords without links */ }
+    }
+
     try {
-      const res = await airtable.pushKeywords(pat, cfg.base_id, table, field, keywords);
+      const res = await airtable.pushKeywords(pat, cfg.base_id, table, field, keywords, { extras });
       await db.logAirtableSync({ site_id: siteId, kind: 'keywords', records_pushed: res.pushed, status: 'ok' }).catch(() => {});
       await db.upsertAirtableConfig(siteId, { last_sync: new Date().toISOString() }).catch(() => {});
-      return { ok: true, ...res, candidates: keywords.length, derived, field };
+      return { ok: true, ...res, candidates: keywords.length, derived, field, linkField };
     } catch (e) { return { error: 'Airtable push failed: ' + e.message }; }
   },
 

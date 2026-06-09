@@ -40,24 +40,37 @@ export function register(key, meta, def) {
   return key;
 }
 
-// Live value (sync, hot-path). Override wins; else the registered default.
-export function P(key) {
+// Per-site overrides live under a composite key "<key>@@<siteId>" in the same
+// table, so different sites (different audience / jurisdiction / language) can
+// have their own prompts. Resolution order: site override → global override → default.
+const siteKey = (key, siteId) => `${key}@@${siteId}`;
+
+// Live value (sync, hot-path). siteId is optional — pass it for site-specific behaviour.
+export function P(key, siteId) {
+  if (siteId && OVERRIDE.has(siteKey(key, siteId))) return OVERRIDE.get(siteKey(key, siteId));
   if (OVERRIDE.has(key)) return OVERRIDE.get(key);
   const r = REGISTRY.get(key);
   return r ? r.default : '';
 }
 
 // Full list for the admin panel (defaults merged with overrides), grouped-ready.
-export function list() {
-  return [...REGISTRY.values()].map((r) => ({
-    key: r.key, category: r.category, label: r.label, description: r.description,
-    engine: engineFor(r.key),
-    content: OVERRIDE.has(r.key) ? OVERRIDE.get(r.key) : r.default,
-    default: r.default,
-    model: modelFor(r.key), temperature: tempFor(r.key),
-    defaultModel: DEFAULT_MODEL[r.key] || null, defaultTemperature: DEFAULT_TEMP[r.key] != null ? DEFAULT_TEMP[r.key] : null,
-    overridden: (OVERRIDE.has(r.key) && OVERRIDE.get(r.key) !== r.default) || CFG.has(r.key),
-  })).sort((a, b) => a.category.localeCompare(b.category) || a.label.localeCompare(b.label));
+// Pass siteId to also surface that site's per-site override + the resolved content.
+export function list(siteId) {
+  return [...REGISTRY.values()].map((r) => {
+    const globalContent = OVERRIDE.has(r.key) ? OVERRIDE.get(r.key) : r.default;
+    const sk = siteId ? siteKey(r.key, siteId) : null;
+    const siteOverridden = sk ? OVERRIDE.has(sk) : false;
+    return {
+      key: r.key, category: r.category, label: r.label, description: r.description,
+      engine: engineFor(r.key),
+      content: siteOverridden ? OVERRIDE.get(sk) : globalContent,   // resolved for the active site
+      globalContent, siteOverridden,
+      default: r.default,
+      model: modelFor(r.key), temperature: tempFor(r.key),
+      defaultModel: DEFAULT_MODEL[r.key] || null, defaultTemperature: DEFAULT_TEMP[r.key] != null ? DEFAULT_TEMP[r.key] : null,
+      overridden: (OVERRIDE.has(r.key) && OVERRIDE.get(r.key) !== r.default) || CFG.has(r.key),
+    };
+  }).sort((a, b) => a.category.localeCompare(b.category) || a.label.localeCompare(b.label));
 }
 
 // ---- Supabase I/O ----------------------------------------------------------
@@ -124,19 +137,28 @@ export async function history(key) {
 export async function save(key, content, opts = {}) {
   const r = REGISTRY.get(key);
   if (!r) throw new Error('unknown prompt key: ' + key);
-  const model = opts.model !== undefined ? (opts.model || null) : (CFG.get(key) ? CFG.get(key).model : null);
-  const temperature = opts.temperature !== undefined ? (opts.temperature === '' || opts.temperature == null ? null : Number(opts.temperature)) : (CFG.get(key) ? CFG.get(key).temperature : null);
-  await upsert([{ key, content, model, temperature, category: r.category, label: r.label, description: r.description, updated_at: new Date().toISOString() }]);
-  OVERRIDE.set(key, content);
-  if (model != null || temperature != null) CFG.set(key, { model, temperature }); else CFG.delete(key);
-  recordHistory(key, content);   // fire-and-forget
+  const siteId = opts.siteId || null;
+  const storeKey = siteId ? siteKey(key, siteId) : key;       // per-site row when siteId given
+  // model/temperature stay global (per-key); per-site overrides only change content.
+  const model = siteId ? null : (opts.model !== undefined ? (opts.model || null) : (CFG.get(key) ? CFG.get(key).model : null));
+  const temperature = siteId ? null : (opts.temperature !== undefined ? (opts.temperature === '' || opts.temperature == null ? null : Number(opts.temperature)) : (CFG.get(key) ? CFG.get(key).temperature : null));
+  await upsert([{ key: storeKey, content, model, temperature, category: r.category, label: (siteId ? r.label + ' · site' : r.label), description: r.description, updated_at: new Date().toISOString() }]);
+  OVERRIDE.set(storeKey, content);
+  if (!siteId) { if (model != null || temperature != null) CFG.set(key, { model, temperature }); else CFG.delete(key); }
+  recordHistory(storeKey, content);   // fire-and-forget
   return true;
 }
 
-// Revert a prompt to its in-code default.
-export async function resetToDefault(key) {
+// Revert a prompt to its in-code default (or clear just this site's override).
+export async function resetToDefault(key, siteId) {
   const r = REGISTRY.get(key);
   if (!r) throw new Error('unknown prompt key: ' + key);
+  if (siteId) {
+    const sk = siteKey(key, siteId);
+    await fetch(`${SB}/rest/v1/prompts?key=eq.${encodeURIComponent(sk)}`, { method: 'DELETE', headers: headers() }).catch(() => {});
+    OVERRIDE.delete(sk);
+    return P(key);   // falls back to global/default
+  }
   await upsert([{ key, content: r.default, model: null, temperature: null, updated_at: new Date().toISOString() }]);
   OVERRIDE.delete(key); CFG.delete(key);
   return r.default;

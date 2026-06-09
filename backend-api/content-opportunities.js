@@ -106,7 +106,7 @@ export async function findOpportunities(siteId, { db: region, maxKeywords = 160,
   const ranked = [...pool.values()].map((k) => ({ ...k, src: [...k.src] })).sort((a, b) => b.volume - a.volume).slice(0, maxKeywords);
 
   // Cluster with Claude (labels/intent/title only — metrics stay deterministic).
-  const clusters = await claude.clusterKeywords({ keywords: ranked, siteName: site.name, niche: site.niche || (site.stack && site.stack.type) });
+  const clusters = await claude.clusterKeywords({ keywords: ranked, siteName: site.name, niche: site.niche || (site.stack && site.stack.type), siteId });
   const byKw = new Map(ranked.map((k) => [k.keyword.toLowerCase(), k]));
 
   const enriched = clusters.map((cl) => {
