@@ -258,7 +258,7 @@ const routes = {
   // Full audit of one page → scores + findings + draft proposals (UI shapes).
   // withContent=true → Claude drafts real meta/title values into proposals.
   'POST /audit-full': async (body) => {
-    return auditPage(body.url, { creds: body.creds, withContent: !!body.withContent });
+    return auditPage(body.url, { creds: body.creds, withContent: !!body.withContent, siteId: body.siteId });
   },
 
   // Single finding → one draft proposal (the "Propose fix" button)
@@ -889,7 +889,7 @@ const routes = {
     const metrics = body.metrics;
     if (!metrics) return { error: 'No metrics supplied. Load the scorecard first.' };
     try {
-      const narrative = await claude.narrate({ siteName: (metrics.site && metrics.site.name) || 'this site', metrics });
+      const narrative = await claude.narrate({ siteName: (metrics.site && metrics.site.name) || 'this site', metrics, siteId: (metrics.site && metrics.site.id) || body.siteId });
       return { narrative };
     } catch (e) { return { error: 'Narrative generation failed: ' + e.message }; }
   },
@@ -917,7 +917,7 @@ const routes = {
       return await research.contentBrief({
         keyword: body.keyword, intent: body.intent,
         siteName: site && site.name, niche: (site && site.niche) || (site && site.stack && site.stack.type),
-        excludeDomain, internalLinkCandidates, now: Date.now(),
+        excludeDomain, internalLinkCandidates, siteId: body.siteId, now: Date.now(),
       });
     } catch (e) { return { error: 'Brief generation failed: ' + e.message }; }
   },
@@ -1114,7 +1114,7 @@ const routes = {
     } catch (e) { return { error: 'Could not fetch the page: ' + e.message }; }
     const niche = (site && site.stack && site.stack.type) || '';
     let facts;
-    try { facts = await claude.extractCitableFacts({ url, title, text, niche }); }
+    try { facts = await claude.extractCitableFacts({ url, title, text, niche, siteId: body.siteId }); }
     catch (e) { return { error: 'Fact extraction failed: ' + e.message }; }
     // Ground with CURRENT, cited UK facts from the live web (Perplexity), so the
     // on-page facts reflect today's reality, not just what's already on the page.
@@ -1221,7 +1221,7 @@ const routes = {
     } catch (e) {}
     const brief = await claude.draftFix({
       finding: { title: 'Content refresh for a decaying page', detail: `This page lost ${page.clicksLost} clicks (${page.pctDrop}% drop), position drifted ${page.positionDrift > 0 ? '+' : ''}${page.positionDrift}. Write a SUBSTANTIVE refresh brief: what new sections/stats/examples to add, what's outdated, how to regain rankings. NOT a date bump.`, page: page.page },
-      pageContext: { excerpt: pageText },
+      pageContext: { excerpt: pageText }, siteId: body.siteId,
     });
     return { brief };
   },
@@ -1492,7 +1492,7 @@ const routes = {
     for (let i = 0; i < clean.length && sample.length < 90; i += step) sample.push(clean[i]);
     let intel;
     try {
-      intel = await claude.contentIntelligence({ siteName: body.siteName || creds.baseUrl, niche: body.niche, titles: sample });
+      intel = await claude.contentIntelligence({ siteName: body.siteName || creds.baseUrl, niche: body.niche, titles: sample, siteId: body.siteId });
     } catch (e) {
       return { error: 'Content analysis failed: ' + e.message };
     }
@@ -1506,10 +1506,11 @@ const routes = {
   // Used to fill a proposal's "after" value with human-reviewable copy.
   'POST /generate-content': async (body) => {
     const t = body.task;
-    if (t === 'meta_description') return { value: await claude.metaDescription(body.input || {}) };
-    if (t === 'title') return { value: await claude.titleRewrite(body.input || {}) };
-    if (t === 'alt') return { value: await claude.altText(body.input || {}) };
-    return { value: await claude.draftFix({ finding: body.finding || {}, pageContext: body.input || {} }) };
+    const sid = body.siteId || null;
+    if (t === 'meta_description') return { value: await claude.metaDescription({ ...(body.input || {}), siteId: sid }) };
+    if (t === 'title') return { value: await claude.titleRewrite({ ...(body.input || {}), siteId: sid }) };
+    if (t === 'alt') return { value: await claude.altText({ ...(body.input || {}), siteId: sid }) };
+    return { value: await claude.draftFix({ finding: body.finding || {}, pageContext: body.input || {}, siteId: sid }) };
   },
 
   // Apply one approved meta change — verify-after-write. Supports secure siteId

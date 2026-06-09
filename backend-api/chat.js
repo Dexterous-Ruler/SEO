@@ -169,7 +169,7 @@ async function runTool(name, input, siteId) {
       const titles = posts.map((p) => (p.title?.rendered || '').replace(/&[a-z]+;/g, ' ').trim()).filter(Boolean);
       const stride = Math.max(1, Math.floor(titles.length / 80));
       const sample = titles.filter((_, i) => i % stride === 0).slice(0, 80);
-      const intel = await claudeMod.contentIntelligence({ siteName: site.name, niche: site.stack?.type, titles: sample });
+      const intel = await claudeMod.contentIntelligence({ siteName: site.name, niche: site.stack?.type, titles: sample, siteId });
       return JSON.stringify({ clusters: intel.clusters, gaps: intel.gaps, suggestions: intel.suggestions });
     }
     if (name === 'get_geo_visibility') {
@@ -215,7 +215,7 @@ async function runTool(name, input, siteId) {
       const html = await res.text();
       const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || '';
       const text = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-      const facts = await claudeMod.extractCitableFacts({ url: input.url, title, text, niche: site.stack?.type });
+      const facts = await claudeMod.extractCitableFacts({ url: input.url, title, text, niche: site.stack?.type, siteId });
       return JSON.stringify(facts);
     }
     if (name === 'get_prioritized_worklist') {
