@@ -154,13 +154,19 @@ export async function pushProspects(pat, baseId, table, prospects) {
   if (!clean.length) return { pushed: 0, skipped: 0 };
   await ensureTable(pat, baseId, tbl, [
     { name: 'Domain', type: 'singleLineText' },
+    { name: 'Contact Email', type: 'email' },
+    { name: 'Contact Page', type: 'url' },
     { name: 'Rank', type: 'number', options: { precision: 0 } },
     { name: 'Competitors Linked', type: 'number', options: { precision: 0 } },
     { name: 'Link Value Score', type: 'number', options: { precision: 0 } },
     { name: 'Tactic', type: 'singleLineText' },
-    { name: 'Status', type: 'singleLineText' },
+    { name: 'Status', type: 'singleSelect', options: { choices: [{ name: 'To review' }, { name: 'Send Outreach' }, { name: 'Sent' }, { name: 'Follow-up 1' }, { name: 'Follow-up 2' }, { name: 'Replied' }, { name: 'Won' }, { name: 'Skip' }] } },
     { name: 'Subject', type: 'singleLineText' },
     { name: 'Email', type: 'multilineText' },
+    { name: 'Sent At', type: 'dateTime', options: { dateFormat: { name: 'iso' }, timeFormat: { name: '24hour' }, timeZone: 'utc' } },
+    { name: 'Replied', type: 'checkbox', options: { icon: 'check', color: 'greenBright' } },
+    { name: 'Won', type: 'checkbox', options: { icon: 'check', color: 'greenBright' } },
+    { name: 'Won URL', type: 'url' },
   ]).catch(() => {});
   let existing = new Set();
   try { existing = await listFieldValues(pat, baseId, tbl, 'Domain'); } catch (e) {}
@@ -171,6 +177,8 @@ export async function pushProspects(pat, baseId, table, prospects) {
     if (p.rank != null) f.Rank = p.rank;
     if (p.competitorsLinked != null) f['Competitors Linked'] = p.competitorsLinked;
     if (p.lvs != null) f['Link Value Score'] = p.lvs;
+    if (p.contactEmail) f['Contact Email'] = p.contactEmail;
+    if (p.contactPage) f['Contact Page'] = p.contactPage;
     if (p.subject) f.Subject = p.subject;
     if (p.body || p.email) f.Email = p.body || p.email;
     return f;

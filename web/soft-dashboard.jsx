@@ -3887,15 +3887,19 @@ function BacklinksScreen({ ctx }) {
   const API = window.SentinelAPI;
   const live = API && window.SENTINEL_LIVE;
   const [tab,setTab] = useState("gap");
-  useEffect(()=>{ if(ctx.navTab && ["gap","profile"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
+  useEffect(()=>{ if(ctx.navTab && ["gap","outreach","profile"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
   const [profile,setProfile] = useState(null);
   const [gap,setGap] = useState(null);
   const [busy,setBusy] = useState("");
   const [err,setErr] = useState(null);
   const [drafts,setDrafts] = useState({});   // domain -> { busy, subject, body, open }
   const [sel,setSel] = useState({});          // domain -> bool
+  const [prep,setPrep] = useState(null);      // prepared campaign rows
+  const [prepBusy,setPrepBusy] = useState(false);
+  const [track,setTrack] = useState(null);    // outreach tracker / ROI
+  const [trackBusy,setTrackBusy] = useState(false);
   const fmt = (v)=> v==null||v===""?"—":(isNaN(v)?v:Number(v).toLocaleString());
-  useEffect(()=>{ setProfile(null); setGap(null); setErr(null); setDrafts({}); setSel({}); },[s.id]);
+  useEffect(()=>{ setProfile(null); setGap(null); setErr(null); setDrafts({}); setSel({}); setPrep(null); setTrack(null); },[s.id]);
 
   const loadProfile = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setBusy("profile"); setErr(null); API.backlinksSummary(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits});return;} setProfile(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setBusy("")); };
   const loadGap = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setBusy("gap"); setErr(null); API.backlinksGap(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits,needsComp:r.needsCompetitors});return;} setGap(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setBusy("")); };
@@ -3906,6 +3910,20 @@ function BacklinksScreen({ ctx }) {
     setBusy("push"); ctx.toast("Pushing "+chosen.length+" prospect(s) to Airtable…","teal");
     API.backlinksPushProspects(s.id,chosen).then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} ctx.toast("Pushed "+r.pushed+" to Airtable → Outreach ✓ — set Status to fire your n8n send"+(r.skipped?" ("+r.skipped+" already there)":""),"teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
   const lvsTone = (v)=> v>=70?["teal"]:v>=45?["gold"]:["gray"];
+  // Phase 2 — assisted outreach
+  const prepare = ()=>{
+    const top = ((gap&&gap.prospects)||[]).slice(0,12);
+    if(!top.length){ ctx.toast("Run the Competitor Link Gap first, then prepare outreach from it","gold"); setTab("gap"); return; }
+    setPrepBusy(true); ctx.toast("Finding contacts + drafting emails for "+top.length+" prospect(s)…","teal");
+    API.backlinksPrepareOutreach(s.id, top, "competitor_gap", "").then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} setPrep(r.prospects||[]); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPrepBusy(false));
+  };
+  const setPrepField = (i,k,v)=> setPrep(p=>p.map((row,j)=>j===i?{...row,[k]:v}:row));
+  const pushPrepared = ()=>{
+    if(!prep||!prep.length) return;
+    setPrepBusy(true); ctx.toast("Pushing campaign to Airtable…","teal");
+    API.backlinksPushProspects(s.id, prep).then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} ctx.toast("Pushed "+r.pushed+" to Airtable → Outreach ✓ — set Status to 'Send Outreach' to fire n8n"+(r.skipped?" ("+r.skipped+" already there)":""),"teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPrepBusy(false));
+  };
+  const loadTrack = ()=>{ setTrackBusy(true); API.backlinksOutreachStatus(s.id).then(r=>{ setTrack(r); if(r.error)ctx.toast(r.error,"clay"); }).catch(e=>{setTrack({error:e.message});ctx.toast(e.message,"clay");}).finally(()=>setTrackBusy(false)); };
 
   return (
     <div className="rise">
@@ -3916,7 +3934,7 @@ function BacklinksScreen({ ctx }) {
       {live && (
         <SoftCard hover={false}>
           <div style={{ display:"flex", gap:3, padding:3, background:"var(--bg)", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-in)", width:"fit-content", marginBottom:16 }}>
-            {[["gap","Competitor Link Gap","search"],["profile","Link Profile","radar"]].map(([v,l,ic])=>(
+            {[["gap","Competitor Link Gap","search"],["outreach","Outreach","layers"],["profile","Link Profile","radar"]].map(([v,l,ic])=>(
               <button key={v} onClick={()=>setTab(v)} style={{ display:"flex", alignItems:"center", gap:6, padding:"8px 15px", fontSize:12.5, fontWeight:700, borderRadius:99, background:tab===v?"var(--surface)":"transparent", color:tab===v?"var(--t-700)":"var(--muted)", boxShadow:tab===v?"var(--neo-sm)":"none" }}><Icon name={ic} size={14} />{l}</button>
             ))}
           </div>
@@ -3961,6 +3979,66 @@ function BacklinksScreen({ ctx }) {
                 </div>
               )}
               {!gap && busy!=="gap" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Find domains linking to your rivals but not you — the safest, highest-value backlink targets. Acquisition stays human-approved (Google penalises auto-placed links).</div>}
+            </div>
+          )}
+
+          {tab==="outreach" && (
+            <div>
+              <div style={{ padding:"11px 14px", borderRadius:"var(--r-md)", background:"var(--t-50,#eef6f4)", boxShadow:"var(--neo-in)", marginBottom:14, fontSize:12.5, color:"var(--ink-2)", lineHeight:1.5 }}>
+                <b>Assisted outreach.</b> Sentinel finds each prospect's contact email + drafts a personalised, white-hat pitch. Review/edit the drafts, then push the campaign to Airtable — your <b>n8n</b> watches the <b>Status</b> column and sends + sequences the emails (set Status → “Send Outreach”). Replies & won links flow back into the Tracker below. <i>Sending stays your approved step — never auto-placed.</i>
+              </div>
+              <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14, flexWrap:"wrap" }}>
+                <div style={{ flex:1, minWidth:220, fontSize:12.5, color:"var(--muted)" }}>Builds a campaign from your <b>top {Math.min(((gap&&gap.prospects)||[]).length,12)||"—"}</b> qualified link-gap prospect(s).</div>
+                <NeoButton kind="primary" size="sm" icon={prepBusy?undefined:"sparkles"} disabled={prepBusy} onClick={prepare}>{prepBusy&&<Icon name="cog" size={15} className="audit-spin" />}{prepBusy?"Preparing…":"Prepare campaign"}</NeoButton>
+                {prep&&prep.length>0 && <NeoButton kind="soft" size="sm" icon="layers" disabled={prepBusy} onClick={pushPrepared}>Push campaign → Airtable</NeoButton>}
+              </div>
+              {prep && prep.length>0 && (
+                <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:18 }}>
+                  {prep.map((row,i)=>(
+                    <div key={i} style={{ padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:8 }}>
+                        <a href={"https://"+row.domain} target="_blank" rel="noopener" style={{ fontFamily:"var(--mono)", fontWeight:700, fontSize:13, color:"var(--ink)", textDecoration:"none" }}>{row.domain}</a>
+                        {row.lvs!=null && <Chip tone={lvsTone(row.lvs)[0]} size="sm">LVS {row.lvs}</Chip>}
+                        {row.contactEmail
+                          ? <Chip tone="teal" size="sm" icon="check">{row.contactEmail}</Chip>
+                          : <a href={row.contactPage} target="_blank" rel="noopener" style={{ fontSize:11.5, color:"var(--gold)", fontWeight:700, textDecoration:"none" }}>no email found → contact page ↗</a>}
+                      </div>
+                      <input value={row.subject||""} onChange={e=>setPrepField(i,"subject",e.target.value)} placeholder="Subject" style={{ width:"100%", padding:"8px 11px", marginBottom:7, borderRadius:"var(--r-md)", border:"none", background:"var(--surface)", boxShadow:"var(--neo-in)", fontSize:12.5, fontWeight:700, color:"var(--ink)", outline:"none" }} />
+                      <textarea value={row.body||""} onChange={e=>setPrepField(i,"body",e.target.value)} rows={6} style={{ width:"100%", padding:"9px 11px", borderRadius:"var(--r-md)", border:"none", background:"var(--surface)", boxShadow:"var(--neo-in)", fontSize:12.5, color:"var(--ink-2)", outline:"none", resize:"vertical", lineHeight:1.5, fontFamily:"inherit" }} />
+                    </div>
+                  ))}
+                </div>
+              )}
+              {prep && prep.length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)", marginBottom:18 }}>No prospects to prepare — run the Competitor Link Gap first.</div>}
+
+              {/* Tracker / ROI */}
+              <div style={{ display:"flex", alignItems:"center", gap:10, paddingTop:14, borderTop:"1px solid var(--line-soft)", marginBottom:12 }}>
+                <span style={{ fontSize:13, fontWeight:700, flex:1 }}>Outreach tracker</span>
+                <NeoButton kind="soft" size="sm" icon={trackBusy?undefined:"trend"} disabled={trackBusy} onClick={loadTrack}>{trackBusy&&<Icon name="cog" size={14} className="audit-spin" />}{trackBusy?"Loading…":"Load tracker"}</NeoButton>
+              </div>
+              {track && !track.error && (
+                <div>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))", gap:10, marginBottom:12 }}>
+                    {[["Prospects",track.total],["Sent",track.sent],["Replied",track.replied],["Won",track.won],["Reply rate",track.replyRate+"%"],["Win rate",track.winRate+"%"]].map(([l,v],i)=>(
+                      <div key={i} style={{ padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+                        <div style={{ fontSize:10.5, color:"var(--faint)", textTransform:"uppercase", letterSpacing:".04em", fontWeight:700 }}>{l}</div>
+                        <div style={{ fontSize:19, fontWeight:800, marginTop:2 }}>{fmt(v)}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+                    {(track.prospects||[]).map((p,i)=>(
+                      <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", fontSize:12.5 }}>
+                        <span style={{ flex:1, fontFamily:"var(--mono)", fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{p.domain}</span>
+                        {p.won && p.wonUrl ? <a href={p.wonUrl} target="_blank" rel="noopener" style={{ color:"var(--t-700)", fontWeight:700, textDecoration:"none" }}>link won ↗</a> : null}
+                        <Chip tone={p.won?"teal":p.replied?"gold":"gray"} size="sm">{p.status}</Chip>
+                      </div>
+                    ))}
+                    {(track.prospects||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No outreach rows yet — prepare + push a campaign above.</div>}
+                  </div>
+                </div>
+              )}
+              {track && track.error && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"4px 2px" }}>{track.error}</div>}
             </div>
           )}
 

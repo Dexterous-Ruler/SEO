@@ -140,6 +140,8 @@
     backlinksSummary(siteId) { return engine("/backlinks/summary", { siteId }); },
     backlinksGap(siteId) { return engine("/backlinks/gap", { siteId }); },
     backlinksDraftOutreach(siteId, prospectDomain, tactic, targetPage) { return engine("/backlinks/draft-outreach", { siteId, prospectDomain, tactic, targetPage }); },
+    backlinksPrepareOutreach(siteId, prospects, tactic, targetPage) { return engine("/backlinks/prepare-outreach", { siteId, prospects, tactic, targetPage }); },
+    backlinksOutreachStatus(siteId) { return engine("/backlinks/outreach-status", { siteId }); },
     backlinksPushProspects(siteId, prospects) { return engine("/backlinks/push-prospects", { siteId, prospects }); },
     applyLink(siteId, sourcePage, anchor, targetUrl) { return engine("/apply-link", { siteId, sourcePage, anchor, targetUrl }); },
     generateSchema(siteId, page, schemaConfig, faqs) { return engine("/generate-schema", { siteId, page, schemaConfig, faqs }); },

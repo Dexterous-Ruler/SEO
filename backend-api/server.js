@@ -1078,6 +1078,18 @@ const routes = {
     try { return await linkengine.draftOutreach(body.siteId, { prospectDomain: body.prospectDomain, tactic: body.tactic || 'competitor_gap', targetPage: body.targetPage || '' }); }
     catch (e) { return { error: e.message }; }
   },
+  // Phase 2: prepare a campaign — enrich contact + draft email for a batch.
+  'POST /backlinks/prepare-outreach': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    try { return await linkengine.prepareOutreach(body.siteId, { prospects: body.prospects || [], tactic: body.tactic || 'competitor_gap', targetPage: body.targetPage || '' }); }
+    catch (e) { return { error: e.message }; }
+  },
+  // Phase 2: read the Outreach table back → pipeline + reply/win ROI.
+  'POST /backlinks/outreach-status': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    try { return await linkengine.outreachStatus(body.siteId); }
+    catch (e) { return { error: e.message }; }
+  },
   // Push selected prospects (+ optional drafts) into the site's Airtable as an
   // "Outreach" table so n8n can send + sequence — same handoff as the article loop.
   'POST /backlinks/push-prospects': async (body) => {
