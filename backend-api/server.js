@@ -437,7 +437,7 @@ const routes = {
   // client-supplied keywords to avoid spending DataForSEO units; fetches only if
   // none provided AND units allow.
   'POST /traffic-value': async (body) => {
-    const currency = (body.db === 'us' ? 'USD' : 'GBP');
+    const currency = semrush.currencyFor(body.db);
     // 1) Calibrate the CTR curve from GSC, if connected (free, per-site).
     let curve = tv.DEFAULT_CTR, curveSource = 'default';
     try {
@@ -836,7 +836,7 @@ const routes = {
           if (saStr && site.gsc_property) { const gs = await gsc.snapshot(JSON.parse(saStr), site.gsc_property, { days: 28 }); curve = tv.calibrateCurve(gs.topQueries || [], { minImpr: 50 }).curve; }
         } catch (e) {}
         const valued = tv.valueKeywords(keywords, { curve });
-        const summary = tv.summarize(valued, { currency: site.semrush_db === 'us' ? 'USD' : 'GBP' });
+        const summary = tv.summarize(valued, { currency: semrush.currencyFor(site.semrush_db) });
         card.trafficValue = { currency: summary.currency, totalEstValue: summary.totalEstValue, totalEstClicks: summary.totalEstClicks, valueAtRisk: summary.page2AtRiskValue, page2Count: summary.page2Count };
         card.sources.trafficValue = true;
       }
@@ -1233,6 +1233,18 @@ const routes = {
     if (Array.isArray(body.negativeKeywords)) patch.negative_keywords = body.negativeKeywords;
     const site = await db.updateSite(body.siteId, patch);
     return { competitors: site.competitors || [], negativeKeywords: site.negative_keywords || [] };
+  },
+
+  // List supported DataForSEO target markets, and set a site's market (semrush_db).
+  'POST /site-database': async (body) => {
+    if (body.db) {
+      const valid = semrush.COUNTRIES.some((c) => c.db === String(body.db).toLowerCase());
+      if (!valid) return { error: 'Unsupported market: ' + body.db };
+      const site = await db.updateSite(body.siteId, { semrush_db: String(body.db).toLowerCase() });
+      await db.logActivity({ site_id: body.siteId, type: 'config', actor: 'You', icon: 'globe', text: 'Changed keyword market to ' + semrush.countryFor(body.db).label, meta: String(body.db).toUpperCase() }).catch(() => {});
+      return { db: site.semrush_db, countries: semrush.COUNTRIES };
+    }
+    return { countries: semrush.COUNTRIES };
   },
 
   // ── Airtable ─────────────────────────────────────────────────────────────

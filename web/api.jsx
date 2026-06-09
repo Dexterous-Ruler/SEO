@@ -110,6 +110,7 @@
     semrushUnits() { return engine("/semrush-units", {}); },
     trafficValue(siteId, keywords, db) { return engine("/traffic-value", { siteId, keywords, db: db || "uk" }); },
     saveSiteCompetitors(siteId, competitors, negativeKeywords) { return engine("/site-competitors", { siteId, competitors, negativeKeywords }); },
+    siteDatabase(siteId, db) { return engine("/site-database", { siteId, db }); },
     chat(opts) { return engine("/chat", opts); },
     chatList(siteId) { return engine("/chat-list", { siteId }); },
     chatLoad(conversationId) { return engine("/chat-load", { conversationId }); },

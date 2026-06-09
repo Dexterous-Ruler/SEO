@@ -1616,7 +1616,19 @@ function OptimizeScreen({ ctx }) {
                   {(facts.facts||[]).length>0 && <div><div style={{ fontSize:12.5, fontWeight:700, marginBottom:6 }}>Citable facts</div><div style={{ display:"flex", flexDirection:"column", gap:5 }}>{facts.facts.map((f,i)=>(<div key={i} style={{ fontSize:12.5, padding:"8px 11px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)" }}>• {f}</div>))}</div></div>}
                   {(facts.faqs||[]).length>0 && <div><div style={{ fontSize:12.5, fontWeight:700, marginBottom:6 }}>Suggested FAQ</div><div style={{ display:"flex", flexDirection:"column", gap:6 }}>{facts.faqs.map((q,i)=>(<div key={i} style={{ padding:"9px 12px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)" }}><div style={{ fontSize:12.5, fontWeight:700 }}>{q.q}</div><div style={{ fontSize:12, color:"var(--muted)", marginTop:3 }}>{q.a}</div></div>))}</div></div>}
                   {(facts.suggestions||[]).length>0 && <div><div style={{ fontSize:12.5, fontWeight:700, marginBottom:6 }}>Additions to improve citability</div><div style={{ display:"flex", flexDirection:"column", gap:5 }}>{facts.suggestions.map((sug,i)=>(<div key={i} style={{ fontSize:12.5, padding:"8px 11px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", color:"var(--t-800)" }}>→ {sug}</div>))}</div></div>}
-                  {facts.faqSchema && <div><div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:6 }}><span style={{ fontSize:12.5, fontWeight:700 }}>FAQPage schema</span><NeoButton kind="soft" size="sm" icon="doc" style={{ marginLeft:"auto" }} onClick={()=>copy(JSON.stringify(facts.faqSchema,null,2))}>Copy</NeoButton></div><pre style={{ margin:0, padding:"12px 14px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", fontSize:11, fontFamily:"var(--mono)", overflowX:"auto", maxHeight:300 }}>{JSON.stringify(facts.faqSchema,null,2)}</pre></div>}
+                  {facts.faqSchema && <div><div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:6 }}><span style={{ fontSize:12.5, fontWeight:700 }}>FAQPage schema</span>
+                    <NeoButton kind="soft" size="sm" icon="doc" style={{ marginLeft:"auto" }} onClick={()=>copy(JSON.stringify(facts.faqSchema,null,2))}>Copy</NeoButton>
+                    <NeoButton kind="primary" size="sm" icon={busy==="applyFacts"?undefined:"check"} disabled={busy==="applyFacts"} onClick={()=>{
+                      if(!pageUrl){ctx.toast("Enter the page URL above first","gold");return;}
+                      setBusy("applyFacts"); ctx.toast("Applying FAQ schema to the live page…","teal");
+                      API.applySchema(s.id,{ url:pageUrl, jsonld:facts.faqSchema }).then(r=>{
+                        if(r.status==="blocked"){ ctx.toast("Site is read-only — arm writes on the Admin screen first.","gold"); return; }
+                        if(r.error){ ctx.toast(r.error,"clay"); return; }
+                        ctx.toast("FAQPage schema applied to the live page ✓ (reversible)","teal");
+                      }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
+                    }}>{busy==="applyFacts"?"Applying…":"Apply to live page"}</NeoButton></div>
+                    <pre style={{ margin:0, padding:"12px 14px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", fontSize:11, fontFamily:"var(--mono)", overflowX:"auto", maxHeight:300 }}>{JSON.stringify(facts.faqSchema,null,2)}</pre>
+                    <div style={{ fontSize:11, color:"var(--muted)", marginTop:5 }}>Injects the schema into the page via the seo-agent-optimize plugin — no manual paste. Needs the plugin installed and the site write-armed.</div></div>}
                 </div>
               )}
             </div>
@@ -2713,8 +2725,18 @@ function SemrushScreen({ ctx }) {
   const [negatives,setNegatives] = useState(s.negative_keywords||[]);
   const [newComp,setNewComp] = useState("");
   const [newNeg,setNewNeg] = useState("");
+  const [dbVal,setDbVal] = useState(s.semrush_db||"uk");
+  const [dbList,setDbList] = useState(null);
 
-  useEffect(()=>{ setData(null); setGaps(null); setErr(null); setNeedsKey(false); setTval(null); setCompetitors(s.competitors||[]); setNegatives(s.negative_keywords||[]); },[s.id]);
+  useEffect(()=>{ setData(null); setGaps(null); setErr(null); setNeedsKey(false); setTval(null); setCompetitors(s.competitors||[]); setNegatives(s.negative_keywords||[]); setDbVal(s.semrush_db||"uk"); },[s.id]);
+  useEffect(()=>{ if(live&&!dbList) API.siteDatabase(s.id).then(r=>{ if(r&&r.countries) setDbList(r.countries); }).catch(()=>{}); },[live]);
+  const changeDb = (db)=>{
+    if(!db||db===dbVal) return;
+    setDbVal(db); s.semrush_db=db;
+    var site=window.SITES.find(x=>x.id===s.id); if(site) site.semrush_db=db;
+    setData(null); setStriking(null); setTval(null); setGaps(null);   // stale to the old market
+    if(live) API.siteDatabase(s.id, db).then(()=>ctx.toast("Keyword market set to "+db.toUpperCase()+" — click Refresh to reload data","teal")).catch(()=>{});
+  };
   const loadTval = ()=>{
     // Reuse already-loaded keywords → zero DataForSEO units spent.
     const kws=(data&&data.topKeywords)||[];
@@ -2775,7 +2797,14 @@ function SemrushScreen({ ctx }) {
     <div className="rise">
       <PageHead title="DataForSEO" sub={`Live search-performance data for ${domain}.`}>
         <div style={{ display:"flex", gap:10 }}>
-          <Chip tone="gray" size="sm" icon="globe">{(s.semrush_db||"uk").toUpperCase()} database</Chip>
+          <div title="Keyword data market — pick the country DataForSEO pulls rankings, volumes & competitors from" style={{ display:"inline-flex", alignItems:"center", gap:5, padding:"5px 9px 5px 11px", borderRadius:99, background:"var(--surface)", boxShadow:"var(--neo-xs)", fontSize:12, fontWeight:700, color:"var(--ink)" }}>
+            <Icon name="globe" size={13} style={{ color:"var(--muted)" }} />
+            <select value={dbVal} onChange={e=>changeDb(e.target.value)}
+              style={{ appearance:"none", WebkitAppearance:"none", border:"none", background:"transparent", fontSize:12, fontWeight:700, fontFamily:"inherit", color:"var(--ink)", cursor:"pointer", outline:"none", paddingRight:1 }}>
+              {(dbList||[{db:dbVal,label:dbVal.toUpperCase()}]).map(c=>(<option key={c.db} value={c.db}>{c.label} database</option>))}
+            </select>
+            <span style={{ color:"var(--muted)", fontSize:10, marginLeft:-2 }}>▾</span>
+          </div>
           {units!=null && <Chip tone={units<100?"clay":units<1000?"gold":"teal"} size="sm" icon="bolt">${(units/100).toFixed(2)} balance</Chip>}
           {data && <NeoButton kind="soft" size="sm" icon="trend" onClick={load}>Refresh</NeoButton>}
         </div>
