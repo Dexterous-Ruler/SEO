@@ -1,0 +1,126 @@
+{
+  "name": "Sentinel — Link Outreach (send + follow-up)",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [{ "field": "minutes", "minutesInterval": 15 }] } },
+      "id": "trg-send",
+      "name": "Every 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [-320, 0]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": { "__rl": true, "value": "YOUR_BASE_ID", "mode": "id" },
+        "table": { "__rl": true, "value": "Outreach", "mode": "name" },
+        "filterByFormula": "AND({Status}='Send Outreach', {Contact Email}!='')",
+        "options": {}
+      },
+      "id": "find-send",
+      "name": "Find 'Send Outreach'",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [-100, 0]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.fields['Contact Email'] }}",
+        "subject": "={{ $json.fields['Subject'] }}",
+        "emailType": "text",
+        "message": "={{ $json.fields['Email'] }}",
+        "options": {}
+      },
+      "id": "gmail-send",
+      "name": "Send email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [140, 0],
+      "webhookId": ""
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": { "__rl": true, "value": "YOUR_BASE_ID", "mode": "id" },
+        "table": { "__rl": true, "value": "Outreach", "mode": "name" },
+        "id": "={{ $('Find \\'Send Outreach\\'').item.json.id }}",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Status": "Sent",
+            "Sent At": "={{ $now.toISO() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "mark-sent",
+      "name": "Mark Sent",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [380, 0]
+    },
+
+    {
+      "parameters": { "rule": { "interval": [{ "field": "days", "daysInterval": 1 }] } },
+      "id": "trg-followup",
+      "name": "Daily follow-up",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [-320, 260]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": { "__rl": true, "value": "YOUR_BASE_ID", "mode": "id" },
+        "table": { "__rl": true, "value": "Outreach", "mode": "name" },
+        "filterByFormula": "AND({Status}='Sent', NOT({Replied}), IS_BEFORE({Sent At}, DATEADD(NOW(), -3, 'days')))",
+        "options": {}
+      },
+      "id": "find-followup",
+      "name": "Find due follow-ups",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [-100, 260]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.fields['Contact Email'] }}",
+        "subject": "=Re: {{ $json.fields['Subject'] }}",
+        "emailType": "text",
+        "message": "=Just following up on my note below — would this be a useful addition for your readers?\n\n{{ $json.fields['Email'] }}",
+        "options": {}
+      },
+      "id": "gmail-followup",
+      "name": "Send follow-up",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [140, 260],
+      "webhookId": ""
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": { "__rl": true, "value": "YOUR_BASE_ID", "mode": "id" },
+        "table": { "__rl": true, "value": "Outreach", "mode": "name" },
+        "id": "={{ $('Find due follow-ups').item.json.id }}",
+        "columns": { "mappingMode": "defineBelow", "value": { "Status": "Follow-up 1" } },
+        "options": {}
+      },
+      "id": "mark-followup",
+      "name": "Mark Follow-up 1",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [380, 260]
+    }
+  ],
+  "connections": {
+    "Every 15 min": { "main": [[{ "node": "Find 'Send Outreach'", "type": "main", "index": 0 }]] },
+    "Find 'Send Outreach'": { "main": [[{ "node": "Send email", "type": "main", "index": 0 }]] },
+    "Send email": { "main": [[{ "node": "Mark Sent", "type": "main", "index": 0 }]] },
+    "Daily follow-up": { "main": [[{ "node": "Find due follow-ups", "type": "main", "index": 0 }]] },
+    "Find due follow-ups": { "main": [[{ "node": "Send follow-up", "type": "main", "index": 0 }]] },
+    "Send follow-up": { "main": [[{ "node": "Mark Follow-up 1", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

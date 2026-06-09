@@ -10,6 +10,11 @@
 import { db } from './supabase.js';
 import * as dfs from './dataforseo.js';
 import * as claude from './claude.js';
+import * as airtable from './airtable.js';
+
+const cleanDom = (d) => String(d || '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '').trim();
+const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const JUNK_EMAIL = /(sentry|wixpress|example\.|\.png|\.jpg|\.gif|@2x|wordpress\.com|godaddy|cloudflare|yourdomain|domain\.com|@sentry|placeholder|@email\.com)/i;
 
 // Link Value Score (deterministic; Claude only labels elsewhere). 0–100.
 //   authority  = referring-domain rank / 1000
@@ -75,4 +80,83 @@ export async function draftOutreach(siteId, { prospectDomain, tactic = 'competit
   });
 }
 
-export default { profile, linkGap, draftOutreach, linkValueScore };
+// ── Phase 2: assisted outreach ─────────────────────────────────────────────
+
+// Contact enrichment: scrape a prospect's homepage + contact/about pages for a
+// real contact email + contact page. Free (no API), best-effort.
+export async function enrichContact(domain) {
+  const dom = cleanDom(domain);
+  if (!dom) return { error: 'No domain.' };
+  const base = 'https://' + dom;
+  const paths = ['', '/contact', '/contact-us', '/about', '/about-us'];
+  const emails = new Set();
+  let contactPage = null;
+  for (const p of paths) {
+    try {
+      const r = await fetch(base + p, { headers: { 'User-Agent': 'SentinelSEO/1.0 (+outreach research)' }, redirect: 'follow' });
+      if (!r.ok) continue;
+      const html = await r.text();
+      let any = false;
+      for (const m of (html.match(EMAIL_RE) || [])) {
+        const e = m.toLowerCase();
+        if (!JUNK_EMAIL.test(e) && e.length < 60) { emails.add(e); any = true; }
+      }
+      if (p.includes('contact') && (any || /contact/i.test(html))) contactPage = base + p;
+    } catch (e) {}
+  }
+  // Prefer an on-domain email (e.g. editor@dom) over generic webmail.
+  const list = [...emails].sort((a, b) => (a.endsWith('@' + dom) ? -1 : 0) - (b.endsWith('@' + dom) ? -1 : 0));
+  return { domain: dom, email: list[0] || null, emails: list.slice(0, 5), contactPage: contactPage || (base + '/contact') };
+}
+
+// Prepare a campaign for a batch of prospects: enrich contact + draft email for
+// each (Claude). Returns enriched rows ready to review then push to Airtable.
+export async function prepareOutreach(siteId, { prospects = [], tactic = 'competitor_gap', targetPage = '' } = {}) {
+  const out = [];
+  for (const p of prospects.slice(0, 12)) {
+    const contact = await enrichContact(p.domain).catch(() => ({}));
+    let draft = {};
+    try { draft = await draftOutreach(siteId, { prospectDomain: p.domain, tactic, targetPage }); } catch (e) {}
+    out.push({ ...p, tactic, contactEmail: contact.email || null, contactPage: contact.contactPage || null, subject: draft.subject || '', body: draft.body || '' });
+  }
+  return { prepared: out.length, prospects: out };
+}
+
+// Outreach tracker: read the Airtable "Outreach" table back and compute the
+// campaign pipeline + ROI (reply rate, links won, cost-per-link).
+export async function outreachStatus(siteId, { costPerHour = 0 } = {}) {
+  const pat = await db.getAirtablePat(siteId).catch(() => null);
+  if (!pat) return { error: 'Connect Airtable first.' };
+  const cfg = await db.getAirtableConfig(siteId).catch(() => null);
+  if (!cfg || !cfg.base_id) return { error: 'Set the Airtable base first.' };
+  let records = [];
+  let offset = null;
+  try {
+    for (let i = 0; i < 5; i++) {
+      const r = await airtable.listRecords(pat, cfg.base_id, 'Outreach', { pageSize: 100, offset });
+      records = records.concat(r.records || []);
+      offset = r.offset; if (!offset) break;
+    }
+  } catch (e) { return { error: 'Could not read the Outreach table — create it (push some prospects first), or check the base. ' + e.message, prospects: [] }; }
+  const norm = (s) => String(s || '').toLowerCase();
+  const rows = records.map((r) => ({ id: r.id, fields: r.fields || {} }));
+  const total = rows.length;
+  const isSent = (f) => f['Sent At'] || /sent|replied|won|follow/i.test(norm(f.Status));
+  const isReplied = (f) => f.Replied === true || /replied|won/i.test(norm(f.Status));
+  const isWon = (f) => f.Won === true || /won/i.test(norm(f.Status)) || !!f['Won URL'];
+  const sent = rows.filter((r) => isSent(r.fields)).length;
+  const replied = rows.filter((r) => isReplied(r.fields)).length;
+  const won = rows.filter((r) => isWon(r.fields)).length;
+  return {
+    total, sent, replied, won,
+    replyRate: sent ? Math.round((replied / sent) * 100) : 0,
+    winRate: sent ? Math.round((won / sent) * 100) : 0,
+    prospects: rows.map((r) => ({
+      domain: r.fields.Domain, status: r.fields.Status || 'To review',
+      lvs: r.fields['Link Value Score'] ?? null, contact: r.fields['Contact Email'] || null,
+      replied: isReplied(r.fields), won: isWon(r.fields), wonUrl: r.fields['Won URL'] || null,
+    })).filter((p) => p.domain),
+  };
+}
+
+export default { profile, linkGap, draftOutreach, linkValueScore, enrichContact, prepareOutreach, outreachStatus };
