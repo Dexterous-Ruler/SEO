@@ -87,11 +87,11 @@ export async function gather(topic, { recency = 'month', excludeDomains, now = 0
 
 // Research-backed content brief for a keyword/cluster. Tavily+Perplexity gather,
 // Claude structures into a writer-ready UK brief with cited facts + internal links.
-export async function contentBrief({ keyword, intent, siteName, niche, excludeDomain, internalLinkCandidates, now = 0 }) {
+export async function contentBrief({ keyword, intent, siteName, niche, excludeDomain, internalLinkCandidates, siteId, now = 0 }) {
   if (!perplexity.hasKey() && !tavily.hasKey()) return { error: 'No research engine configured — add PERPLEXITY_API_KEY and/or TAVILY_API_KEY.' };
   const research = await gather(keyword, { recency: 'month', excludeDomains: excludeDomain ? [excludeDomain] : undefined, now, ttlMs: 6 * 60 * 60 * 1000 });
   if (!research.summary && !research.material) return { error: 'Research returned nothing for this keyword.', engines: research.engines };
-  const brief = await claude.synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates });
+  const brief = await claude.synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId });
   return { keyword, intent, brief, sources: research.sources, engines: research.engines, researchCost: research.cost };
 }
 

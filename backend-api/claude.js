@@ -72,15 +72,16 @@ export async function complete({ system, messages, maxTokens = 1024, temperature
 // System prompts are sourced from the editable registry (admin panel → Supabase).
 // SYSTEM() is the shared content-rules block, cached.
 import { P, modelFor, tempFor } from './prompts.js';
-const SYSTEM = () => [{ type: 'text', text: P('content.rules'), cache_control: { type: 'ephemeral' } }];
-const sys = (key) => [{ type: 'text', text: P(key) }];
+// siteId (optional) → use that site's per-site prompt override when one is set.
+const SYSTEM = (siteId) => [{ type: 'text', text: P('content.rules', siteId), cache_control: { type: 'ephemeral' } }];
+const sys = (key, siteId) => [{ type: 'text', text: P(key, siteId) }];
 
 // ---- task helpers ---------------------------------------------------------
 
 // Meta description: 140–160 chars, compelling, keyword-aware.
-export async function metaDescription({ url, title, headings, excerpt }) {
+export async function metaDescription({ url, title, headings, excerpt, siteId }) {
   const txt = await complete({
-    system: SYSTEM(), promptKey: 'content.rules',
+    system: SYSTEM(siteId), promptKey: 'content.rules',
     maxTokens: 200,
     messages: [{
       role: 'user',
@@ -97,9 +98,9 @@ Output only the meta description text.`,
 }
 
 // Title rewrite: <= 60 chars, keyword front-loaded, keeps brand.
-export async function titleRewrite({ url, currentTitle, brand }) {
+export async function titleRewrite({ url, currentTitle, brand, siteId }) {
   const txt = await complete({
-    system: SYSTEM(), promptKey: 'content.rules',
+    system: SYSTEM(siteId), promptKey: 'content.rules',
     maxTokens: 120,
     messages: [{
       role: 'user',
@@ -115,9 +116,9 @@ Output only the new title.`,
 }
 
 // Alt text for an image, from its filename + surrounding context.
-export async function altText({ filename, context, pageTitle }) {
+export async function altText({ filename, context, pageTitle, siteId }) {
   const txt = await complete({
-    system: SYSTEM(), promptKey: 'content.rules',
+    system: SYSTEM(siteId), promptKey: 'content.rules',
     maxTokens: 120,
     messages: [{
       role: 'user',
@@ -135,10 +136,10 @@ Describe what the image likely shows. Output only the alt text.`,
 // Content intelligence: analyze a site's existing content (titles/URLs/topics)
 // and return content gaps, new-content suggestions, and keyword clusters.
 // Returns structured JSON the UI renders. Generic across niches.
-export async function contentIntelligence({ siteName, niche, titles, sampleHeadings }) {
+export async function contentIntelligence({ siteName, niche, titles, sampleHeadings, siteId }) {
   const list = (titles || []).slice(0, 90).map((t, i) => `${i + 1}. ${t}`).join('\n');
   const txt = await complete({
-    system: SYSTEM(), promptKey: 'content.rules',
+    system: SYSTEM(siteId), promptKey: 'content.rules',
     maxTokens: 4096,
     messages: [{
       role: 'user',
@@ -177,9 +178,9 @@ Rules: 4-7 clusters, 5-8 gaps, 6-10 suggestions, 3-5 internalLinks. Base everyth
 }
 
 // Generic: ask Claude to draft the "after" value for any proposal, given the finding.
-export async function draftFix({ finding, pageContext }) {
+export async function draftFix({ finding, pageContext, siteId }) {
   const txt = await complete({
-    system: SYSTEM(), promptKey: 'content.rules',
+    system: SYSTEM(siteId), promptKey: 'content.rules',
     maxTokens: 400,
     messages: [{
       role: 'user',
@@ -198,9 +199,9 @@ Output only the proposed fix (the value to apply), nothing else.`,
 
 // Executive narrative — Claude writes a weekly story OVER pre-computed metrics.
 // CRITICAL: it narrates the numbers; it must never invent or recompute them.
-export async function narrate({ siteName, metrics }) {
+export async function narrate({ siteName, metrics, siteId }) {
   const txt = await complete({
-    system: sys('report.narrate'),
+    system: sys('report.narrate', siteId),
     promptKey: 'report.narrate',
     maxTokens: 700,
     messages: [{ role: 'user', content: `Site: ${siteName}\n\nComputed metrics (do not alter these numbers):\n${JSON.stringify(metrics, null, 1).slice(0, 6000)}\n\nWrite the weekly executive briefing.` }],
@@ -211,7 +212,7 @@ export async function narrate({ siteName, metrics }) {
 // Internal-link suggestions. Given a source page's text + a CLOSED LIST of
 // candidate target pages (so Claude cannot invent URLs), propose contextual
 // internal links. Returns [{ anchor, targetUrl, reason }].
-export async function internalLinkSuggestions({ sourceUrl, sourceTitle, sourceText, candidates }) {
+export async function internalLinkSuggestions({ sourceUrl, sourceTitle, sourceText, candidates, siteId }) {
   const list = (candidates || []).slice(0, 60).map((c, i) => `${i + 1}. ${c.title} → ${c.url}`).join('\n');
   const txt = await complete({
     system: sys('seo.internalLinks'),
@@ -230,7 +231,7 @@ export async function internalLinkSuggestions({ sourceUrl, sourceTitle, sourceTe
 // AI-SEO fact extraction. Pull the citable, extractable facts from a page and
 // propose a FAQPage JSON-LD + concrete factual additions that make the page
 // easier for LLMs/answer engines to cite. Returns { facts, faqs, suggestions }.
-export async function extractCitableFacts({ url, title, text, niche }) {
+export async function extractCitableFacts({ url, title, text, niche, siteId }) {
   const txt = await complete({
     system: sys('seo.pageFacts'),
     promptKey: 'seo.pageFacts',
@@ -245,9 +246,9 @@ export async function extractCitableFacts({ url, title, text, niche }) {
 
 // grill-me: produce a plan BEFORE any code/changes. Grills the brief, surfaces
 // open questions/risks, and sequences the work. Returns a markdown plan.
-export async function projectPlan({ siteName, niche, baseUrl, keyPages, scores, goals }) {
+export async function projectPlan({ siteName, niche, baseUrl, keyPages, scores, goals, siteId }) {
   const txt = await complete({
-    system: sys('plan.project'),
+    system: sys('plan.project', siteId),
     promptKey: 'plan.project',
     maxTokens: 1100,
     messages: [{ role: 'user', content: `Site: ${siteName || baseUrl} (${baseUrl})\nNiche: ${niche || 'unknown'}\nGoals: ${goals || 'reach 100/100 Lighthouse across Performance/Accessibility/Best-Practices/SEO + improve AI citation, with human approval before publishing.'}\nCurrent scores: ${scores ? JSON.stringify(scores) : 'not yet audited'}\nKey pages: ${(keyPages || []).map((p) => p.name || p.path || p).join(', ') || 'not specified'}\n\nWrite the plan.` }],
@@ -283,12 +284,12 @@ export async function clusterKeywords({ keywords, siteName, niche, siteId }) {
 // Perplexity grounded answer). Claude structures + writes the brief but must use
 // ONLY the supplied research — every fact ties to a provided source, nothing
 // invented. UK audience, UK English. Returns structured JSON.
-export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates }) {
+export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId }) {
   const sources = (research.sources || []).map((s, i) => `[${i + 1}] ${s.title || ''} — ${s.url}`).join('\n');
   const material = (research.material || '').slice(0, 9000);
   const links = (internalLinkCandidates || []).slice(0, 25).map((p) => `${p.title} → ${p.url}`).join('\n');
   const txt = await complete({
-    system: sys('content.brief'),
+    system: sys('content.brief', siteId),
     promptKey: 'content.brief',
     maxTokens: 3000,
     messages: [{ role: 'user', content: `KEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}\n\nWrite the UK content brief as JSON.` }],

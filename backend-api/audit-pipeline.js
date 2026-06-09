@@ -68,7 +68,7 @@ function impactFor(score, savingsMs) {
 }
 
 // Build findings + draft proposals for one URL.
-export async function auditPage(url, { creds, withContent = false } = {}) {
+export async function auditPage(url, { creds, withContent = false, siteId = null } = {}) {
   // 1) Detailed PSI across all four categories
   const psi = await runPsiDetailed(url, {
     strategy: 'mobile',
@@ -153,9 +153,9 @@ export async function auditPage(url, { creds, withContent = false } = {}) {
     if (withContent) {
       try {
         if (p.field === 'meta_description') {
-          after = await claude.metaDescription({ url, title: head.title, headings, excerpt: textExcerpt(html) });
+          after = await claude.metaDescription({ url, title: head.title, headings, excerpt: textExcerpt(html), siteId });
         } else if (p.field === 'title' && head.title) {
-          after = await claude.titleRewrite({ url, currentTitle: head.title });
+          after = await claude.titleRewrite({ url, currentTitle: head.title, siteId });
         }
       } catch (e) { /* keep placeholder on Claude error */ }
     }

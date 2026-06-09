@@ -89,7 +89,7 @@
     // ---- engine operations ----
     // Secure connect: validate + detect + encrypt-store in one server call.
     siteConnect(creds, opts) { return engine("/site-connect", Object.assign({ creds }, opts || {})); },
-    generateContent(task, input, finding) { return engine("/generate-content", { task, input, finding }); },
+    generateContent(task, input, finding, siteId) { return engine("/generate-content", { task, input, finding, siteId }); },
     contentIntel(siteId, niche) { return engine("/content-intel", { siteId, niche }); },
     contentOpportunities(siteId, opts) { return engine("/content-opportunities", Object.assign({ siteId }, opts || {})); },
     contentBrief(siteId, keyword, intent) { return engine("/content-brief", { siteId, keyword, intent }); },

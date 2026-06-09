@@ -52,7 +52,7 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
     // Candidates = everything except the source itself.
     const candidates = corpus.filter((c) => c.url !== src.url);
     const links = await claude.internalLinkSuggestions({
-      sourceUrl: src.url, sourceTitle: src.title, sourceText: text, candidates,
+      sourceUrl: src.url, sourceTitle: src.title, sourceText: text, candidates, siteId,
     }).catch(() => []);
     for (const l of links) {
       const target = corpus.find((c) => c.url === l.targetUrl);
