@@ -1103,6 +1103,8 @@ function diffLines(oldStr, newStr){
 function AdminScreen({ ctx }) {
   const API = window.SentinelAPI;
   const live = API && window.SENTINEL_LIVE;
+  const s = ctx.site;
+  const [scope,setScope] = useState("global");   // "global" = all sites, "site" = this site only
   const [data,setData] = useState(null);
   const [busy,setBusy] = useState(false);
   const [err,setErr] = useState(null);
@@ -1119,7 +1121,8 @@ function AdminScreen({ ctx }) {
   useEffect(()=>{ if(ctx.navTab && ["system","prompts"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
   const [stat,setStat] = useState(null);
   const [statBusy,setStatBusy] = useState(false);
-  const load = ()=>{ setBusy(true); setErr(null); API.promptsList().then(r=>{ if(r.error){setErr(r.error);return;} setData(r); setEdits({}); }).catch(e=>setErr(e.message)).finally(()=>setBusy(false)); };
+  const load = ()=>{ setBusy(true); setErr(null); API.promptsList(scope==="site"?s.id:undefined).then(r=>{ if(r.error){setErr(r.error);return;} setData(r); setEdits({}); }).catch(e=>setErr(e.message)).finally(()=>setBusy(false)); };
+  useEffect(()=>{ if(live && tab==="prompts") load(); },[scope, s.id]);
   const loadStat = ()=>{ setStatBusy(true); API.adminStatus().then(setStat).catch(e=>setStat({error:e.message})).finally(()=>setStatBusy(false)); };
   useEffect(()=>{ if(live){ loadStat(); if(!data) load(); } },[]);
 
@@ -1141,14 +1144,14 @@ function AdminScreen({ ctx }) {
   const save = (p)=>{
     const content=edits[p.key]!=null?edits[p.key]:p.content;
     setSaving(p.key);
-    API.promptSave(p.key, content, mdl(p)||null, tmp(p)===""?null:tmp(p)).then(r=>{
+    API.promptSave(p.key, content, mdl(p)||null, tmp(p)===""?null:tmp(p), scope==="site"?s.id:undefined).then(r=>{
       if(r.error){ ctx.toast("Save failed: "+r.error,"clay"); return; }
-      ctx.toast("Saved — live on next call","teal"); setCfg(c=>{const n={...c};delete n[p.key];return n;}); load();
+      ctx.toast(scope==="site"?("Saved for "+s.name+" — live on next call"):"Saved — live on next call","teal"); setCfg(c=>{const n={...c};delete n[p.key];return n;}); load();
     }).catch(e=>ctx.toast("Save failed: "+e.message,"clay")).finally(()=>setSaving(""));
   };
   const reset = (p)=>{
     setSaving(p.key);
-    API.promptReset(p.key).then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} ctx.toast("Reset to default","gold"); load(); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setSaving(""));
+    API.promptReset(p.key, scope==="site"?s.id:undefined).then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} ctx.toast(scope==="site"?("Cleared "+s.name+"'s override"):"Reset to default","gold"); load(); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setSaving(""));
   };
 
   const prompts=(data&&data.prompts||[]).filter(p=> !q || (p.label+p.key+p.category+p.content).toLowerCase().includes(q.toLowerCase()));
@@ -1230,7 +1233,16 @@ function AdminScreen({ ctx }) {
 
       {live && data && (
         <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-          <div style={{ fontSize:12, color:"var(--muted)" }}>{prompts.length} prompt(s) · {data.status.overridden||0} customised · changes apply on the next AI call (and re-sync from Supabase every ~45s).</div>
+          {/* Scope: edit prompts for ALL sites, or override them just for the active site. */}
+          <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+            <div style={{ display:"flex", gap:4, padding:4, borderRadius:"var(--r-pill)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+              {[["global","All sites"],["site",s.name+" only"]].map(([v,l])=>(
+                <button key={v} onClick={()=>setScope(v)} style={{ padding:"6px 14px", fontSize:12.5, fontWeight:700, borderRadius:99, background:scope===v?"var(--surface)":"transparent", color:scope===v?"var(--t-700)":"var(--muted)", boxShadow:scope===v?"var(--neo-sm)":"none" }}>{l}</button>
+              ))}
+            </div>
+            <span style={{ fontSize:12, color:"var(--muted)" }}>{scope==="site"?("Editing per-site overrides for "+s.name+" — these win over the global prompt for this site only."):"Editing the shared prompts used by every site."}</span>
+          </div>
+          <div style={{ fontSize:12, color:"var(--muted)" }}>{prompts.length} prompt(s) · {scope==="site"?(prompts.filter(p=>p.siteOverridden).length+" site override(s)"):(data.status.overridden||0)+" customised"} · changes apply on the next AI call.</div>
           {cats.map(cat=>(
             <div key={cat}>
               <div style={{ fontSize:11, fontWeight:700, letterSpacing:".06em", textTransform:"uppercase", color:"var(--t-700)", margin:"6px 2px 8px" }}>{cat}</div>
@@ -1938,15 +1950,34 @@ function ContentScreen({ ctx }) {
   const s = ctx.site;
   const d = ctx.intel;
   const loading = ctx.intelLoading;
+  const API = window.SentinelAPI;
+  const [pushing,setPushing] = useState(false);
   const strengthTone = { strong:"teal", moderate:"gold", thin:"clay" };
   const prioTone = { high:"clay", medium:"gold", low:"gray" };
+
+  // Push the analysed keywords (suggestions + gaps) into the site's Airtable
+  // keyword column → feeds the n8n article writer.
+  const pushToAirtable = ()=>{
+    const kws=[...new Set([
+      ...((d&&d.suggestions)||[]).map(x=>x.targetKeyword||x.keyword||x.title),
+      ...((d&&d.gaps)||[]).map(g=>typeof g==="string"?g:(g.keyword||g.title)),
+    ].map(k=>(k||"").trim()).filter(Boolean))];
+    if(!kws.length){ ctx.toast("No keywords to push — analyze content first","gold"); return; }
+    setPushing(true); ctx.toast("Pushing "+kws.length+" keyword(s) to Airtable…","teal");
+    API.airtablePushKeywords(s.id, kws).then(r=>{ if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
+      ctx.toast(r.pushed>0?("Pushed "+r.pushed+" new keyword(s) to Airtable ✓"+(r.skipped?" ("+r.skipped+" already there)":"")):"All keywords already in Airtable", r.pushed>0?"teal":"gold");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(false));
+  };
 
   return (
     <div className="rise">
       <PageHead title="Content Intelligence" sub={`Keyword clusters, content gaps & new-article ideas for ${s.name}.`}>
-        <NeoButton kind="primary" icon={loading?undefined:"sparkles"} disabled={loading} onClick={ctx.runContentIntel}>
-          {loading && <Icon name="cog" size={17} className="audit-spin" />}{loading?"Analyzing…":d?"Re-analyze":"Analyze content"}
-        </NeoButton>
+        <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+          {d && !d.error && !loading && <NeoButton kind="soft" size="sm" icon={pushing?undefined:"upload"} disabled={pushing} onClick={pushToAirtable}>{pushing&&<Icon name="cog" size={15} className="audit-spin" />}{pushing?"Pushing…":"Push to Airtable"}</NeoButton>}
+          <NeoButton kind="primary" icon={loading?undefined:"sparkles"} disabled={loading} onClick={ctx.runContentIntel}>
+            {loading && <Icon name="cog" size={17} className="audit-spin" />}{loading?"Analyzing…":d?"Re-analyze":"Analyze content"}
+          </NeoButton>
+        </div>
       </PageHead>
 
       {!d && !loading && (

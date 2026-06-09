@@ -935,15 +935,15 @@ const routes = {
   'POST /research-status': async () => research.status(),
 
   // ── Prompt admin (editable system prompts, live via Supabase) ───────────
-  'POST /prompts-list': async () => ({ prompts: prompts.list(), status: prompts.status() }),
+  'POST /prompts-list': async (body) => ({ prompts: prompts.list(body && body.siteId), status: prompts.status() }),
   'POST /prompt-save': async (body) => {
     if (!body.key || body.content == null) return { error: 'key and content required' };
-    try { await prompts.save(body.key, body.content, { model: body.model, temperature: body.temperature }); return { ok: true, key: body.key }; }
+    try { await prompts.save(body.key, body.content, { model: body.model, temperature: body.temperature, siteId: body.siteId || null }); return { ok: true, key: body.key, siteId: body.siteId || null }; }
     catch (e) { return { error: e.message }; }
   },
   'POST /prompt-reset': async (body) => {
     if (!body.key) return { error: 'key required' };
-    try { const def = await prompts.resetToDefault(body.key); return { ok: true, content: def }; }
+    try { const def = await prompts.resetToDefault(body.key, body.siteId || null); return { ok: true, content: def }; }
     catch (e) { return { error: e.message }; }
   },
   'POST /prompts-status': async () => prompts.status(),
