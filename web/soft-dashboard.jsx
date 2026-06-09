@@ -3334,7 +3334,7 @@ function useChat(siteId) {
     const ctrl=new AbortController(); abortRef.current=ctrl;
     const apply=(fn)=>setMsgs(m=>{ const a=[...m]; const last=a[a.length-1]; if(last&&last.role==="assistant") a[a.length-1]=fn(last); return a; });
     try{
-      const res=await fetch((cfg.engineApi||"http://localhost:8787")+"/chat-stream",{
+      const res=await fetch((cfg.engineApi!=null?cfg.engineApi:"http://localhost:8787")+"/chat-stream",{
         method:"POST", headers:{"Content-Type":"application/json"}, signal:ctrl.signal,
         body:JSON.stringify({ siteId, text:t, images:imgs.map(i=>i.url), apiHistory:history, displayMessages:nextDisplay, conversationId:convoId }),
       });
