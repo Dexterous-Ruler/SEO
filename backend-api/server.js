@@ -1090,6 +1090,20 @@ const routes = {
     try { return await linkengine.outreachStatus(body.siteId); }
     catch (e) { return { error: e.message }; }
   },
+  // Phase 3: new / lost / toxic referring domains (read-only monitoring).
+  'POST /backlinks/monitor': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    if (!semrush.hasKey()) return { error: 'DataForSEO is not configured.' };
+    try { return await linkengine.monitor(body.siteId, { windowDays: body.windowDays || 30 }); }
+    catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted.' : e.message, noUnits: e.code === 'NO_UNITS' }; }
+  },
+  // Phase 3: disavow-file DRAFT (flag-only, human-submitted).
+  'POST /backlinks/disavow': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    if (!semrush.hasKey()) return { error: 'DataForSEO is not configured.' };
+    try { return await linkengine.disavowDraft(body.siteId); }
+    catch (e) { return { error: e.message }; }
+  },
   // Push selected prospects (+ optional drafts) into the site's Airtable as an
   // "Outreach" table so n8n can send + sequence — same handoff as the article loop.
   'POST /backlinks/push-prospects': async (body) => {

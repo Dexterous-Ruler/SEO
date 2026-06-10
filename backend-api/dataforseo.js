@@ -309,10 +309,10 @@ export async function backlinksSummary(domain) {
 
 // Referring domains (the unit that drives DR/DA): domain, its rank, link count,
 // spam score, first-seen / lost.
-export async function referringDomains(domain, { limit = 100 } = {}) {
+export async function referringDomains(domain, { limit = 100, status = 'live', orderBy = 'rank,desc' } = {}) {
   const r = await blRaw('/backlinks/referring_domains/live', {
-    target: cleanDomain(domain), limit: Math.min(limit, 1000), backlinks_status_type: 'live',
-    order_by: ['rank,desc'], include_subdomains: true,
+    target: cleanDomain(domain), limit: Math.min(limit, 1000), backlinks_status_type: status,
+    order_by: [orderBy], include_subdomains: true,
   });
   const items = (r && r.items) || [];
   return items.map((it) => ({

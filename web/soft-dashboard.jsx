@@ -63,7 +63,9 @@ const NAV_INDEX = [
   { title:"Content Plan", screen:"plan", icon:"sparkles", kw:"content plan trending topics find opportunities keyword clusters gaps calendar ideas" },
   { title:"Content Intel", screen:"content", icon:"sparkles", kw:"content intelligence analyze content topic clusters suggestions" },
   { title:"Backlinks — Link Gap", screen:"backlinks", tab:"gap", icon:"link", kw:"backlinks link building domain authority dr da referring domains competitor link gap outreach prospects link engine off-page email" },
-  { title:"Backlinks — Link Profile", screen:"backlinks", tab:"profile", icon:"radar", kw:"backlink profile referring domains anchor text spam score domain rating authority" },
+  { title:"Backlinks — Outreach", screen:"backlinks", tab:"outreach", icon:"layers", kw:"outreach email campaign link building pitch contact enrichment n8n airtable send follow-up reply won roi tracker" },
+  { title:"Backlinks — Monitor", screen:"backlinks", tab:"monitor", icon:"radar", kw:"backlink monitor new lost toxic referring domains disavow reclamation spam alert" },
+  { title:"Backlinks — Link Profile", screen:"backlinks", tab:"profile", icon:"trend", kw:"backlink profile referring domains anchor text spam score domain rating authority" },
   { title:"AI Visibility (GEO)", screen:"geo", icon:"globe", kw:"ai visibility geo generative share of voice llms.txt ai robots chatgpt claude gemini perplexity citation competitors" },
   { title:"Search Console", screen:"gsc", icon:"search", kw:"search console gsc google clicks impressions ctr position connect google properties first party" },
   { title:"Top Queries", screen:"gsc", tab:"queries", icon:"search", kw:"top queries search terms gsc keywords" },
@@ -3887,7 +3889,7 @@ function BacklinksScreen({ ctx }) {
   const API = window.SentinelAPI;
   const live = API && window.SENTINEL_LIVE;
   const [tab,setTab] = useState("gap");
-  useEffect(()=>{ if(ctx.navTab && ["gap","outreach","profile"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
+  useEffect(()=>{ if(ctx.navTab && ["gap","outreach","monitor","profile"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
   const [profile,setProfile] = useState(null);
   const [gap,setGap] = useState(null);
   const [busy,setBusy] = useState("");
@@ -3898,8 +3900,12 @@ function BacklinksScreen({ ctx }) {
   const [prepBusy,setPrepBusy] = useState(false);
   const [track,setTrack] = useState(null);    // outreach tracker / ROI
   const [trackBusy,setTrackBusy] = useState(false);
+  const [mon,setMon] = useState(null);        // monitor: new/lost/toxic
+  const [monBusy,setMonBusy] = useState(false);
+  const [monTab,setMonTab] = useState("new");
+  const [disavow,setDisavow] = useState(null);
   const fmt = (v)=> v==null||v===""?"—":(isNaN(v)?v:Number(v).toLocaleString());
-  useEffect(()=>{ setProfile(null); setGap(null); setErr(null); setDrafts({}); setSel({}); setPrep(null); setTrack(null); },[s.id]);
+  useEffect(()=>{ setProfile(null); setGap(null); setErr(null); setDrafts({}); setSel({}); setPrep(null); setTrack(null); setMon(null); setDisavow(null); },[s.id]);
 
   const loadProfile = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setBusy("profile"); setErr(null); API.backlinksSummary(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits});return;} setProfile(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setBusy("")); };
   const loadGap = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setBusy("gap"); setErr(null); API.backlinksGap(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits,needsComp:r.needsCompetitors});return;} setGap(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setBusy("")); };
@@ -3924,6 +3930,10 @@ function BacklinksScreen({ ctx }) {
     API.backlinksPushProspects(s.id, prep).then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} ctx.toast("Pushed "+r.pushed+" to Airtable → Outreach ✓ — set Status to 'Send Outreach' to fire n8n"+(r.skipped?" ("+r.skipped+" already there)":""),"teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPrepBusy(false));
   };
   const loadTrack = ()=>{ setTrackBusy(true); API.backlinksOutreachStatus(s.id).then(r=>{ setTrack(r); if(r.error)ctx.toast(r.error,"clay"); }).catch(e=>{setTrack({error:e.message});ctx.toast(e.message,"clay");}).finally(()=>setTrackBusy(false)); };
+  // Phase 3 — monitoring + disavow
+  const loadMon = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setMonBusy(true); setErr(null); API.backlinksMonitor(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits});return;} setMon(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setMonBusy(false)); };
+  const getDisavow = ()=>{ API.backlinksDisavow(s.id).then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} setDisavow(r); if(!r.count){ctx.toast("No domains above the disavow threshold — nothing to disavow (good).","teal");return;}
+      try{ const blob=new Blob([r.file],{type:"text/plain"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="disavow-"+(s.url||"site").replace(/^https?:\/\//,"").replace(/[^a-z0-9.]/gi,"")+".txt"; a.click(); ctx.toast("Disavow draft downloaded ("+r.count+" domains) — review before submitting","gold"); }catch(e){ ctx.toast("Disavow ready ("+r.count+" domains)","gold"); } }).catch(e=>ctx.toast(e.message,"clay")); };
 
   return (
     <div className="rise">
@@ -3934,7 +3944,7 @@ function BacklinksScreen({ ctx }) {
       {live && (
         <SoftCard hover={false}>
           <div style={{ display:"flex", gap:3, padding:3, background:"var(--bg)", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-in)", width:"fit-content", marginBottom:16 }}>
-            {[["gap","Competitor Link Gap","search"],["outreach","Outreach","layers"],["profile","Link Profile","radar"]].map(([v,l,ic])=>(
+            {[["gap","Competitor Link Gap","search"],["outreach","Outreach","layers"],["monitor","Monitor","radar"],["profile","Link Profile","trend"]].map(([v,l,ic])=>(
               <button key={v} onClick={()=>setTab(v)} style={{ display:"flex", alignItems:"center", gap:6, padding:"8px 15px", fontSize:12.5, fontWeight:700, borderRadius:99, background:tab===v?"var(--surface)":"transparent", color:tab===v?"var(--t-700)":"var(--muted)", boxShadow:tab===v?"var(--neo-sm)":"none" }}><Icon name={ic} size={14} />{l}</button>
             ))}
           </div>
@@ -4039,6 +4049,43 @@ function BacklinksScreen({ ctx }) {
                 </div>
               )}
               {track && track.error && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"4px 2px" }}>{track.error}</div>}
+            </div>
+          )}
+
+          {tab==="monitor" && (
+            <div>
+              <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:14, flexWrap:"wrap" }}>
+                <div style={{ flex:1, minWidth:240 }}>
+                  <div style={{ fontSize:13.5, fontWeight:700 }}>Link monitor — new / lost / toxic</div>
+                  <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Referring-domain changes in the last 30 days. <b>Lost high-authority</b> links are reclamation prospects; <b>toxic</b> domains are disavow candidates. Also runs automatically each week → Activity alerts.</div>
+                </div>
+                <NeoButton kind="primary" size="sm" icon={monBusy?undefined:"radar"} disabled={monBusy} onClick={loadMon}>{monBusy&&<Icon name="cog" size={15} className="audit-spin" />}{monBusy?"Scanning…":"Scan backlinks"}</NeoButton>
+              </div>
+              {mon && (
+                <div>
+                  <div style={{ display:"flex", gap:8, marginBottom:12, flexWrap:"wrap" }}>
+                    {[["new","New",mon.newCount,"teal"],["lost","Lost",mon.lostCount,"clay"],["toxic","Toxic",mon.toxicCount,"gold"]].map(([k,l,c,tone])=>(
+                      <button key={k} onClick={()=>setMonTab(k)} style={{ flex:1, minWidth:100, padding:"11px 13px", borderRadius:"var(--r-md)", background:monTab===k?"var(--surface)":"var(--bg)", boxShadow:monTab===k?"var(--neo-sm)":"var(--neo-in)", textAlign:"left" }}>
+                        <div style={{ fontSize:10.5, color:"var(--faint)", textTransform:"uppercase", letterSpacing:".04em", fontWeight:700 }}>{l}</div>
+                        <div style={{ fontSize:20, fontWeight:800, color:`var(--${tone})` }}>{fmt(c)}</div>
+                      </button>
+                    ))}
+                  </div>
+                  {monTab==="lost" && mon.lostHighValue>0 && <div style={{ padding:"9px 12px", borderRadius:"var(--r-md)", background:"var(--clay-bg)", color:"#8A4231", fontSize:12.5, marginBottom:10 }}>{mon.lostHighValue} of these were high-authority (rank ≥ 100) — worth a reclamation email (they linked once).</div>}
+                  {monTab==="toxic" && (mon.toxic||[]).length>0 && <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10, flexWrap:"wrap" }}><span style={{ fontSize:12, color:"var(--muted)" }}>Most low-quality links are auto-ignored by Google — only disavow if you see a clear unnatural pattern.</span><NeoButton kind="soft" size="sm" icon="doc" style={{ marginLeft:"auto" }} onClick={getDisavow}>Download disavow draft</NeoButton></div>}
+                  <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+                    {(mon[monTab]||[]).map((d,i)=>(
+                      <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 12px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", fontSize:12.5 }}>
+                        <a href={"https://"+d.domain} target="_blank" rel="noopener" style={{ flex:1, fontFamily:"var(--mono)", fontWeight:600, color:"var(--ink)", textDecoration:"none", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{d.domain}</a>
+                        <span style={{ fontSize:11.5, color:"var(--muted)" }}>rank {fmt(d.rank)}{monTab==="toxic"?` · spam ${d.spamScore}`:""}{monTab==="new"&&d.firstSeen?` · ${String(d.firstSeen).slice(0,10)}`:""}{monTab==="lost"&&d.lostDate?` · lost ${String(d.lostDate).slice(0,10)}`:""}</span>
+                        {monTab==="lost" && (d.rank||0)>=100 && <Chip tone="gold" size="sm">reclaim</Chip>}
+                      </div>
+                    ))}
+                    {(mon[monTab]||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No {monTab} referring domains in the last 30 days.</div>}
+                  </div>
+                </div>
+              )}
+              {!mon && !monBusy && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Scan for new, lost, and toxic backlinks — catch lost high-authority links to win back, and spot spammy domains. This also runs weekly in the background.</div>}
             </div>
           )}
 
