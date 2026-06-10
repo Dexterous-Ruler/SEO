@@ -159,4 +159,58 @@ export async function outreachStatus(siteId, { costPerHour = 0 } = {}) {
   };
 }
 
-export default { profile, linkGap, draftOutreach, linkValueScore, enrichContact, prepareOutreach, outreachStatus };
+// ── Phase 3: monitoring + disavow ──────────────────────────────────────────
+
+// Toxic threshold (DataForSEO backlink_spam_score, 0–100). Above this a domain
+// is a disavow candidate; Google auto-ignores most low-quality links, so this
+// is FLAG-ONLY and human-approved (disavowing good links can harm rankings).
+const TOXIC_SPAM = 30;
+const DISAVOW_SPAM = 45;
+
+// New / lost / toxic referring domains in the last `windowDays`. Derived from a
+// single referring-domains pull (status 'all' carries first_seen + lost_date),
+// so no snapshot table is needed.
+export async function monitor(siteId, { windowDays = 30 } = {}) {
+  const site = await db.getSite(siteId).catch(() => null);
+  if (!site || !site.url) return { error: 'No site / URL.' };
+  let items = [];
+  try { items = await dfs.referringDomains(site.url, { limit: 400, status: 'all', orderBy: 'first_seen,desc' }); }
+  catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted.' : e.message, noUnits: e.code === 'NO_UNITS' }; }
+  const cutoff = Date.now() - windowDays * 86400000;
+  const ts = (d) => { const t = d ? Date.parse(d) : NaN; return isNaN(t) ? 0 : t; };
+  const isNew = (d) => !d.isLost && ts(d.firstSeen) >= cutoff;
+  const isRecentLost = (d) => d.isLost && ts(d.lostDate) >= cutoff;
+  const fresh = items.filter(isNew).sort((a, b) => (b.rank || 0) - (a.rank || 0));
+  const lost = items.filter(isRecentLost).sort((a, b) => (b.rank || 0) - (a.rank || 0));
+  const toxic = items.filter((d) => !d.isLost && (d.spamScore || 0) >= TOXIC_SPAM).sort((a, b) => (b.spamScore || 0) - (a.spamScore || 0));
+  return {
+    windowDays, domain: site.url,
+    newCount: fresh.length, lostCount: lost.length, toxicCount: toxic.length,
+    // lost high-authority links are reclamation prospects
+    lostHighValue: lost.filter((d) => (d.rank || 0) >= 100).length,
+    new: fresh.slice(0, 40), lost: lost.slice(0, 40), toxic: toxic.slice(0, 40),
+  };
+}
+
+// Assemble a Google disavow-file DRAFT from the most toxic referring domains.
+// Flag-only: returns the file text + the flagged list; the human downloads it and
+// submits in Search Console (rarely necessary — included for completeness).
+export async function disavowDraft(siteId) {
+  const site = await db.getSite(siteId).catch(() => null);
+  if (!site || !site.url) return { error: 'No site / URL.' };
+  let items = [];
+  try { items = await dfs.referringDomains(site.url, { limit: 400, status: 'live', orderBy: 'backlink_spam_score,desc' }); }
+  catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted.' : e.message, noUnits: e.code === 'NO_UNITS' }; }
+  const flagged = items.filter((d) => (d.spamScore || 0) >= DISAVOW_SPAM).sort((a, b) => (b.spamScore || 0) - (a.spamScore || 0));
+  const lines = [
+    '# Disavow draft — Sentinel Link Engine',
+    '# Review every line before submitting. Google auto-ignores most spam links,',
+    '# so disavowing is rarely needed and can HARM rankings if you remove good links.',
+    `# Site: ${cleanDom(site.url)} · threshold: spam score >= ${DISAVOW_SPAM}`,
+    '',
+    ...flagged.map((d) => `domain:${cleanDom(d.domain)}`),
+  ];
+  return { count: flagged.length, threshold: DISAVOW_SPAM, file: lines.join('\n'), flagged: flagged.slice(0, 60) };
+}
+
+export default { profile, linkGap, draftOutreach, linkValueScore, enrichContact, prepareOutreach, outreachStatus, monitor, disavowDraft };
