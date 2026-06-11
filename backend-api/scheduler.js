@@ -24,18 +24,62 @@ import * as semrush from './dataforseo.js';
 import { WordPressClient } from '../src/wp/client.js';
 
 const DAY = 86400000;
-const mem = Object.create(null); // `${siteId}:${job}` -> last-run ms
+const mem = Object.create(null); // `${siteId}:${job}` -> last-run ms (fallback + cache)
+const INSTANCE = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+const LEADER_TTL_MS = 90000;     // lock lease; heartbeat re-extends every 30s
+let IS_LEADER = false;
+let LOCK_OK = null;              // null=unknown, true/false after probe
+let RUNS_OK = null;
 
-// Minimal Supabase REST read (for the latest audit's findings).
+// Minimal Supabase REST read.
 async function sb(path) {
   const SB = process.env.SUPABASE_URL, K = process.env.SUPABASE_SERVICE_ROLE;
   const res = await fetch(`${SB}/rest/v1/${path}`, { headers: { apikey: K, Authorization: 'Bearer ' + K } });
   if (!res.ok) return [];
   return res.json().catch(() => []);
 }
+// REST write (PATCH/POST). Returns parsed JSON or null.
+async function sbReq(path, opts = {}) {
+  const SB = process.env.SUPABASE_URL, K = process.env.SUPABASE_SERVICE_ROLE;
+  if (!SB || !K) return null;
+  const res = await fetch(`${SB}/rest/v1/${path}`, { ...opts, headers: { apikey: K, Authorization: 'Bearer ' + K, 'Content-Type': 'application/json', ...(opts.headers || {}) } });
+  if (!res.ok) { const e = new Error('sb ' + res.status); e.status = res.status; throw e; }
+  const t = await res.text(); return t ? JSON.parse(t) : null;
+}
+async function probe(table) { try { await sbReq(`${table}?select=*&limit=1`); return true; } catch (e) { return false; } }
 
-const due = (siteId, job, every) => (Date.now() - (mem[`${siteId}:${job}`] || 0)) >= every;
-const mark = (siteId, job) => { mem[`${siteId}:${job}`] = Date.now(); };
+// ── Leadership (multi-instance safety) ───────────────────────────────────────
+// Acquire/extend the lock via a conditional UPDATE: succeeds only if it's free,
+// expired, or already ours. If the lock table is absent, assume single instance.
+async function acquireLeader() {
+  if (LOCK_OK === null) LOCK_OK = await probe('scheduler_lock');
+  if (!LOCK_OK) return true; // migration not run → behave as a single instance
+  const now = new Date();
+  const expires = new Date(now.getTime() + LEADER_TTL_MS).toISOString();
+  const cond = `or=(holder.is.null,holder.eq.${INSTANCE},expires_at.lt.${encodeURIComponent(now.toISOString())})`;
+  try {
+    const r = await sbReq(`scheduler_lock?id=eq.leader&${cond}`, {
+      method: 'PATCH', headers: { Prefer: 'return=representation' },
+      body: JSON.stringify({ holder: INSTANCE, expires_at: expires, updated_at: now.toISOString() }),
+    });
+    return Array.isArray(r) && r.length > 0;
+  } catch (e) { return false; }
+}
+
+// ── Persisted due-ness (survives redeploys; shared across instances) ─────────
+async function getLastRun(siteId, job) {
+  if (RUNS_OK === null) RUNS_OK = await probe('scheduler_runs');
+  if (!RUNS_OK) return mem[`${siteId}:${job}`] || 0;
+  try { const r = await sb(`scheduler_runs?site_id=eq.${siteId}&job=eq.${encodeURIComponent(job)}&select=last_run`); return (r && r[0] && r[0].last_run) ? Date.parse(r[0].last_run) : 0; }
+  catch (e) { return mem[`${siteId}:${job}`] || 0; }
+}
+async function isDue(siteId, job, every) { return (Date.now() - (await getLastRun(siteId, job))) >= every; }
+async function mark(siteId, job) {
+  mem[`${siteId}:${job}`] = Date.now();
+  if (!RUNS_OK) return;
+  try { await sbReq('scheduler_runs?on_conflict=site_id,job', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates' }, body: JSON.stringify({ site_id: siteId, job, last_run: new Date().toISOString() }) }); }
+  catch (e) {}
+}
 
 async function note(siteId, text, ok = true) {
   await db.logActivity({ site_id: siteId, type: ok ? 'automation' : 'failed', actor: 'Automation', icon: ok ? 'check' : 'alert', text, meta: 'scheduled' }).catch(() => {});
@@ -156,26 +200,38 @@ const JOBS = [
 ];
 
 async function tick() {
+  // Only the leader sweeps — prevents double-runs across instances.
+  if (!IS_LEADER) return;
   let sites = [];
   try { sites = await db.listSites(); } catch (e) { return; }
   const connected = (sites || []).filter((s) => !s.status || s.status === 'connected');
   let ran = 0;
   for (const site of connected) {
     for (const job of JOBS) {
-      if (!due(site.id, job.name, job.every)) continue;
-      mark(site.id, job.name);
+      if (!(await isDue(site.id, job.name, job.every))) continue;
+      await mark(site.id, job.name);   // claim BEFORE running so a co-leader blip can't double-run
       ran++;
       try { await job.run(site); } catch (e) { console.error('[scheduler]', job.name, site.id, e && e.message); }
     }
   }
-  console.log(`[scheduler] sweep: ${connected.length} site(s), ${ran} job(s) run`);
+  console.log(`[scheduler] sweep (leader ${INSTANCE}): ${connected.length} site(s), ${ran} job(s) run`);
+}
+
+// Heartbeat: continuously (re)acquire the lock. Whoever holds it is the leader;
+// if it dies, another instance takes over within ~TTL.
+async function heartbeat() {
+  const was = IS_LEADER;
+  IS_LEADER = await acquireLeader();
+  if (IS_LEADER !== was) console.log(`[scheduler] leadership ${IS_LEADER ? 'ACQUIRED' : 'lost'} by ${INSTANCE}` + (LOCK_OK ? '' : ' (single-instance: no lock table)'));
 }
 
 export function startScheduler() {
   if (process.env.AUTOMATION_ENABLED === 'false') { console.log('[scheduler] disabled (AUTOMATION_ENABLED=false)'); return; }
-  setTimeout(() => { tick().catch(() => {}); }, 20 * 1000);   // first sweep ~20s after boot
+  heartbeat().catch(() => {});                                   // claim leadership at boot
+  setInterval(() => { heartbeat().catch(() => {}); }, 30 * 1000); // re-extend / fail over every 30s
+  setTimeout(() => { tick().catch(() => {}); }, 25 * 1000);       // first sweep ~25s after boot (after first heartbeat)
   setInterval(() => { tick().catch(() => {}); }, 60 * 60 * 1000); // hourly thereafter
-  console.log('[scheduler] automation enabled — auto-index, gsc-health, keyword-push, image-optimize (write-armed), backlink-watch');
+  console.log('[scheduler] automation enabled (cluster-safe leader lock) — auto-index, gsc-health, keyword-push, image-optimize, apply-css, backlink-watch');
 }
 
 export default { startScheduler };

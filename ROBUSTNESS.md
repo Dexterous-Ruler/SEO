@@ -69,12 +69,18 @@ fails fast) instead of falling over, and survives redeploys cleanly.
    prep now runs here. **Graceful degradation:** until the migration is run, jobs execute
    inline (no durability) so nothing breaks. `GET /status` reports queue state.
    Remaining Tier-2 (need shared state / new infra):
-2. **Horizontal scaling (Koyeb min ≥ 2).** Requires:
-   - **Leader lock** for the scheduler (a `scheduler_lock` row with instance-id + TTL
-     heartbeat) so only one instance ticks → no double charges/emails.
-   - **Persisted scheduler state** (`job_runs` table) so due-ness survives redeploys.
-   - **Shared cache/locks** (Supabase table or Redis/Upstash) replacing the in-process
-     `TTLCache` / credential caches so instances stay coherent.
+2. **Horizontal scaling (Koyeb min ≥ 2) — ✅ MOSTLY SHIPPED.**
+   - **Scheduler leader lock** — ✅ `scheduler_lock` row + 90s TTL lease + 30s heartbeat
+     (`migrations/002_scheduler.sql`). Only the leader ticks → no double charges/emails;
+     fails over automatically if the leader dies. Degrades to single-instance if the
+     table is absent.
+   - **Persisted scheduler state** — ✅ `scheduler_runs` table so due-ness survives
+     redeploys and is shared across instances.
+   - The durable job queue is already multi-instance safe (conditional claims).
+   - Remaining: **shared cache** — the in-process `TTLCache` / credential caches are
+     still per-instance (just means a few duplicate provider reads across instances, not
+     incorrectness). Move to a Supabase table / Redis only if cache coherence matters.
+   - **To activate:** run `migrations/002_scheduler.sql`, then set Koyeb instances ≥ 2.
 3. **API authentication + multi-tenant isolation.** A login layer (Supabase Auth or a
    signed session) + per-tenant ownership checks on every `siteId`, replacing the open
    CORS `*` API. Required before exposing the console to multiple customers.
