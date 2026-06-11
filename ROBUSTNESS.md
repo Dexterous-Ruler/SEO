@@ -61,12 +61,14 @@ fails fast) instead of falling over, and survives redeploys cleanly.
 
 ## Tier 2 — to reach true industrial / multi-tenant scale (roadmap)
 
-These need shared state and/or new infra, so they're scoped, not yet built:
-
-1. **Durable job queue + workers (biggest win).** Move long tasks (audits, image-opt,
-   DataForSEO bulk, backlink pulls, 12-call outreach prep) off the request path into a
-   `jobs` table (Supabase) with bounded workers, retries/backoff, idempotency keys, and
-   status surfaced in Activity. Makes long work crash-safe and the API snappy.
+1. **Durable job queue + workers — ✅ SHIPPED** (`backend-api/jobs.js`, `migrations/001_jobs.sql`).
+   Long tasks move off the request path into a Supabase `jobs` table with a bounded
+   worker pool, retry-with-backoff, idempotency keys, crash recovery (boot-time reclaim
+   of stuck jobs), and **multi-instance-safe claims** (conditional UPDATE → no double
+   runs). Enqueue via `POST /jobs/run`, poll `POST /jobs/get`. The slow 12-call outreach
+   prep now runs here. **Graceful degradation:** until the migration is run, jobs execute
+   inline (no durability) so nothing breaks. `GET /status` reports queue state.
+   Remaining Tier-2 (need shared state / new infra):
 2. **Horizontal scaling (Koyeb min ≥ 2).** Requires:
    - **Leader lock** for the scheduler (a `scheduler_lock` row with instance-id + TTL
      heartbeat) so only one instance ticks → no double charges/emails.

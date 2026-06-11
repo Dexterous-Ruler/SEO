@@ -144,6 +144,25 @@
     backlinksOutreachStatus(siteId) { return engine("/backlinks/outreach-status", { siteId }); },
     backlinksMonitor(siteId) { return engine("/backlinks/monitor", { siteId }); },
     backlinksDisavow(siteId) { return engine("/backlinks/disavow", { siteId }); },
+    // Durable background jobs
+    jobRun(type, payload, siteId) { return engine("/jobs/run", { type, payload, siteId }); },
+    jobGet(id) { return engine("/jobs/get", { id }); },
+    jobList(siteId, limit) { return engine("/jobs/list", { siteId, limit }); },
+    // Enqueue a job and poll until it finishes (or inline-completes). onTick(job) optional.
+    async runJob(type, payload, siteId, onTick) {
+      const j = await this.jobRun(type, payload, siteId);
+      if (!j || j.error) return j;
+      if (j.inline || j.status === "done" || j.status === "failed") return j; // ran inline (no jobs table)
+      let id = j.id, tries = 0;
+      while (tries++ < 150) {
+        await new Promise(r => setTimeout(r, 2000));
+        const cur = await this.jobGet(id).catch(() => null);
+        if (!cur || cur.error) continue;
+        if (onTick) try { onTick(cur); } catch (e) {}
+        if (cur.status === "done" || cur.status === "failed") return cur;
+      }
+      return { id, status: "timeout", error: "Still running — check back shortly." };
+    },
     backlinksPushProspects(siteId, prospects) { return engine("/backlinks/push-prospects", { siteId, prospects }); },
     applyLink(siteId, sourcePage, anchor, targetUrl) { return engine("/apply-link", { siteId, sourcePage, anchor, targetUrl }); },
     generateSchema(siteId, page, schemaConfig, faqs) { return engine("/generate-schema", { siteId, page, schemaConfig, faqs }); },

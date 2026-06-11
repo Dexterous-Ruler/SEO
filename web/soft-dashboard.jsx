@@ -3920,8 +3920,16 @@ function BacklinksScreen({ ctx }) {
   const prepare = ()=>{
     const top = ((gap&&gap.prospects)||[]).slice(0,12);
     if(!top.length){ ctx.toast("Run the Competitor Link Gap first, then prepare outreach from it","gold"); setTab("gap"); return; }
-    setPrepBusy(true); ctx.toast("Finding contacts + drafting emails for "+top.length+" prospect(s)…","teal");
-    API.backlinksPrepareOutreach(s.id, top, "competitor_gap", "").then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} setPrep(r.prospects||[]); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPrepBusy(false));
+    setPrepBusy(true); ctx.toast("Finding contacts + drafting emails for "+top.length+" prospect(s) — runs in the background…","teal");
+    // Durable background job: survives navigation/redeploy; polls to completion.
+    API.runJob("outreach.prepare", { siteId:s.id, prospects:top, tactic:"competitor_gap", targetPage:"" }, s.id)
+      .then(j=>{
+        if(!j || j.error){ ctx.toast((j&&j.error)||"Prepare failed","clay"); return; }
+        if(j.status==="failed"){ ctx.toast("Prepare failed: "+(j.error||"unknown"),"clay"); return; }
+        if(j.status==="timeout"){ ctx.toast("Still preparing — reopen the Outreach tab shortly","gold"); return; }
+        const res = j.result || j;
+        setPrep((res && res.prospects) || []);
+      }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPrepBusy(false));
   };
   const setPrepField = (i,k,v)=> setPrep(p=>p.map((row,j)=>j===i?{...row,[k]:v}:row));
   const pushPrepared = ()=>{

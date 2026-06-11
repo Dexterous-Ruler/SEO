@@ -48,6 +48,7 @@ import * as imageOpt from './image-optimize.js';
 import * as prompts from './prompts.js';
 import * as perplexity from './perplexity.js';
 import { limiters, infraStats, withTimeout, HEAVY_MAX_QUEUE } from './infra.js';
+import * as jobs from './jobs.js';
 
 // Resolve credentials for an operation: prefer a stored siteId (secure — secret
 // decrypted server-side), fall back to creds in the body (initial connect only).
@@ -231,7 +232,19 @@ const routes = {
   // Health check
   'GET /health': async () => ({ ok: true, engine: 'wp-seo-agent', version: '2.0' }),
   // Observability: live load, provider limiter/breaker state, cache hit rates.
-  'GET /status': async () => ({ ok: true, version: '2.0', uptimeSec: Math.round(process.uptime()), inFlight: INFLIGHT, infra: infraStats() }),
+  'GET /status': async () => ({ ok: true, version: '2.0', uptimeSec: Math.round(process.uptime()), inFlight: INFLIGHT, infra: infraStats(), jobs: jobs.stats() }),
+
+  // ── Durable job queue ──────────────────────────────────────────────────────
+  // Enqueue a registered background job → returns the job (poll /jobs/get).
+  'POST /jobs/run': async (body) => {
+    if (!body.type) return { error: 'type required' };
+    try {
+      const payload = body.payload || {};
+      return await jobs.enqueue(body.type, payload, { siteId: body.siteId || payload.siteId || null, idempotencyKey: body.idempotencyKey || null });
+    } catch (e) { return { error: e.message }; }
+  },
+  'POST /jobs/get': async (body) => { const j = await jobs.getJob(body.id); return j || { error: 'job not found' }; },
+  'POST /jobs/list': async (body) => ({ jobs: await jobs.listJobs(body.siteId || null, body.limit || 20) }),
 
   // SECURE multi-site connect: validate creds → detect stack → store the site
   // with the app password ENCRYPTED in Supabase → return the new site (no secret).
@@ -1857,6 +1870,15 @@ server.listen(PORT, '0.0.0.0', () => {
   // Start the analysis-only automation scheduler (auto-index, GSC health alerts,
   // content-gap keyword push). Never writes to live pages. Disable: AUTOMATION_ENABLED=false.
   try { startScheduler(); } catch (e) { console.error('[scheduler] failed to start', e && e.message); }
+  // Register durable background-job handlers + start the worker pool. Long tasks
+  // can be enqueued via /jobs/run and survive crashes/redeploys.
+  try {
+    jobs.register('outreach.prepare', (p) => linkengine.prepareOutreach(p.siteId, { prospects: p.prospects || [], tactic: p.tactic || 'competitor_gap', targetPage: p.targetPage || '' }));
+    jobs.register('backlinks.gap', (p) => linkengine.linkGap(p.siteId, { limit: p.limit || 80 }));
+    jobs.register('backlinks.monitor', (p) => linkengine.monitor(p.siteId, { windowDays: p.windowDays || 30 }));
+    jobs.register('content.intel', (p) => routes['POST /content-intel']({ siteId: p.siteId, siteName: p.siteName, niche: p.niche }));
+    jobs.startWorker();
+  } catch (e) { console.error('[jobs] failed to start', e && e.message); }
 });
 
 // --- graceful shutdown ------------------------------------------------------
