@@ -5,9 +5,10 @@
  *   site WITHOUT editing page content (safe on Elementor): (1) serves WebP for any
  *   image that has a .webp sibling when the browser supports it — so the WebP files
  *   the agent uploads are actually used; (2) injects per-page JSON-LD schema;
- *   (3) injects site-wide custom CSS. REST endpoints let the agent store schema/CSS.
- *   Everything is reversible (clear the value, or delete this file).
- * Version:     1.1.0
+ *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
+ *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
+ *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
+ * Version:     1.2.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -144,13 +145,93 @@ class SEO_Agent_Optimize {
             },
         ]);
 
+        // Insert an internal/external link into a page — handles BOTH standard
+        // post_content AND Elementor's _elementor_data (which lives outside the
+        // standard field), then clears Elementor's CSS cache so it renders live.
+        register_rest_route('seoagent/v1', '/insert-link', [
+            'methods'  => 'POST',
+            'permission_callback' => $perm,
+            'callback' => function ($req) {
+                $p = $req->get_json_params();
+                $id = (int) ($p['post_id'] ?? 0);
+                $anchor = trim((string) ($p['anchor'] ?? ''));
+                $href = trim((string) ($p['target_url'] ?? ''));
+                if (!$id || $anchor === '' || $href === '') return new WP_Error('bad', 'post_id, anchor, target_url required', ['status' => 400]);
+
+                // 1) Standard content (Classic/Gutenberg).
+                $post = get_post($id);
+                if ($post && trim((string) $post->post_content) !== '') {
+                    list($nc, $changed, $why) = seoagent_insert_into_html($post->post_content, $anchor, $href);
+                    if ($changed) { wp_update_post(['ID' => $id, 'post_content' => $nc]); $this->purge(); return ['ok' => true, 'mode' => 'content', 'post_id' => $id]; }
+                    if ($why === 'exists') return ['ok' => true, 'mode' => 'exists', 'post_id' => $id];
+                }
+                // 2) Elementor data.
+                $data = get_post_meta($id, '_elementor_data', true);
+                if ($data) {
+                    $arr = is_string($data) ? json_decode($data, true) : $data;
+                    if (is_array($arr)) {
+                        $done = false;
+                        seoagent_walk_elementor($arr, $anchor, $href, $done);
+                        if ($done) {
+                            update_post_meta($id, '_elementor_data', wp_slash(wp_json_encode($arr)));
+                            delete_post_meta($id, '_elementor_css');
+                            if (class_exists('\\Elementor\\Plugin')) { try { \Elementor\Plugin::$instance->files_manager->clear_cache(); } catch (\Throwable $e) {} }
+                            $this->purge();
+                            return ['ok' => true, 'mode' => 'elementor', 'post_id' => $id];
+                        }
+                    }
+                }
+                return ['ok' => false, 'mode' => 'not_found', 'reason' => 'Anchor text not found in the page content or Elementor widgets'];
+            },
+        ]);
+
         register_rest_route('seoagent/v1', '/optimize-selftest', [
             'methods'  => 'GET',
             'permission_callback' => $perm,
             'callback' => function () {
-                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css'], 'version' => '1.0.0'];
+                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link'], 'version' => '1.2.0'];
             },
         ]);
+    }
+}
+
+/* ── link-insertion helpers (used by /insert-link) ───────────────────────────
+   Insert <a href> at the first PLAIN-TEXT occurrence of $anchor — never nesting
+   inside an existing <a> and never if the target is already linked. */
+function seoagent_insert_into_html($html, $anchor, $href) {
+    if ($html === null || $html === '') return [$html, false, 'empty'];
+    if (strpos($html, 'href="' . $href . '"') !== false || strpos($html, "href='" . $href . "'") !== false) return [$html, false, 'exists'];
+    $parts = preg_split('/(<a\b[^>]*>.*?<\/a>|<[^>]+>)/is', $html, -1, PREG_SPLIT_DELIM_CAPTURE);
+    if (!$parts) return [$html, false, 'not_found'];
+    $esc = preg_quote($anchor, '/');
+    $re = '/(^|[\s>(\[\x{201C}"\'])(' . $esc . ')([\s<).,;:!?\x{201D}"\'])/iu';
+    foreach ($parts as $i => $seg) {
+        if ($seg === '' || $seg[0] === '<') continue;       // skip tags + existing links
+        if (preg_match($re, $seg)) {
+            $parts[$i] = preg_replace($re, '$1<a href="' . esc_url($href) . '">$2</a>$3', $seg, 1);
+            return [implode('', $parts), true, ''];
+        }
+    }
+    return [$html, false, 'not_found'];
+}
+
+/* Recursively walk Elementor's element tree; insert the link into the first
+   HTML-bearing widget setting that contains the anchor text. */
+function seoagent_walk_elementor(&$els, $anchor, $href, &$done) {
+    if ($done || !is_array($els)) return;
+    foreach ($els as &$el) {
+        if ($done) return;
+        if (!empty($el['settings']) && is_array($el['settings'])) {
+            foreach (['editor', 'title', 'text', 'description', 'content', 'tab_content', 'item_description', 'description_text'] as $k) {
+                if (isset($el['settings'][$k]) && is_string($el['settings'][$k]) && $el['settings'][$k] !== '') {
+                    list($nh, $changed) = seoagent_insert_into_html($el['settings'][$k], $anchor, $href);
+                    if ($changed) { $el['settings'][$k] = $nh; $done = true; break; }
+                }
+            }
+        }
+        if (!$done && !empty($el['elements']) && is_array($el['elements'])) {
+            seoagent_walk_elementor($el['elements'], $anchor, $href, $done);
+        }
     }
 }
 

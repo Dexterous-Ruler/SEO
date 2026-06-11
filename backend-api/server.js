@@ -1159,6 +1159,16 @@ const routes = {
       if (Array.isArray(rows) && rows[0]) { found = { id: rows[0].id, type }; break; }
     }
     if (!found) return { status: 'manual', reason: 'Could not resolve the source page on WordPress.' };
+    // Preferred path: the optimize plugin inserts into standard content AND
+    // Elementor widgets (server-side, safe). Falls through if the plugin is absent.
+    try {
+      const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/insert-link`, { method: 'POST', body: { post_id: found.id, anchor, target_url: targetUrl } });
+      if (r && r.ok && ['content', 'elementor', 'exists'].includes(r.mode)) {
+        if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'link', text: `Linked “${anchor}” → ${targetUrl}`, meta: r.mode === 'elementor' ? 'Elementor widget' : (r.mode === 'exists' ? 'already linked' : 'page content') }).catch(() => {});
+        return { status: 'verified', sourcePage, anchor, targetUrl, postId: found.id, mode: r.mode, reversible: true };
+      }
+      if (r && r.ok === false && r.mode === 'not_found') return { status: 'manual', reason: r.reason || 'Anchor text not found in the page content or Elementor widgets.' };
+    } catch (e) { /* plugin not installed → fall back to standard-content insertion below */ }
     const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content`).catch(() => null);
     const raw = (post && post.content && (post.content.raw != null ? post.content.raw : '')) || '';
     const builder = (site && site.stack && site.stack.builder) || '';
