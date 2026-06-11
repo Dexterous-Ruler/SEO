@@ -11,6 +11,7 @@ import { config } from 'dotenv';
 // override:true because some hosted environments inject an EMPTY ANTHROPIC_API_KEY
 // into process.env, which dotenv won't replace without override.
 config({ override: true });
+import { limiters, breakers } from './infra.js';
 
 const API = 'https://api.anthropic.com/v1/messages';
 const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
@@ -29,7 +30,12 @@ function key() {
 // hangs the request until a proxy kills it) and retried on the transient statuses
 // Anthropic returns under load (429 rate-limit, 529 overloaded, 5xx). This is why
 // the weekly briefing and other one-shot generations occasionally failed.
-async function anthropicPost(payload, { timeoutMs = 90000, retries = 2 } = {}) {
+// Concurrency-capped (so a mass batch of generations queues instead of
+// 429-storming Anthropic) and circuit-broken (fail fast when Anthropic is down).
+function anthropicPost(payload, opts = {}) {
+  return limiters.anthropic.run(() => breakers.anthropic.run(() => _anthropicPost(payload, opts)));
+}
+async function _anthropicPost(payload, { timeoutMs = 90000, retries = 2 } = {}) {
   const TRANSIENT = new Set([429, 500, 502, 503, 529]);
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {

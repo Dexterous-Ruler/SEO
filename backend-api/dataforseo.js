@@ -15,8 +15,18 @@
 // ===========================================================================
 import { config as dotenvConfig } from 'dotenv';
 dotenvConfig({ override: true });
+import { limiters, caches, withTimeout, withRetry } from './infra.js';
 
 const BASE = 'https://api.dataforseo.com/v3';
+
+// Resilient transport for ALL DataForSEO calls: concurrency-capped (no provider
+// stampede), 30s timeout (was unbounded → a hung call blocked), and transient
+// network/timeout retry with backoff. Logical errors (NO_UNITS/auth/bad request)
+// are NOT retried so the UI keeps its specific handling.
+const isTransient = (e) => !!(e && (e.transient || e.code === 'ETIMEOUT' || /fetch failed|network|ECONNRESET|ETIMEDOUT|socket|aborted|EAI_AGAIN/i.test(String(e && e.message))));
+function dfsFetch(url, opts) {
+  return limiters.dataforseo.run(() => withRetry(() => withTimeout(fetch(url, opts), 30000, 'DataForSEO'), { retries: 2, base: 600, retryOn: isTransient }));
+}
 
 function authHeader() {
   const login = process.env.DATAFORSEO_LOGIN;
@@ -54,7 +64,7 @@ const cleanDomain = (d) => (d || '').replace(/^https?:\/\//, '').replace(/^www\.
 
 // Low-level POST to a Labs endpoint. DataForSEO wraps results in tasks[].result[].
 async function call(path, task) {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await dfsFetch(`${BASE}${path}`, {
     method: 'POST',
     headers: { Authorization: authHeader(), 'Content-Type': 'application/json' },
     body: JSON.stringify([task]),
@@ -270,7 +280,7 @@ export async function relatedKeywords(seed, { db = 'uk', limit = 100, depth = 2 
 // Backlinks are global (not geo-locked), so no locale is applied here.
 // ===========================================================================
 async function blRaw(path, task) {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await dfsFetch(`${BASE}${path}`, {
     method: 'POST', headers: { Authorization: authHeader(), 'Content-Type': 'application/json' },
     body: JSON.stringify([task]),
   });
@@ -288,6 +298,7 @@ async function blRaw(path, task) {
 // Full backlink-profile overview: rank (0–1000), backlink & referring-domain
 // counts, spam score, do-follow ratio.
 export async function backlinksSummary(domain) {
+ return caches.dataforseo.wrap('blsummary:' + cleanDomain(domain), async () => {
   const r = await blRaw('/backlinks/summary/live', { target: cleanDomain(domain), internal_list_limit: 1, backlinks_status_type: 'live', include_subdomains: true });
   if (!r) return null;
   const total = r.backlinks || 0;
@@ -305,11 +316,13 @@ export async function backlinksSummary(domain) {
     brokenBacklinks: r.broken_backlinks ?? 0,
     referringIps: r.referring_ips ?? 0,
   };
+ });
 }
 
 // Referring domains (the unit that drives DR/DA): domain, its rank, link count,
 // spam score, first-seen / lost.
 export async function referringDomains(domain, { limit = 100, status = 'live', orderBy = 'rank,desc' } = {}) {
+ return caches.dataforseo.wrap(`refdoms:${cleanDomain(domain)}:${status}:${limit}:${orderBy}`, async () => {
   const r = await blRaw('/backlinks/referring_domains/live', {
     target: cleanDomain(domain), limit: Math.min(limit, 1000), backlinks_status_type: status,
     order_by: [orderBy], include_subdomains: true,
@@ -325,13 +338,16 @@ export async function referringDomains(domain, { limit = 100, status = 'live', o
     lostDate: it.lost_date || null,
     isLost: !!it.lost_date,
   })).filter((d) => d.domain);
+ });
 }
 
 // Anchor-text distribution — used to flag exact-match over-optimisation (spam risk).
 export async function backlinkAnchors(domain, { limit = 50 } = {}) {
+ return caches.dataforseo.wrap(`anchors:${cleanDomain(domain)}:${limit}`, async () => {
   const r = await blRaw('/backlinks/anchors/live', { target: cleanDomain(domain), limit: Math.min(limit, 1000), backlinks_status_type: 'live' });
   const items = (r && r.items) || [];
   return items.map((it) => ({ anchor: it.anchor, referringDomains: it.referring_domains ?? 0, backlinks: it.backlinks ?? 0 })).filter((a) => a.anchor != null);
+ });
 }
 
 // Competitor LINK GAP (flagship): domains linking to >=1 of the competitor
@@ -340,6 +356,8 @@ export async function backlinkAnchors(domain, { limit = 50 } = {}) {
 export async function domainIntersection(site, competitors, { limit = 100 } = {}) {
   const comps = (competitors || []).map(cleanDomain).filter(Boolean).slice(0, 20);
   if (!comps.length) return [];
+  const cacheKey = `intersect:${cleanDomain(site)}:${[...comps].sort().join(',')}:${limit}`;
+  return caches.dataforseo.wrap(cacheKey, async () => {
   const targets = {}; comps.forEach((c, i) => { targets[String(i + 1)] = c; });
   const r = await blRaw('/backlinks/domain_intersection/live', {
     targets, exclude_targets: [cleanDomain(site)], limit: Math.min(limit, 1000),
@@ -358,6 +376,7 @@ export async function domainIntersection(site, competitors, { limit = 100 } = {}
       competitorDomains: linkedTargets.map((k) => targets[k]).filter(Boolean),
     };
   }).filter((d) => d.domain);
+  });
 }
 
 export function hasKey() { return Boolean(process.env.DATAFORSEO_LOGIN && process.env.DATAFORSEO_PASSWORD); }

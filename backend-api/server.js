@@ -47,6 +47,7 @@ import * as research from './research.js';
 import * as imageOpt from './image-optimize.js';
 import * as prompts from './prompts.js';
 import * as perplexity from './perplexity.js';
+import { limiters, infraStats, withTimeout, HEAVY_MAX_QUEUE } from './infra.js';
 
 // Resolve credentials for an operation: prefer a stored siteId (secure — secret
 // decrypted server-side), fall back to creds in the body (initial connect only).
@@ -157,9 +158,15 @@ function shiftDate(dateStr, days) {
   return d.toISOString().slice(0, 10);
 }
 
+const MAX_BODY = Number(process.env.MAX_BODY_BYTES) || 6 * 1024 * 1024; // 6 MB cap
 async function readBody(req) {
   const chunks = [];
-  for await (const c of req) chunks.push(c);
+  let size = 0;
+  for await (const c of req) {
+    size += c.length;
+    if (size > MAX_BODY) { const e = new Error('Request body too large'); e.code = 'EBODY'; throw e; }
+    chunks.push(c);
+  }
   if (!chunks.length) return {};
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
   catch { return {}; }
@@ -223,6 +230,8 @@ const PROMPT_SAMPLES = {
 const routes = {
   // Health check
   'GET /health': async () => ({ ok: true, engine: 'wp-seo-agent', version: '2.0' }),
+  // Observability: live load, provider limiter/breaker state, cache hit rates.
+  'GET /status': async () => ({ ok: true, version: '2.0', uptimeSec: Math.round(process.uptime()), inFlight: INFLIGHT, infra: infraStats() }),
 
   // SECURE multi-site connect: validate creds → detect stack → store the site
   // with the app password ENCRYPTED in Supabase → return the new site (no secret).
@@ -1703,6 +1712,23 @@ const routes = {
 };
 
 // --- server ----------------------------------------------------------------
+// ── Server lifecycle + load state ───────────────────────────────────────────
+let INFLIGHT = 0;
+let SHUTTING_DOWN = false;
+const REQ_TIMEOUT_MS = Number(process.env.REQ_TIMEOUT_MS) || 280000; // safety net (<proxy cap)
+// Heavy = calls an external model/API or does CPU work; routed through the heavy
+// concurrency limiter + backpressure. Unknown keys simply skip it (harmless).
+const HEAVY_ROUTES = new Set([
+  'POST /content-intel', 'POST /generate-content', 'POST /generate-schema', 'POST /generate-css',
+  'POST /ai-seo-facts', 'POST /internal-links', 'POST /external-links', 'POST /apply-link',
+  'POST /content-decay', 'POST /content-decay-brief', 'POST /content-brief', 'POST /project-plan',
+  'POST /narrate', 'POST /scorecard', 'POST /weekly-briefing', 'POST /research', 'POST /auditPage',
+  'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
+  'POST /media-scan', 'POST /media-optimize', 'POST /airtable-sync', 'POST /generate-opportunities',
+  'POST /backlinks/summary', 'POST /backlinks/gap', 'POST /backlinks/monitor', 'POST /backlinks/disavow',
+  'POST /backlinks/draft-outreach', 'POST /backlinks/prepare-outreach',
+]);
+
 const server = createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, {});
   const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -1802,13 +1828,26 @@ setTimeout(function(){try{window.close();}catch(e){} if(!window.closed){location
     if (req.method === 'GET') return serveStatic(req, res, url.pathname);
     return send(res, 404, { error: `No route ${key}` });
   }
+  // Drain mode: reject new work while shutting down so in-flight can finish.
+  if (SHUTTING_DOWN) { res.setHeader('Retry-After', '3'); return send(res, 503, { error: 'Server restarting — retry shortly.' }); }
+  // Backpressure: shed load when too many heavy ops are already queued.
+  const heavy = HEAVY_ROUTES.has(key);
+  if (heavy && limiters.heavy.pending > HEAVY_MAX_QUEUE) {
+    res.setHeader('Retry-After', '5');
+    return send(res, 503, { error: 'Server busy — too many heavy operations queued. Please retry shortly.' });
+  }
+  INFLIGHT++;
   try {
     const body = req.method === 'POST' ? await readBody(req) : {};
-    const out = await handler(body, url);
+    const exec = () => withTimeout(handler(body, url), REQ_TIMEOUT_MS, 'request ' + key);
+    const out = heavy ? await limiters.heavy.run(exec) : await exec();
     send(res, 200, out);
   } catch (e) {
-    send(res, 400, { error: e.message });
-  }
+    if (e && e.code === 'EBODY') send(res, 413, { error: 'Request body too large.' });
+    else if (e && e.code === 'ETIMEOUT') send(res, 504, { error: e.message });
+    else if (e && e.code === 'ECIRCUIT') { res.setHeader('Retry-After', '20'); send(res, 503, { error: e.message }); }
+    else send(res, 400, { error: e.message });
+  } finally { INFLIGHT--; }
 });
 
 server.listen(PORT, '0.0.0.0', () => {
@@ -1819,6 +1858,27 @@ server.listen(PORT, '0.0.0.0', () => {
   // content-gap keyword push). Never writes to live pages. Disable: AUTOMATION_ENABLED=false.
   try { startScheduler(); } catch (e) { console.error('[scheduler] failed to start', e && e.message); }
 });
+
+// --- graceful shutdown ------------------------------------------------------
+// Koyeb sends SIGTERM on redeploy. Stop taking new work, let in-flight requests
+// drain (so a mid-write isn't severed), then exit — with a hard cap so we never
+// hang a deploy.
+function gracefulShutdown(sig) {
+  if (SHUTTING_DOWN) return;
+  SHUTTING_DOWN = true;
+  console.log(`[shutdown] ${sig} — draining ${INFLIGHT} in-flight request(s)…`);
+  try { server.close(() => console.log('[shutdown] listener closed')); } catch (e) {}
+  const started = Date.now();
+  const poll = setInterval(() => {
+    if (INFLIGHT <= 0 || Date.now() - started > 25000) {
+      clearInterval(poll);
+      console.log(`[shutdown] exiting (in-flight=${INFLIGHT})`);
+      process.exit(0);
+    }
+  }, 400);
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // --- crash safety -----------------------------------------------------------
 // A single-process zero-dep server must survive a stray rejection/throw from a
