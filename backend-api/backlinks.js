@@ -11,6 +11,7 @@ import { db } from './supabase.js';
 import * as dfs from './dataforseo.js';
 import * as claude from './claude.js';
 import * as airtable from './airtable.js';
+import * as email from './email.js';
 
 const cleanDom = (d) => String(d || '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '').trim();
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
@@ -213,4 +214,60 @@ export async function disavowDraft(siteId) {
   return { count: flagged.length, threshold: DISAVOW_SPAM, file: lines.join('\n'), flagged: flagged.slice(0, 60) };
 }
 
-export default { profile, linkGap, draftOutreach, linkValueScore, enrichContact, prepareOutreach, outreachStatus, monitor, disavowDraft };
+// ── Outreach SENDING (replaces n8n) — Resend, per-site mode, daily cap ───────
+const FOLLOWUP_DAYS = 3;
+// Send due outreach for a site. mode='manual' sends only rows the user set to
+// "Send Outreach"; mode='auto' also auto-approves "To review" rows. Always sends
+// follow-ups for un-replied "Sent" rows older than FOLLOWUP_DAYS. Respects a
+// daily cap (counted from Airtable's "Sent At" so it's correct across restarts).
+export async function sendOutreach(siteId, { trigger = 'scheduler' } = {}) {
+  const site = await db.getSite(siteId).catch(() => null);
+  if (!site) return { error: 'No site.' };
+  if (!email.emailConfigured()) return { error: 'Email isn’t configured — set RESEND_API_KEY and OUTREACH_FROM (a verified sender).', needsEmail: true };
+  const mode = site.outreach_mode || 'manual';
+  const cap = site.outreach_daily_cap || 10;
+  const pat = await db.getAirtablePat(siteId).catch(() => null);
+  if (!pat) return { error: 'Connect Airtable first.' };
+  const cfg = await db.getAirtableConfig(siteId).catch(() => null);
+  if (!cfg || !cfg.base_id) return { error: 'Set the Airtable base first.' };
+  let records = [], offset = null;
+  try { for (let i = 0; i < 6; i++) { const r = await airtable.listRecords(pat, cfg.base_id, 'Outreach', { pageSize: 100, offset }); records = records.concat(r.records || []); offset = r.offset; if (!offset) break; } }
+  catch (e) { return { error: 'Could not read the Outreach table — push a campaign first. ' + e.message }; }
+  const now = Date.now();
+  const sameDay = (d) => { const t = Date.parse(d); return t && new Date(t).toDateString() === new Date(now).toDateString(); };
+  const norm = (s) => String(s || '').toLowerCase();
+  const sentToday = records.filter((r) => r.fields['Sent At'] && sameDay(r.fields['Sent At'])).length;
+  let budget = Math.max(0, cap - sentToday);
+
+  const wantSend = (f) => { const st = norm(f.Status); if (st === 'send outreach') return true; if (mode === 'auto' && (st === 'to review' || st === '')) return true; return false; };
+  const dueFollowup = (f) => { if (f.Replied === true || /replied|won/.test(norm(f.Status))) return false; if (norm(f.Status) !== 'sent') return false; const t = Date.parse(f['Sent At'] || ''); return t && (now - t) >= FOLLOWUP_DAYS * 86400000; };
+
+  let sent = 0, followups = 0, skipped = 0, failed = 0;
+  for (const r of records) {
+    if (budget <= 0) break;
+    const f = r.fields || {};
+    if (!wantSend(f)) continue;
+    const to = f['Contact Email'], text = f.Email || '';
+    if (!to || !text) { skipped++; continue; }
+    try {
+      await email.sendEmail({ to, subject: f.Subject || ('Quick note about ' + (f.Domain || 'your site')), text });
+      await airtable.updateRecord(pat, cfg.base_id, 'Outreach', r.id, { Status: 'Sent', 'Sent At': new Date().toISOString() });
+      sent++; budget--;
+    } catch (e) { if (e.code === 'NO_EMAIL') return { error: e.message, needsEmail: true }; failed++; }
+  }
+  for (const r of records) {
+    if (budget <= 0) break;
+    const f = r.fields || {};
+    if (!dueFollowup(f)) continue;
+    if (!f['Contact Email']) continue;
+    try {
+      await email.sendEmail({ to: f['Contact Email'], subject: 'Re: ' + (f.Subject || ('about ' + (f.Domain || ''))), text: 'Just following up on my note below — would this be a useful addition for your readers?\n\n' + (f.Email || '') });
+      await airtable.updateRecord(pat, cfg.base_id, 'Outreach', r.id, { Status: 'Follow-up 1' });
+      followups++; budget--;
+    } catch (e) { failed++; }
+  }
+  if (sent || followups || trigger === 'manual') await db.logActivity({ site_id: siteId, type: (sent || followups) ? 'off-site' : 'automation', actor: trigger === 'manual' ? 'You' : 'Automation', icon: 'link', text: `Outreach (${mode}): ${sent} sent, ${followups} follow-up(s)` + (failed ? `, ${failed} failed` : '') + (skipped ? `, ${skipped} skipped (no email/draft)` : ''), meta: 'Resend' }).catch(() => {});
+  return { done: true, mode, sent, followups, skipped, failed, dailyCap: cap, sentToday: sentToday + sent };
+}
+
+export default { profile, linkGap, draftOutreach, linkValueScore, enrichContact, prepareOutreach, outreachStatus, monitor, disavowDraft, sendOutreach };

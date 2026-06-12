@@ -287,12 +287,22 @@ async function blRaw(path, task) {
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 || data.status_code === 40100) throw new Error('DataForSEO auth failed — check DATAFORSEO_LOGIN + API password.');
   if (data.status_code === 40200 || /payment|balance|insufficient|funds/i.test(data.status_message || '')) { const e = new Error('DataForSEO balance exhausted — top up at app.dataforseo.com'); e.code = 'NO_UNITS'; throw e; }
+  if (isNoBacklinksSub(data.status_code, data.status_message)) throw noBacklinksSubError();
   if (data.status_code !== 20000) throw new Error(`DataForSEO ${data.status_code}: ${data.status_message || res.status}`);
   const t = (data.tasks || [])[0];
   if (!t) return null;
   if (t.status_code === 40200) { const e = new Error('DataForSEO balance exhausted'); e.code = 'NO_UNITS'; throw e; }
+  if (isNoBacklinksSub(t.status_code, t.status_message)) throw noBacklinksSubError();
   if (t.status_code !== 20000) throw new Error(`DataForSEO task ${t.status_code}: ${t.status_message}`);
   return (t.result && t.result[0]) || null;
+}
+// The Backlinks API is a SEPARATE DataForSEO subscription from Labs/keyword data —
+// a fresh account has keyword access but not backlinks (code 40204 / access denied).
+function isNoBacklinksSub(code, msg) { return code === 40204 || /access denied|not.*subscrib|activate your subscription|subscription to/i.test(msg || ''); }
+function noBacklinksSubError() {
+  const e = new Error("The DataForSEO Backlinks API isn't activated on your account yet. It's a separate subscription from the keyword data — activate it (from ~$100/mo) at app.dataforseo.com/backlinks-subscription, then retry. Your keyword tools are unaffected.");
+  e.code = 'NO_BACKLINKS_SUB';
+  return e;
 }
 
 // Full backlink-profile overview: rank (0–1000), backlink & referring-domain

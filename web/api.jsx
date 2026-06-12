@@ -144,6 +144,8 @@
     backlinksOutreachStatus(siteId) { return engine("/backlinks/outreach-status", { siteId }); },
     backlinksMonitor(siteId) { return engine("/backlinks/monitor", { siteId }); },
     backlinksDisavow(siteId) { return engine("/backlinks/disavow", { siteId }); },
+    outreachSettings(siteId, mode, dailyCap) { return engine("/outreach/settings", { siteId, mode, dailyCap }); },
+    outreachSendNow(siteId) { return engine("/outreach/send-now", { siteId }); },
     // Durable background jobs
     jobRun(type, payload, siteId) { return engine("/jobs/run", { type, payload, siteId }); },
     jobGet(id) { return engine("/jobs/get", { id }); },

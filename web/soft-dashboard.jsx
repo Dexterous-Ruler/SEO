@@ -3900,15 +3900,20 @@ function BacklinksScreen({ ctx }) {
   const [prepBusy,setPrepBusy] = useState(false);
   const [track,setTrack] = useState(null);    // outreach tracker / ROI
   const [trackBusy,setTrackBusy] = useState(false);
+  const [oset,setOset] = useState(null);      // outreach settings {mode,dailyCap,emailConfigured}
+  const [sendBusy,setSendBusy] = useState(false);
   const [mon,setMon] = useState(null);        // monitor: new/lost/toxic
   const [monBusy,setMonBusy] = useState(false);
   const [monTab,setMonTab] = useState("new");
   const [disavow,setDisavow] = useState(null);
   const fmt = (v)=> v==null||v===""?"—":(isNaN(v)?v:Number(v).toLocaleString());
-  useEffect(()=>{ setProfile(null); setGap(null); setErr(null); setDrafts({}); setSel({}); setPrep(null); setTrack(null); setMon(null); setDisavow(null); },[s.id]);
+  useEffect(()=>{ setProfile(null); setGap(null); setErr(null); setDrafts({}); setSel({}); setPrep(null); setTrack(null); setMon(null); setDisavow(null); setOset(null); },[s.id]);
+  useEffect(()=>{ if(live && tab==="outreach" && !oset) API.outreachSettings(s.id).then(r=>{ if(!r.error) setOset(r); }).catch(()=>{}); },[tab,s.id]);
+  const saveOset = (patch)=>{ API.outreachSettings(s.id, patch.mode, patch.dailyCap).then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} setOset(r); }).catch(e=>ctx.toast(e.message,"clay")); };
+  const sendNow = ()=>{ setSendBusy(true); ctx.toast("Sending approved outreach via Resend…","teal"); API.outreachSendNow(s.id).then(r=>{ if(r.error){ ctx.toast(r.needsEmail?"Email not set up — add RESEND_API_KEY + OUTREACH_FROM":r.error, "clay"); return; } ctx.toast(`Sent ${r.sent} email(s)`+(r.followups?` + ${r.followups} follow-up(s)`:"")+(r.skipped?` · ${r.skipped} skipped (no email/draft)`:""), r.sent||r.followups?"teal":"gold"); loadTrack(); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setSendBusy(false)); };
 
-  const loadProfile = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setBusy("profile"); setErr(null); API.backlinksSummary(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits});return;} setProfile(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setBusy("")); };
-  const loadGap = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setBusy("gap"); setErr(null); API.backlinksGap(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits,needsComp:r.needsCompetitors});return;} setGap(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setBusy("")); };
+  const loadProfile = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setBusy("profile"); setErr(null); API.backlinksSummary(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits,needsSub:r.needsSub});return;} setProfile(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setBusy("")); };
+  const loadGap = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setBusy("gap"); setErr(null); API.backlinksGap(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits,needsComp:r.needsCompetitors,needsSub:r.needsSub});return;} setGap(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setBusy("")); };
   const draft = (p)=>{ const d=p.domain; setDrafts(x=>({...x,[d]:{...(x[d]||{}),busy:true,open:true}})); API.backlinksDraftOutreach(s.id,d,"competitor_gap","").then(r=>{ if(r.error){ctx.toast(r.error,"clay"); setDrafts(x=>({...x,[d]:{busy:false}})); return;} setDrafts(x=>({...x,[d]:{busy:false,open:true,subject:r.subject,body:r.body}})); setSel(x=>({...x,[d]:true})); }).catch(e=>{ctx.toast(e.message,"clay"); setDrafts(x=>({...x,[d]:{busy:false}}));}); };
   const pushSelected = ()=>{
     const chosen=((gap&&gap.prospects)||[]).filter(p=>sel[p.domain]).map(p=>{ const d=drafts[p.domain]||{}; return {domain:p.domain,rank:p.rank,competitorsLinked:p.competitorsLinked,lvs:p.lvs,tactic:"competitor_gap",subject:d.subject,body:d.body}; });
@@ -3939,7 +3944,7 @@ function BacklinksScreen({ ctx }) {
   };
   const loadTrack = ()=>{ setTrackBusy(true); API.backlinksOutreachStatus(s.id).then(r=>{ setTrack(r); if(r.error)ctx.toast(r.error,"clay"); }).catch(e=>{setTrack({error:e.message});ctx.toast(e.message,"clay");}).finally(()=>setTrackBusy(false)); };
   // Phase 3 — monitoring + disavow
-  const loadMon = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setMonBusy(true); setErr(null); API.backlinksMonitor(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits});return;} setMon(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setMonBusy(false)); };
+  const loadMon = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setMonBusy(true); setErr(null); API.backlinksMonitor(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits,needsSub:r.needsSub});return;} setMon(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setMonBusy(false)); };
   const getDisavow = ()=>{ API.backlinksDisavow(s.id).then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} setDisavow(r); if(!r.count){ctx.toast("No domains above the disavow threshold — nothing to disavow (good).","teal");return;}
       try{ const blob=new Blob([r.file],{type:"text/plain"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="disavow-"+(s.url||"site").replace(/^https?:\/\//,"").replace(/[^a-z0-9.]/gi,"")+".txt"; a.click(); ctx.toast("Disavow draft downloaded ("+r.count+" domains) — review before submitting","gold"); }catch(e){ ctx.toast("Disavow ready ("+r.count+" domains)","gold"); } }).catch(e=>ctx.toast(e.message,"clay")); };
 
@@ -3956,7 +3961,12 @@ function BacklinksScreen({ ctx }) {
               <button key={v} onClick={()=>setTab(v)} style={{ display:"flex", alignItems:"center", gap:6, padding:"8px 15px", fontSize:12.5, fontWeight:700, borderRadius:99, background:tab===v?"var(--surface)":"transparent", color:tab===v?"var(--t-700)":"var(--muted)", boxShadow:tab===v?"var(--neo-sm)":"none" }}><Icon name={ic} size={14} />{l}</button>
             ))}
           </div>
-          {err && <div style={{ marginBottom:14 }}><ErrBanner msg={err.msg} noUnits={err.noUnits} onRetry={()=>{ setErr(null); tab==="gap"?loadGap():loadProfile(); }} />{err.needsComp && <div style={{ fontSize:12.5, color:"var(--muted)", marginTop:8 }}>→ Go to <b>DataForSEO → Keyword Gap</b>, add your competitors, then come back.</div>}</div>}
+          {err && <div style={{ marginBottom:14 }}><ErrBanner msg={err.msg} noUnits={err.noUnits} onRetry={()=>{ setErr(null); tab==="gap"?loadGap():(tab==="monitor"?loadMon():loadProfile()); }} />{err.needsComp && <div style={{ fontSize:12.5, color:"var(--muted)", marginTop:8 }}>→ Go to <b>DataForSEO → Keyword Gap</b>, add your competitors, then come back.</div>}
+            {err.needsSub && <div style={{ marginTop:10, padding:"11px 14px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", boxShadow:"var(--neo-in)" }}>
+              <div style={{ fontSize:12.5, fontWeight:700, color:"#7E5A14", marginBottom:6 }}>Backlinks API not activated</div>
+              <div style={{ fontSize:12.5, color:"#7E5A14", lineHeight:1.5, marginBottom:9 }}>The Backlinks API is a <b>separate DataForSEO subscription</b> from your keyword data (which is working fine). Activate it once on your DataForSEO account and the whole Link Engine — gap, outreach, monitor — turns on.</div>
+              <a href="https://app.dataforseo.com/backlinks-subscription" target="_blank" rel="noopener"><NeoButton kind="primary" size="sm" icon="bolt">Activate Backlinks API ↗</NeoButton></a>
+            </div>}</div>}
 
           {tab==="gap" && (
             <div>
@@ -4002,8 +4012,29 @@ function BacklinksScreen({ ctx }) {
 
           {tab==="outreach" && (
             <div>
-              <div style={{ padding:"11px 14px", borderRadius:"var(--r-md)", background:"var(--t-50,#eef6f4)", boxShadow:"var(--neo-in)", marginBottom:14, fontSize:12.5, color:"var(--ink-2)", lineHeight:1.5 }}>
-                <b>Assisted outreach.</b> Sentinel finds each prospect's contact email + drafts a personalised, white-hat pitch. Review/edit the drafts, then push the campaign to Airtable — your <b>n8n</b> watches the <b>Status</b> column and sends + sequences the emails (set Status → “Send Outreach”). Replies & won links flow back into the Tracker below. <i>Sending stays your approved step — never auto-placed.</i>
+              <div style={{ padding:"11px 14px", borderRadius:"var(--r-md)", background:"var(--t-50,#eef6f4)", boxShadow:"var(--neo-in)", marginBottom:12, fontSize:12.5, color:"var(--ink-2)", lineHeight:1.5 }}>
+                <b>Assisted outreach.</b> Sentinel finds each prospect's contact email, drafts a personalised pitch, and <b>sends it for you via Resend</b> (no n8n). Replies & won links flow back into the Tracker below.
+              </div>
+              {/* Send mode + controls */}
+              <div style={{ padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", marginBottom:14 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+                  <span style={{ fontSize:12.5, fontWeight:700 }}>Send mode</span>
+                  <div style={{ display:"flex", gap:3, padding:3, background:"var(--surface)", borderRadius:99, boxShadow:"var(--neo-in)" }}>
+                    {[["manual","Human-approved"],["auto","Fully automatic"]].map(([v,l])=>(
+                      <button key={v} onClick={()=>saveOset({mode:v})} style={{ padding:"6px 12px", fontSize:12, fontWeight:700, borderRadius:99, background:(oset&&oset.mode)===v?"var(--bg)":"transparent", color:(oset&&oset.mode)===v?"var(--t-700)":"var(--muted)", boxShadow:(oset&&oset.mode)===v?"var(--neo-xs)":"none" }}>{l}</button>
+                    ))}
+                  </div>
+                  <span style={{ display:"inline-flex", alignItems:"center", gap:6, fontSize:12, color:"var(--muted)" }}>cap/day
+                    <input type="number" min="1" max="200" defaultValue={(oset&&oset.dailyCap)||10} key={(oset&&oset.dailyCap)} onBlur={e=>{ const n=parseInt(e.target.value,10); if(n&&n!==(oset&&oset.dailyCap)) saveOset({dailyCap:n}); }} style={{ width:54, padding:"5px 8px", borderRadius:8, border:"none", background:"var(--surface)", boxShadow:"var(--neo-in)", fontSize:12, color:"var(--ink)", outline:"none" }} />
+                  </span>
+                  <NeoButton kind="primary" size="sm" icon={sendBusy?undefined:"bolt"} disabled={sendBusy} style={{ marginLeft:"auto" }} onClick={sendNow}>{sendBusy&&<Icon name="cog" size={14} className="audit-spin" />}{sendBusy?"Sending…":"Send approved now"}</NeoButton>
+                </div>
+                <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:8, lineHeight:1.5 }}>
+                  {(oset&&oset.mode)==="auto"
+                    ? <><b>Auto:</b> top prospects are emailed automatically every 6h (up to the daily cap) once pushed — no manual step.</>
+                    : <><b>Human-approved:</b> nothing sends until you set a row's Status to “Send Outreach” (then “Send approved now” or the 6-hourly job fires it).</>}
+                  {oset && !oset.emailConfigured && <span style={{ color:"var(--clay)", fontWeight:700 }}> · ⚠ Email not configured — set RESEND_API_KEY + OUTREACH_FROM (verified domain) to send.</span>}
+                </div>
               </div>
               <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14, flexWrap:"wrap" }}>
                 <div style={{ flex:1, minWidth:220, fontSize:12.5, color:"var(--muted)" }}>Builds a campaign from your <b>top {Math.min(((gap&&gap.prospects)||[]).length,12)||"—"}</b> qualified link-gap prospect(s).</div>
