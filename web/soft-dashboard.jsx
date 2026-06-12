@@ -1761,7 +1761,8 @@ function OptimizeScreen({ ctx }) {
                   </div>
                   {media.lastRun && (
                     <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
-                      <div style={{ fontSize:12.5, fontWeight:700, color:"var(--ink-2)" }}>{media.lastRun.applied?"Optimized":"Preview"} · {media.lastRun.savedKB} KB saved across {media.lastRun.processed} image(s)</div>
+                      <div style={{ fontSize:12.5, fontWeight:700, color:"var(--ink-2)" }}>{media.lastRun.applied?"Optimized":"Preview"} · {media.lastRun.savedKB} KB saved across {media.lastRun.processed} image(s){media.lastRun.relinked?<span style={{ color:"var(--t-700)" }}> · {media.lastRun.relinked} already converted → re-linked</span>:null}</div>
+                      {media.lastRun.applied && (media.lastRun.relinked>0) && <div style={{ fontSize:11.5, color:"var(--muted)" }}>The big images already had WebP from before — re-linked so pages serve them. For full coverage (incl. Elementor backgrounds), use <b>Enable auto-WebP</b> above.</div>}
                       {(media.lastRun.results||[]).map((r,i)=>(
                         <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12 }}>
                           <span style={{ flex:1, fontFamily:"var(--mono)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{r.filename||r.url||r.id}</span>
