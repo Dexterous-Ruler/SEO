@@ -42,22 +42,28 @@ async function fetchImages(wp, perPage = 100) {
     }));
 }
 
-// Stems of WebP files already in the media library, so we never re-upload a copy
-// we already made (important for unattended/scheduled runs). Paginates a few pages.
-async function existingWebpStems(wp, pages = 6) {
-  const set = new Set();
+// WebP files already in the media library. Returns:
+//   byStem  — base stems (no size variant) → true, for the "already converted?" check
+//   byExact — exact filename-without-.webp → url, so we can RE-LINK the original to
+//             its existing WebP (the converted file lives in a different folder, so
+//             the page only serves it if the original→webp map points at it).
+async function existingWebp(wp, pages = 8) {
+  const byStem = new Set();
+  const byExact = new Map();
   for (let p = 1; p <= pages; p++) {
     const items = await wp.request(`/media?per_page=100&page=${p}&media_type=image&_fields=source_url,mime_type`).catch(() => []);
     if (!Array.isArray(items) || !items.length) break;
     for (const m of items) {
       if (!/image\/webp/i.test(m.mime_type || '')) continue;
       const fn = (m.source_url || '').split('/').pop() || '';
-      const stem = fn.replace(/(-\d+)?\.webp$/i, '').toLowerCase();
-      if (stem) set.add(stem);
+      const exact = fn.replace(/\.webp$/i, '').toLowerCase();
+      if (exact && !byExact.has(exact)) byExact.set(exact, m.source_url);
+      const base = fn.replace(/(-\d+x\d+)?\.webp$/i, '').toLowerCase();  // strip WxH size variant
+      if (base) byStem.add(base);
     }
     if (items.length < 100) break;
   }
-  return set;
+  return { byStem, byExact };
 }
 const stemOf = (url) => (url.split('/').pop() || '').replace(/\.(jpe?g|png)$/i, '').toLowerCase();
 
@@ -83,16 +89,28 @@ export async function optimizeImages(siteId, { ids = null, quality = 80, max = 8
   const wp = new WordPressClient({ baseUrl, username, appPassword });
   let targets = await fetchImages(wp);
   if (ids && ids.length) targets = targets.filter((i) => ids.includes(i.id));
-  // Idempotency for automated runs: skip images whose WebP already exists.
+  // Work on the heaviest first.
+  const work = targets.sort((a, b) => b.sizeKB - a.sizeKB).slice(0, Math.min(max, 20));
+  // Split into "needs converting" vs "already has WebP". The already-converted ones
+  // get RE-LINKED (original→existing WebP) so the live page actually serves them —
+  // a re-run is no longer a no-op.
+  const relinkMap = {};
+  let toProcess = work;
   if (skipExisting) {
-    const have = await existingWebpStems(wp).catch(() => new Set());
-    targets = targets.filter((i) => !have.has(stemOf(i.url)));
+    const ex = await existingWebp(wp).catch(() => ({ byStem: new Set(), byExact: new Map() }));
+    toProcess = [];
+    for (const i of work) {
+      const st = stemOf(i.url);
+      const webpUrl = ex.byExact.get(st);
+      if (webpUrl || ex.byStem.has(st)) { if (webpUrl) relinkMap[i.url] = webpUrl; }
+      else toProcess.push(i);
+    }
   }
-  targets = targets.sort((a, b) => b.sizeKB - a.sizeKB).slice(0, Math.min(max, 20));
-  if (!targets.length) return apply ? { applied: true, processed: 0, uploaded: 0, failed: 0, errors: [], savedKB: 0, results: [], note: 'nothing new to optimize' } : { error: 'No matching images to optimize.' };
+  const relinked = Object.keys(relinkMap).length;
+  if (!toProcess.length && !relinked) return apply ? { applied: true, processed: 0, uploaded: 0, relinked: 0, failed: 0, errors: [], savedKB: 0, results: [], note: 'nothing to optimize' } : { error: 'No matching images to optimize.' };
 
   const results = [];
-  for (const img of targets) {
+  for (const img of toProcess) {
     try {
       const buf = await download(img.url);
       if (buf.length > 12 * 1024 * 1024) { results.push({ id: img.id, url: img.url, skip: 'too large (>12MB)' }); continue; }
@@ -115,10 +133,12 @@ export async function optimizeImages(siteId, { ids = null, quality = 80, max = 8
   }
   // Tell the seo-agent-optimize mu-plugin which original URL → which WebP, so it
   // can rewrite live pages (the WebP is a separate media item, not a sibling file).
+  let mapped = 0;
   if (apply) {
-    const map = {};
-    for (const r of results) if (r.uploaded && r.origUrl && r.newUrl) map[r.origUrl] = r.newUrl;
-    if (Object.keys(map).length) {
+    const map = { ...relinkMap };                         // re-link already-converted originals…
+    for (const r of results) if (r.uploaded && r.origUrl && r.newUrl) map[r.origUrl] = r.newUrl;  // …plus the new ones
+    mapped = Object.keys(map).length;
+    if (mapped) {
       try { await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/webp-map`, { method: 'POST', body: { map } }); } catch (e) { /* plugin may be absent */ }
     }
   }
@@ -126,7 +146,8 @@ export async function optimizeImages(siteId, { ids = null, quality = 80, max = 8
   const uploaded = results.filter((r) => r.uploaded).length;
   const failed = results.filter((r) => r.error || r.skip).length;
   const errors = results.filter((r) => r.error).map((r) => r.error).slice(0, 3);
-  return { applied: !!apply, processed: results.length, uploaded, failed, errors, savedKB, results };
+  const note = (!uploaded && relinked) ? `${relinked} image(s) already converted — re-linked their WebP so pages now serve them (needs the optimize plugin installed).` : undefined;
+  return { applied: !!apply, processed: results.length, uploaded, relinked, mapped, failed, errors, savedKB, results, note };
 }
 
 export default { scanMedia, optimizeImages };
