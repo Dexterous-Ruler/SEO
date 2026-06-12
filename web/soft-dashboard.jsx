@@ -1558,9 +1558,12 @@ function OptimizeScreen({ ctx }) {
   const optimizeMedia = (apply)=>{ setBusy(apply?"apply":"preview"); API.mediaOptimize(s.id,{apply,max:8}).then(r=>{
     if(r.error){ctx.toast("Images: "+r.error,"clay");return;}
     if(apply){
-      const ok=r.uploaded||0, bad=r.failed||0;
-      const msg = ok>0 ? ("Uploaded "+ok+" WebP to media library · "+r.savedKB+" KB lighter"+(bad?" · "+bad+" failed":"")) : ("Nothing uploaded"+(bad?" — "+bad+" failed: "+((r.errors||[])[0]||"WP rejected the upload"):""));
-      ctx.toast(msg, ok>0?"teal":"clay");
+      const ok=r.uploaded||0, bad=r.failed||0, rel=r.relinked||0;
+      let msg, tone;
+      if(ok>0){ msg="Uploaded "+ok+" WebP · "+r.savedKB+" KB lighter"+(rel?" · re-linked "+rel+" existing":"")+(bad?" · "+bad+" failed":""); tone="teal"; }
+      else if(rel>0){ msg="All "+rel+" already converted — re-linked their WebP so pages now serve them (needs the optimize plugin)."; tone="teal"; }
+      else { msg="Nothing to optimize"+(bad?" — "+bad+" failed: "+((r.errors||[])[0]||"WP rejected the upload"):" — these images may already be converted & linked."); tone=bad?"clay":"gold"; }
+      ctx.toast(msg, tone);
     } else {
       ctx.toast("Preview: "+r.processed+" image(s) · ~"+r.savedKB+" KB potential saving (no write)","teal");
     }
