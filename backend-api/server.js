@@ -32,6 +32,7 @@ import * as geo from './geo.js';
 import * as semrush from './dataforseo.js';
 import * as airtable from './airtable.js';
 import * as linkengine from './backlinks.js';
+import * as email from './email.js';
 import * as chatbot from './chat.js';
 import * as gsc from './gsc.js';
 import * as gscIndex from './gsc-index.js';
@@ -1112,6 +1113,24 @@ const routes = {
     try { return await linkengine.outreachStatus(body.siteId); }
     catch (e) { return { error: e.message }; }
   },
+  // Outreach send settings (per-site mode + daily cap) + email-config status.
+  'POST /outreach/settings': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const patch = {};
+    if (body.mode && ['manual', 'auto'].includes(body.mode)) patch.outreach_mode = body.mode;
+    if (body.dailyCap != null && !isNaN(body.dailyCap)) patch.outreach_daily_cap = Math.max(1, Math.min(200, parseInt(body.dailyCap, 10)));
+    let site;
+    if (Object.keys(patch).length) site = await db.updateSite(body.siteId, patch).catch(() => null);
+    if (!site) site = await db.getSite(body.siteId).catch(() => null);
+    return { mode: (site && site.outreach_mode) || 'manual', dailyCap: (site && site.outreach_daily_cap) || 10, emailConfigured: email.emailConfigured() };
+  },
+  // Send due outreach now (manual trigger; same logic the scheduler runs).
+  'POST /outreach/send-now': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    try { return await linkengine.sendOutreach(body.siteId, { trigger: 'manual' }); }
+    catch (e) { return { error: e.message }; }
+  },
+
   // Phase 3: new / lost / toxic referring domains (read-only monitoring).
   'POST /backlinks/monitor': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
