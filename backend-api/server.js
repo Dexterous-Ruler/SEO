@@ -1085,14 +1085,14 @@ const routes = {
     if (!body.siteId) return { error: 'No site selected.' };
     if (!semrush.hasKey()) return { error: 'DataForSEO is not configured (DATAFORSEO_LOGIN / API password).' };
     try { return await linkengine.profile(body.siteId); }
-    catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted — top up to pull backlinks.' : e.message, noUnits: e.code === 'NO_UNITS' }; }
+    catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted — top up to pull backlinks.' : e.message, noUnits: e.code === 'NO_UNITS', needsSub: e.code === 'NO_BACKLINKS_SUB' }; }
   },
   // Competitor Link Gap — scored prospects (read-only).
   'POST /backlinks/gap': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
     if (!semrush.hasKey()) return { error: 'DataForSEO is not configured.' };
     try { return await linkengine.linkGap(body.siteId, { limit: body.limit || 80 }); }
-    catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted — top up to run the link gap.' : e.message, noUnits: e.code === 'NO_UNITS' }; }
+    catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted — top up to run the link gap.' : e.message, noUnits: e.code === 'NO_UNITS', needsSub: e.code === 'NO_BACKLINKS_SUB' }; }
   },
   // Draft a personalised outreach email for one prospect (Claude).
   'POST /backlinks/draft-outreach': async (body) => {
@@ -1117,7 +1117,7 @@ const routes = {
     if (!body.siteId) return { error: 'No site selected.' };
     if (!semrush.hasKey()) return { error: 'DataForSEO is not configured.' };
     try { return await linkengine.monitor(body.siteId, { windowDays: body.windowDays || 30 }); }
-    catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted.' : e.message, noUnits: e.code === 'NO_UNITS' }; }
+    catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted.' : e.message, noUnits: e.code === 'NO_UNITS', needsSub: e.code === 'NO_BACKLINKS_SUB' }; }
   },
   // Phase 3: disavow-file DRAFT (flag-only, human-submitted).
   'POST /backlinks/disavow': async (body) => {

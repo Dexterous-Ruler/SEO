@@ -3907,8 +3907,8 @@ function BacklinksScreen({ ctx }) {
   const fmt = (v)=> v==null||v===""?"—":(isNaN(v)?v:Number(v).toLocaleString());
   useEffect(()=>{ setProfile(null); setGap(null); setErr(null); setDrafts({}); setSel({}); setPrep(null); setTrack(null); setMon(null); setDisavow(null); },[s.id]);
 
-  const loadProfile = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setBusy("profile"); setErr(null); API.backlinksSummary(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits});return;} setProfile(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setBusy("")); };
-  const loadGap = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setBusy("gap"); setErr(null); API.backlinksGap(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits,needsComp:r.needsCompetitors});return;} setGap(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setBusy("")); };
+  const loadProfile = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setBusy("profile"); setErr(null); API.backlinksSummary(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits,needsSub:r.needsSub});return;} setProfile(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setBusy("")); };
+  const loadGap = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setBusy("gap"); setErr(null); API.backlinksGap(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits,needsComp:r.needsCompetitors,needsSub:r.needsSub});return;} setGap(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setBusy("")); };
   const draft = (p)=>{ const d=p.domain; setDrafts(x=>({...x,[d]:{...(x[d]||{}),busy:true,open:true}})); API.backlinksDraftOutreach(s.id,d,"competitor_gap","").then(r=>{ if(r.error){ctx.toast(r.error,"clay"); setDrafts(x=>({...x,[d]:{busy:false}})); return;} setDrafts(x=>({...x,[d]:{busy:false,open:true,subject:r.subject,body:r.body}})); setSel(x=>({...x,[d]:true})); }).catch(e=>{ctx.toast(e.message,"clay"); setDrafts(x=>({...x,[d]:{busy:false}}));}); };
   const pushSelected = ()=>{
     const chosen=((gap&&gap.prospects)||[]).filter(p=>sel[p.domain]).map(p=>{ const d=drafts[p.domain]||{}; return {domain:p.domain,rank:p.rank,competitorsLinked:p.competitorsLinked,lvs:p.lvs,tactic:"competitor_gap",subject:d.subject,body:d.body}; });
@@ -3939,7 +3939,7 @@ function BacklinksScreen({ ctx }) {
   };
   const loadTrack = ()=>{ setTrackBusy(true); API.backlinksOutreachStatus(s.id).then(r=>{ setTrack(r); if(r.error)ctx.toast(r.error,"clay"); }).catch(e=>{setTrack({error:e.message});ctx.toast(e.message,"clay");}).finally(()=>setTrackBusy(false)); };
   // Phase 3 — monitoring + disavow
-  const loadMon = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setMonBusy(true); setErr(null); API.backlinksMonitor(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits});return;} setMon(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setMonBusy(false)); };
+  const loadMon = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setMonBusy(true); setErr(null); API.backlinksMonitor(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits,needsSub:r.needsSub});return;} setMon(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setMonBusy(false)); };
   const getDisavow = ()=>{ API.backlinksDisavow(s.id).then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} setDisavow(r); if(!r.count){ctx.toast("No domains above the disavow threshold — nothing to disavow (good).","teal");return;}
       try{ const blob=new Blob([r.file],{type:"text/plain"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="disavow-"+(s.url||"site").replace(/^https?:\/\//,"").replace(/[^a-z0-9.]/gi,"")+".txt"; a.click(); ctx.toast("Disavow draft downloaded ("+r.count+" domains) — review before submitting","gold"); }catch(e){ ctx.toast("Disavow ready ("+r.count+" domains)","gold"); } }).catch(e=>ctx.toast(e.message,"clay")); };
 
@@ -3956,7 +3956,12 @@ function BacklinksScreen({ ctx }) {
               <button key={v} onClick={()=>setTab(v)} style={{ display:"flex", alignItems:"center", gap:6, padding:"8px 15px", fontSize:12.5, fontWeight:700, borderRadius:99, background:tab===v?"var(--surface)":"transparent", color:tab===v?"var(--t-700)":"var(--muted)", boxShadow:tab===v?"var(--neo-sm)":"none" }}><Icon name={ic} size={14} />{l}</button>
             ))}
           </div>
-          {err && <div style={{ marginBottom:14 }}><ErrBanner msg={err.msg} noUnits={err.noUnits} onRetry={()=>{ setErr(null); tab==="gap"?loadGap():loadProfile(); }} />{err.needsComp && <div style={{ fontSize:12.5, color:"var(--muted)", marginTop:8 }}>→ Go to <b>DataForSEO → Keyword Gap</b>, add your competitors, then come back.</div>}</div>}
+          {err && <div style={{ marginBottom:14 }}><ErrBanner msg={err.msg} noUnits={err.noUnits} onRetry={()=>{ setErr(null); tab==="gap"?loadGap():(tab==="monitor"?loadMon():loadProfile()); }} />{err.needsComp && <div style={{ fontSize:12.5, color:"var(--muted)", marginTop:8 }}>→ Go to <b>DataForSEO → Keyword Gap</b>, add your competitors, then come back.</div>}
+            {err.needsSub && <div style={{ marginTop:10, padding:"11px 14px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", boxShadow:"var(--neo-in)" }}>
+              <div style={{ fontSize:12.5, fontWeight:700, color:"#7E5A14", marginBottom:6 }}>Backlinks API not activated</div>
+              <div style={{ fontSize:12.5, color:"#7E5A14", lineHeight:1.5, marginBottom:9 }}>The Backlinks API is a <b>separate DataForSEO subscription</b> from your keyword data (which is working fine). Activate it once on your DataForSEO account and the whole Link Engine — gap, outreach, monitor — turns on.</div>
+              <a href="https://app.dataforseo.com/backlinks-subscription" target="_blank" rel="noopener"><NeoButton kind="primary" size="sm" icon="bolt">Activate Backlinks API ↗</NeoButton></a>
+            </div>}</div>}
 
           {tab==="gap" && (
             <div>
