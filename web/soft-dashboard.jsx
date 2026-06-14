@@ -1532,12 +1532,17 @@ function OptimizeScreen({ ctx }) {
   const applySchemaLive = ()=>{ if(!schema){return;} setBusy("applySchema"); API.applySchema(s.id,{ url:pageUrl, jsonld:schema.json }).then(r=>{ if(r.error){ctx.toast("Schema: "+r.error,"clay");return;} ctx.toast("Schema applied to the live page ✓","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
   const applyCssLive = ()=>{ if(!css){return;} setBusy("applyCss"); API.applyCss(s.id, css.css).then(r=>{ if(r.error){ctx.toast("CSS: "+r.error,"clay");return;} ctx.toast("CSS applied to the live site ✓","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
 
-  const findLinks = ()=>{ setBusy("links"); setErr(null); API.internalLinks(s.id,{maxSources:8}).then(r=>{ if(r.error){setErr(r.error);return;} setLinks(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
-  const genExt = ()=>{ if(!pageUrl){ctx.toast("Enter a page URL","gold");return;} setBusy("ext"); setErr(null); API.externalLinks(s.id,pageUrl).then(r=>{ if(r.error){setErr(r.error);return;} setExt(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
+  const findLinks = ()=>{ const sid=s.id; setBusy("links"); setErr(null); API.internalLinks(sid,{maxSources:8}).then(r=>{ if(r.error){setErr(r.error);return;} setLinks(Object.assign({_siteId:sid},r)); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
+  const genExt = ()=>{ if(!pageUrl){ctx.toast("Enter a page URL","gold");return;} const sid=s.id; setBusy("ext"); setErr(null); API.externalLinks(sid,pageUrl).then(r=>{ if(r.error){setErr(r.error);return;} setExt(Object.assign({_siteId:sid},r)); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   // Approve & push a single link (internal or external) into the live page.
   const linkKey = (l)=> (l.sourcePage||"")+"|"+l.anchor+"|"+l.targetUrl;
+  const hostOf = (u)=>{ try{ return new URL(u).host.replace(/^www\./,""); }catch(e){ return ""; } };
   const applyOne = (l)=> new Promise((res)=>{
-    const k=linkKey(l); setApplied(a=>({...a,[k]:{busy:true}}));
+    const k=linkKey(l);
+    // Guard: never apply a suggestion whose page isn't on the active site.
+    const siteHost=hostOf(s.url||s._rawUrl||""), srcHost=hostOf(l.sourcePage||"");
+    if(siteHost && srcHost && siteHost!==srcHost){ const msg="That suggestion is for "+srcHost+", but you're on "+siteHost+" — re-run “Find internal links” for this site."; setApplied(a=>({...a,[k]:{status:"error",reason:msg}})); ctx.toast(msg,"clay"); return res({error:msg}); }
+    setApplied(a=>({...a,[k]:{busy:true}}));
     API.applyLink(s.id, l.sourcePage, l.anchor, l.targetUrl).then(r=>{
       setApplied(a=>({...a,[k]:{status:r.status||(r.error?"error":"?"), reason:r.reason||r.error}}));
       res(r||{});
@@ -1612,7 +1617,7 @@ function OptimizeScreen({ ctx }) {
                 </div>
                 <NeoButton kind="primary" size="sm" icon={busy==="links"?undefined:"link"} disabled={busy==="links"} onClick={findLinks}>{busy==="links"&&<Icon name="cog" size={15} className="audit-spin" />}{busy==="links"?"Analyzing…":"Find internal links"}</NeoButton>
               </div>
-              {links && (
+              {links && links._siteId===s.id && (
                 <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
                   <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4, flexWrap:"wrap" }}>
                     <span style={{ fontSize:12.5, fontWeight:700, color:"var(--ink-2)" }}>{links.count} suggestion(s) across {links.analyzed} page(s) · {links.corpusSize} pages in corpus</span>
@@ -1637,7 +1642,7 @@ function OptimizeScreen({ ctx }) {
                   {(links.suggestions||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No strong internal-link opportunities found — pages are already well interlinked.</div>}
                 </div>
               )}
-              {!links && busy!=="links" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Analyze your pages to surface contextual internal-link opportunities (anchor → target). <b>Approve</b> pushes the link straight into the live page (Classic/Gutenberg); page-builder pages (Elementor) are flagged to add in the editor. Links open in a new tab so this stays open.</div>}
+              {(!links || links._siteId!==s.id) && busy!=="links" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Analyze your pages to surface contextual internal-link opportunities (anchor → target). <b>Approve</b> pushes the link straight into the live page (Classic/Gutenberg); page-builder pages (Elementor) are flagged to add in the editor. Links open in a new tab so this stays open.</div>}
             </div>
           )}
 
@@ -1650,7 +1655,7 @@ function OptimizeScreen({ ctx }) {
                 </div>
               </div>
               {urlBar(genExt,"Find external links","ext")}
-              {ext && (
+              {ext && ext._siteId===s.id && (
                 <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
                   <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4, flexWrap:"wrap" }}>
                     <span style={{ fontSize:12.5, fontWeight:700, color:"var(--ink-2)" }}>{ext.count} authoritative link(s) suggested</span>
@@ -1674,7 +1679,7 @@ function OptimizeScreen({ ctx }) {
                   {(ext.suggestions||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No strong authoritative outbound links found for this page.</div>}
                 </div>
               )}
-              {!ext && busy!=="ext" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Enter a page URL to find authoritative outbound links. <b>Approve</b> pushes the link into the live page (Classic/Gutenberg); page-builder pages are flagged for the editor. Links open in a new tab.</div>}
+              {(!ext || ext._siteId!==s.id) && busy!=="ext" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Enter a page URL to find authoritative outbound links. <b>Approve</b> pushes the link into the live page (Classic/Gutenberg); page-builder pages are flagged for the editor. Links open in a new tab.</div>}
             </div>
           )}
 
