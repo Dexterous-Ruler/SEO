@@ -166,7 +166,7 @@
       return { id, status: "timeout", error: "Still running — check back shortly." };
     },
     backlinksPushProspects(siteId, prospects) { return engine("/backlinks/push-prospects", { siteId, prospects }); },
-    applyLink(siteId, sourcePage, anchor, targetUrl) { return engine("/apply-link", { siteId, sourcePage, anchor, targetUrl }); },
+    applyLink(siteId, sourcePage, anchor, targetUrl, sourceId, sourceType) { return engine("/apply-link", { siteId, sourcePage, anchor, targetUrl, sourceId, sourceType }); },
     generateSchema(siteId, page, schemaConfig, faqs) { return engine("/generate-schema", { siteId, page, schemaConfig, faqs }); },
     // Live "apply" layer (needs the seo-agent-optimize mu-plugin)
     optimizeStatus(siteId) { return engine("/optimize-status", { siteId }); },

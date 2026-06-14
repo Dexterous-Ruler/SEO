@@ -1175,11 +1175,31 @@ const routes = {
     const wp = clientFrom(creds);
     const { sourcePage, anchor, targetUrl } = body;
     if (!sourcePage || !anchor || !targetUrl) return { error: 'sourcePage, anchor and targetUrl are required.' };
-    const slug = decodeURIComponent((String(sourcePage).replace(/[?#].*$/, '').replace(/\/$/, '').split('/').pop() || '')).toLowerCase();
     let found = null;
-    for (const type of ['pages', 'posts']) {
-      const rows = await wp.request(`/${type}?slug=${encodeURIComponent(slug)}&_fields=id`).catch(() => []);
-      if (Array.isArray(rows) && rows[0]) { found = { id: rows[0].id, type }; break; }
+    // 1) BEST: the caller already resolved the post id (internal-links) — use it
+    // directly. Robust for the homepage, custom post types, nested/odd permalinks.
+    if (body.sourceId) {
+      for (const type of [body.sourceType, 'pages', 'posts'].filter(Boolean)) {
+        const row = await wp.request(`/${type}/${encodeURIComponent(body.sourceId)}?_fields=id`).catch(() => null);
+        if (row && row.id) { found = { id: row.id, type }; break; }
+      }
+    }
+    // 2) Resolve from the URL. Handle the HOMEPAGE (empty path) via the front-page
+    // setting — its "slug" is the domain, which never matches a page slug.
+    if (!found) {
+      let path = '';
+      try { path = new URL(sourcePage).pathname.replace(/\/+$/, ''); } catch (e) { path = String(sourcePage).replace(/^https?:\/\/[^/]+/, '').replace(/[?#].*$/, '').replace(/\/+$/, ''); }
+      if (path === '' || path === '/') {
+        const settings = await wp.request('/settings').catch(() => null);
+        const fid = settings && (settings.page_on_front || settings.show_on_front === 'page' && settings.page_on_front);
+        if (fid) { const row = await wp.request(`/pages/${fid}?_fields=id`).catch(() => null); if (row && row.id) found = { id: row.id, type: 'pages' }; }
+        // Last resort: a page whose link is the site root.
+        if (!found) { const pgs = await wp.request('/pages?per_page=100&_fields=id,link').catch(() => []); const root = (wp.baseUrl || '').replace(/\/+$/, ''); const hit = (pgs || []).find((p) => String(p.link || '').replace(/\/+$/, '') === root); if (hit) found = { id: hit.id, type: 'pages' }; }
+      }
+      if (!found) {
+        const slug = decodeURIComponent((path.split('/').pop() || '')).toLowerCase();
+        if (slug) for (const type of ['pages', 'posts']) { const rows = await wp.request(`/${type}?slug=${encodeURIComponent(slug)}&_fields=id`).catch(() => []); if (Array.isArray(rows) && rows[0]) { found = { id: rows[0].id, type }; break; } }
+      }
     }
     if (!found) return { status: 'manual', reason: 'Could not resolve the source page on WordPress.' };
     // Preferred path: the optimize plugin inserts into standard content AND
