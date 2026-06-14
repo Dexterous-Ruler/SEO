@@ -46,28 +46,32 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
   // the rendered page (which includes global nav/footer/CTA blocks we can't touch).
   // Falls back to the rendered page when the optimize plugin isn't installed.
   const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-  async function editableText(src) {
+  // Get the page's editable content as { text (for Claude grounding), units (the
+  // individual linkable segments) }. An anchor is only insertable if it fits inside
+  // ONE unit — matching the inserter's per-field/per-segment granularity exactly.
+  async function editable(src) {
     if (src.id) {
-      try { const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/page-text?post_id=${src.id}`); if (r && r.ok && typeof r.text === 'string' && r.text.length > 20) return r.text; } catch (e) {}
+      try { const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/page-text?post_id=${src.id}`); if (r && r.ok && (Array.isArray(r.units) || typeof r.text === 'string')) { const units = Array.isArray(r.units) ? r.units : (r.text ? [r.text] : []); if (units.length) return { text: r.text || units.join(' '), units }; } } catch (e) {}
     }
-    try { const res = await fetch(src.url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } }); return stripHtml(await res.text()); } catch (e) { return ''; }
+    try { const res = await fetch(src.url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } }); const t = stripHtml(await res.text()); return { text: t, units: [t] }; } catch (e) { return { text: '', units: [] }; }
   }
   const out = [];
   let dropped = 0;
   for (const src of sources) {
-    const fullText = await editableText(src);
-    if (!fullText || fullText.length < 20) continue;
-    const hay = norm(fullText);
+    const { text: fullText, units } = await editable(src);
+    if (!fullText || fullText.length < 20 || !units.length) continue;
+    const normUnits = units.map(norm);
     // Candidates = everything except the source itself.
     const candidates = corpus.filter((c) => c.url !== src.url);
     const links = await claude.internalLinkSuggestions({
       sourceUrl: src.url, sourceTitle: src.title, sourceText: fullText.slice(0, 4000), candidates, siteId,
     }).catch(() => []);
     for (const l of links) {
-      // CRITICAL: only keep anchors that VERBATIM appear on the source page, so
-      // Approve always inserts cleanly (no "anchor not found" errors). Claude often
-      // proposes the target's title as the anchor — that text isn't on a thin page.
-      if (!l.anchor || !hay.includes(norm(l.anchor))) { dropped++; continue; }
+      // CRITICAL: keep an anchor only if it fits inside a SINGLE editable unit, so
+      // Approve always inserts cleanly (no "anchor not found" errors). Validating
+      // against the joined text would pass anchors that span fields/tags the
+      // inserter can't cross.
+      if (!l.anchor || !normUnits.some((u) => u.includes(norm(l.anchor)))) { dropped++; continue; }
       const target = corpus.find((c) => c.url === l.targetUrl);
       out.push({ sourcePage: src.url, sourceTitle: src.title, anchor: l.anchor, targetUrl: l.targetUrl, targetTitle: target ? target.title : '', reason: l.reason });
     }

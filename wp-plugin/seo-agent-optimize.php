@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.3.0
+ * Version:     1.4.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -194,13 +194,17 @@ class SEO_Agent_Optimize {
             'callback' => function ($req) {
                 $id = (int) $req->get_param('post_id');
                 if (!$id) return new WP_Error('no_id', 'post_id required', ['status' => 400]);
-                $parts = [];
+                // "units" = the individual linkable text segments at the SAME granularity
+                // the inserter works (per field, per non-anchor text run). The agent must
+                // validate an anchor against a SINGLE unit, so a suggestion shown can
+                // always be inserted (no validate-pass/insert-fail).
+                $units = [];
                 $post = get_post($id);
-                if ($post && trim((string) $post->post_content) !== '') $parts[] = wp_strip_all_tags($post->post_content);
+                if ($post && trim((string) $post->post_content) !== '') seoagent_text_units($post->post_content, $units);
                 $data = get_post_meta($id, '_elementor_data', true);
-                if ($data) { $arr = is_string($data) ? json_decode($data, true) : $data; if (is_array($arr)) seoagent_collect_elementor_text($arr, $parts); }
-                $text = preg_replace('/\s+/', ' ', trim(implode(' ', $parts)));
-                return ['ok' => true, 'post_id' => $id, 'builder' => ($data ? 'elementor' : 'classic'), 'text' => $text];
+                if ($data) { $arr = is_string($data) ? json_decode($data, true) : $data; if (is_array($arr)) seoagent_collect_units($arr, $units); }
+                $units = array_values(array_unique(array_filter($units)));
+                return ['ok' => true, 'post_id' => $id, 'builder' => ($data ? 'elementor' : 'classic'), 'text' => implode(' ', $units), 'units' => $units];
             },
         ]);
 
@@ -208,7 +212,7 @@ class SEO_Agent_Optimize {
             'methods'  => 'GET',
             'permission_callback' => $perm,
             'callback' => function () {
-                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text'], 'version' => '1.3.0'];
+                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text'], 'version' => '1.4.0'];
             },
         ]);
     }
@@ -217,31 +221,96 @@ class SEO_Agent_Optimize {
 /* ── link-insertion helpers (used by /insert-link) ───────────────────────────
    Insert <a href> at the first PLAIN-TEXT occurrence of $anchor — never nesting
    inside an existing <a> and never if the target is already linked. */
+// Build the anchor match pattern: whitespace/&nbsp;-tolerant, entity-tolerant
+// (so a decoded anchor "R&D" matches raw "R&amp;D"), boundary via lookaround so a
+// WHOLE-field anchor (heading/CTA at end-of-string) still matches.
+function seoagent_anchor_regex($anchor) {
+    $q = preg_quote($anchor, '/');
+    $q = str_replace(' ', '(?:\\s|&nbsp;|&#0*160;)+', $q);
+    $q = str_replace('&', '(?:&|&amp;)', $q);            // must run BEFORE the entity tokens below
+    $q = str_replace('"', '(?:"|&quot;|&#0*34;)', $q);
+    $q = str_replace("'", "(?:'|&#0*39;|&apos;|&#x27;)", $q);
+    return '/(^|[^\\p{L}\\p{N}])(' . $q . ')(?![\\p{L}\\p{N}])/iu';
+}
+
 function seoagent_insert_into_html($html, $anchor, $href) {
     if ($html === null || $html === '') return [$html, false, 'empty'];
-    if (strpos($html, 'href="' . $href . '"') !== false || strpos($html, "href='" . $href . "'") !== false) return [$html, false, 'exists'];
+    $eh = esc_url($href);
+    foreach (array_unique([$href, $eh]) as $h) {        // idempotency: raw OR esc_url'd form already linked
+        if ($h !== '' && (strpos($html, 'href="' . $h . '"') !== false || strpos($html, "href='" . $h . "'") !== false)) return [$html, false, 'exists'];
+    }
     $parts = preg_split('/(<a\b[^>]*>.*?<\/a>|<[^>]+>)/is', $html, -1, PREG_SPLIT_DELIM_CAPTURE);
     if (!$parts) return [$html, false, 'not_found'];
-    $esc = preg_quote($anchor, '/');
-    $re = '/(^|[\s>(\[\x{201C}"\'])(' . $esc . ')([\s<).,;:!?\x{201D}"\'])/iu';
+    $re = seoagent_anchor_regex($anchor);
+    $depth = 0;                                          // never insert inside an (even unclosed) <a>
     foreach ($parts as $i => $seg) {
-        if ($seg === '' || $seg[0] === '<') continue;       // skip tags + existing links
+        if ($seg === '') continue;
+        if ($seg[0] === '<') {
+            if (preg_match('/^<a\b/i', $seg) && stripos($seg, '</a') === false) $depth++;
+            elseif (preg_match('/^<\/a\b/i', $seg) && $depth > 0) $depth--;
+            continue;
+        }
+        if ($depth > 0) continue;
         if (preg_match($re, $seg)) {
-            $parts[$i] = preg_replace($re, '$1<a href="' . esc_url($href) . '">$2</a>$3', $seg, 1);
+            $parts[$i] = preg_replace_callback($re, function ($m) use ($eh) {
+                return $m[1] . '<a href="' . $eh . '">' . $m[2] . '</a>';
+            }, $seg, 1);
             return [implode('', $parts), true, ''];
         }
     }
     return [$html, false, 'not_found'];
 }
 
+// Split one HTML string into the decoded, linkable text units (mirrors the
+// inserter exactly: per non-anchor text run, skipping content inside <a>), so
+// page-text validation agrees byte-for-byte with what /insert-link can do.
+function seoagent_text_units($html, &$units) {
+    if (!is_string($html) || $html === '') return;
+    $parts = preg_split('/(<a\b[^>]*>.*?<\/a>|<[^>]+>)/is', $html, -1, PREG_SPLIT_DELIM_CAPTURE);
+    if (!$parts) return;
+    $depth = 0;
+    foreach ($parts as $seg) {
+        if ($seg === '') continue;
+        if ($seg[0] === '<') {
+            if (preg_match('/^<a\b/i', $seg) && stripos($seg, '</a') === false) $depth++;
+            elseif (preg_match('/^<\/a\b/i', $seg) && $depth > 0) $depth--;
+            continue;
+        }
+        if ($depth > 0) continue;
+        $t = html_entity_decode(wp_strip_all_tags($seg), ENT_QUOTES | ENT_HTML5);
+        $t = str_replace("\xC2\xA0", ' ', $t);
+        $t = trim(preg_replace('/\s+/u', ' ', $t));
+        if ($t !== '') $units[] = $t;
+    }
+}
+
+// Text-bearing Elementor widget settings we may edit/scan (kept in ONE place so
+// insertion and validation always agree).
+function seoagent_text_fields() {
+    return ['editor', 'title', 'text', 'description', 'content', 'tab_content', 'item_description',
+            'description_text', 'title_text', 'heading_title', 'testimonial_content', 'blockquote_content',
+            'alert_title', 'alert_description', 'caption'];
+}
+// A widget that is itself a link (button, or any widget with a link URL) — wrapping
+// its text would create nested <a>, so we never insert into / suggest those.
+function seoagent_widget_is_linked($el) {
+    $wt = isset($el['widgetType']) ? $el['widgetType'] : '';
+    if ($wt === 'button') return true;
+    foreach (['link', 'button_link'] as $lk) {
+        if (isset($el['settings'][$lk]['url']) && $el['settings'][$lk]['url'] !== '') return true;
+    }
+    return false;
+}
+
 /* Recursively walk Elementor's element tree; insert the link into the first
    HTML-bearing widget setting that contains the anchor text. */
 function seoagent_walk_elementor(&$els, $anchor, $href, &$done) {
     if ($done || !is_array($els)) return;
+    $fields = seoagent_text_fields();
     foreach ($els as &$el) {
         if ($done) return;
-        if (!empty($el['settings']) && is_array($el['settings'])) {
-            foreach (['editor', 'title', 'text', 'description', 'content', 'tab_content', 'item_description', 'description_text'] as $k) {
+        if (!empty($el['settings']) && is_array($el['settings']) && !seoagent_widget_is_linked($el)) {
+            foreach ($fields as $k) {
                 if (isset($el['settings'][$k]) && is_string($el['settings'][$k]) && $el['settings'][$k] !== '') {
                     list($nh, $changed) = seoagent_insert_into_html($el['settings'][$k], $anchor, $href);
                     if ($changed) { $el['settings'][$k] = $nh; $done = true; break; }
@@ -254,19 +323,21 @@ function seoagent_walk_elementor(&$els, $anchor, $href, &$done) {
     }
 }
 
-/* Recursively collect the visible text of Elementor widgets (the same fields
-   /insert-link can edit), so the agent validates anchors against editable content. */
-function seoagent_collect_elementor_text($els, &$parts) {
+/* Recursively collect the linkable text UNITS of Elementor widgets (same fields
+   /insert-link edits, skipping linked widgets, split per text-run via
+   seoagent_text_units) so validation agrees exactly with insertion. */
+function seoagent_collect_units($els, &$units) {
     if (!is_array($els)) return;
+    $fields = seoagent_text_fields();
     foreach ($els as $el) {
-        if (!empty($el['settings']) && is_array($el['settings'])) {
-            foreach (['editor', 'title', 'text', 'description', 'content', 'tab_content', 'item_description', 'description_text'] as $k) {
+        if (!empty($el['settings']) && is_array($el['settings']) && !seoagent_widget_is_linked($el)) {
+            foreach ($fields as $k) {
                 if (isset($el['settings'][$k]) && is_string($el['settings'][$k]) && $el['settings'][$k] !== '') {
-                    $parts[] = wp_strip_all_tags($el['settings'][$k]);
+                    seoagent_text_units($el['settings'][$k], $units);
                 }
             }
         }
-        if (!empty($el['elements']) && is_array($el['elements'])) seoagent_collect_elementor_text($el['elements'], $parts);
+        if (!empty($el['elements']) && is_array($el['elements'])) seoagent_collect_units($el['elements'], $units);
     }
 }
 
