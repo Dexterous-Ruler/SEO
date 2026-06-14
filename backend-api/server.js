@@ -186,6 +186,24 @@ function clientFrom(creds) {
   });
 }
 
+// Normalize a pasted site URL to the clean site root. Users sometimes paste a
+// wp-login / redirect URL (e.g. ".../wp-login.php?loggedout=true&..."), which
+// would break every REST call. Strip login/admin endpoints + query/hash while
+// preserving a genuine sub-directory install.
+function normalizeSiteUrl(input) {
+  let s = String(input || '').trim();
+  if (!s) return s;
+  if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
+  try {
+    const u = new URL(s);
+    let path = u.pathname.replace(/\/(wp-login\.php|wp-admin|wp-signup\.php|newlogin|login|signin)\b.*$/i, '');
+    path = path.replace(/\/+$/, '');
+    return u.origin + path;
+  } catch (e) {
+    return s.replace(/[?#].*$/, '').replace(/\/(wp-login\.php|wp-admin|newlogin|login).*$/i, '').replace(/\/+$/, '');
+  }
+}
+
 // Insert an <a> link into raw post HTML at the first plain-text occurrence of
 // `anchor`, never nesting inside an existing <a>…</a> and never if a link to the
 // same target already exists. Returns { html, changed, reason }.
@@ -255,6 +273,7 @@ const routes = {
     if (!creds?.baseUrl || !creds?.username || !creds?.appPassword) {
       throw new Error('Provide baseUrl, username, appPassword');
     }
+    creds.baseUrl = normalizeSiteUrl(creds.baseUrl);   // clean login/redirect URLs → site root
     const wp = clientFrom(creds);
     const me = await wp.whoAmI();                         // validates auth
     const det = await detectStack(wp, creds.baseUrl).catch(() => ({}));
