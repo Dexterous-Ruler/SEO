@@ -42,24 +42,31 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
   }
 
   // 3) For each source, fetch content + ask Claude for constrained suggestions.
+  const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
   const out = [];
+  let dropped = 0;
   for (const src of sources) {
-    let text = '';
+    let fullText = '';
     try {
       const res = await fetch(src.url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } });
-      text = stripHtml(await res.text()).slice(0, 4000);
+      fullText = stripHtml(await res.text());
     } catch (e) { continue; }
+    const hay = norm(fullText);
     // Candidates = everything except the source itself.
     const candidates = corpus.filter((c) => c.url !== src.url);
     const links = await claude.internalLinkSuggestions({
-      sourceUrl: src.url, sourceTitle: src.title, sourceText: text, candidates, siteId,
+      sourceUrl: src.url, sourceTitle: src.title, sourceText: fullText.slice(0, 4000), candidates, siteId,
     }).catch(() => []);
     for (const l of links) {
+      // CRITICAL: only keep anchors that VERBATIM appear on the source page, so
+      // Approve always inserts cleanly (no "anchor not found" errors). Claude often
+      // proposes the target's title as the anchor — that text isn't on a thin page.
+      if (!l.anchor || !hay.includes(norm(l.anchor))) { dropped++; continue; }
       const target = corpus.find((c) => c.url === l.targetUrl);
       out.push({ sourcePage: src.url, sourceTitle: src.title, anchor: l.anchor, targetUrl: l.targetUrl, targetTitle: target ? target.title : '', reason: l.reason });
     }
   }
-  return { corpusSize: corpus.length, analyzed: sources.length, count: out.length, suggestions: out };
+  return { corpusSize: corpus.length, analyzed: sources.length, count: out.length, droppedNotOnPage: dropped, suggestions: out };
 }
 
 export default { suggestForSite };
