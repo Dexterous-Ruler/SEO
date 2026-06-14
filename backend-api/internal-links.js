@@ -29,9 +29,10 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
     wp.list('pages', { perPage: 100, fields: 'id,title,link' }).catch(() => []),
     wp.list('posts', { perPage: 100, fields: 'id,title,link' }).catch(() => []),
   ]);
-  const corpus = [...pages, ...posts]
-    .map((r) => ({ id: r.id, title: cleanTitle(r.title?.rendered), url: r.link }))
-    .filter((r) => r.title && r.url);
+  const corpus = [
+    ...(Array.isArray(pages) ? pages : []).map((r) => ({ id: r.id, type: 'pages', title: cleanTitle(r.title?.rendered), url: r.link })),
+    ...(Array.isArray(posts) ? posts : []).map((r) => ({ id: r.id, type: 'posts', title: cleanTitle(r.title?.rendered), url: r.link })),
+  ].filter((r) => r.title && r.url);
   if (corpus.length < 3) return { error: 'Not enough published pages to build an internal-link map.', suggestions: [] };
 
   // 2) Pick source pages to analyze. Default: a spread across the corpus.
@@ -73,7 +74,7 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
       // inserter can't cross.
       if (!l.anchor || !normUnits.some((u) => u.includes(norm(l.anchor)))) { dropped++; continue; }
       const target = corpus.find((c) => c.url === l.targetUrl);
-      out.push({ sourcePage: src.url, sourceTitle: src.title, anchor: l.anchor, targetUrl: l.targetUrl, targetTitle: target ? target.title : '', reason: l.reason });
+      out.push({ sourcePage: src.url, sourceId: src.id, sourceType: src.type, sourceTitle: src.title, anchor: l.anchor, targetUrl: l.targetUrl, targetTitle: target ? target.title : '', reason: l.reason });
     }
   }
   return { corpusSize: corpus.length, analyzed: sources.length, count: out.length, droppedNotOnPage: dropped, suggestions: out };

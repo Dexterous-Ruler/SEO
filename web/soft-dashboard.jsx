@@ -1543,7 +1543,7 @@ function OptimizeScreen({ ctx }) {
     const siteHost=hostOf(s.url||s._rawUrl||""), srcHost=hostOf(l.sourcePage||"");
     if(siteHost && srcHost && siteHost!==srcHost){ const msg="That suggestion is for "+srcHost+", but you're on "+siteHost+" — re-run “Find internal links” for this site."; setApplied(a=>({...a,[k]:{status:"error",reason:msg}})); ctx.toast(msg,"clay"); return res({error:msg}); }
     setApplied(a=>({...a,[k]:{busy:true}}));
-    API.applyLink(s.id, l.sourcePage, l.anchor, l.targetUrl).then(r=>{
+    API.applyLink(s.id, l.sourcePage, l.anchor, l.targetUrl, l.sourceId, l.sourceType).then(r=>{
       setApplied(a=>({...a,[k]:{status:r.status||(r.error?"error":"?"), reason:r.reason||r.error}}));
       res(r||{});
     }).catch(e=>{ setApplied(a=>({...a,[k]:{status:"error", reason:e.message}})); res({error:e.message}); });
