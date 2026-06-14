@@ -1195,10 +1195,13 @@ const routes = {
     const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content`).catch(() => null);
     const raw = (post && post.content && (post.content.raw != null ? post.content.raw : '')) || '';
     const builder = (site && site.stack && site.stack.builder) || '';
-    if (/elementor|beaver|divi|bricks|wpbakery/i.test(builder) || raw.trim().length < 40) {
-      return { status: 'manual', reason: /elementor|beaver|divi|bricks|wpbakery/i.test(builder)
-        ? `This page is built with ${builder} — its content lives outside WordPress’s standard field, so the link must be added in the page-builder editor.`
-        : 'This page has no editable standard content (likely a page-builder layout) — add the link in your editor.' };
+    const isBuilder = /elementor|beaver|divi|bricks|wpbakery/i.test(builder);
+    if (isBuilder || raw.trim().length < 40) {
+      // We only reach here when the optimize plugin call failed (absent), so on a
+      // page-builder site the real fix is installing the plugin on THIS site.
+      return { status: 'manual', pluginMissing: true, reason: isBuilder
+        ? `The “seo-agent-optimize” plugin isn’t installed on this ${builder} site, so links can’t be pushed into the page-builder content. Install the v1.4.0 plugin (wp-content/mu-plugins/) on THIS site — ${site ? (site.name || '') : ''} — then re-run.`
+        : 'This page has no editable standard content and the optimize plugin isn’t installed here — install it on this site, or add the link in your editor.' };
     }
     const ins = insertAnchorLink(raw, anchor, targetUrl);
     if (!ins.changed) return { status: 'manual', reason: ins.reason };

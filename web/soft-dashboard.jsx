@@ -1521,7 +1521,12 @@ function OptimizeScreen({ ctx }) {
   const [media,setMedia] = useState(null);
   const [speed,setSpeed] = useState(null);
   const [speedStrat,setSpeedStrat] = useState("mobile");
-  useEffect(()=>{ setLinks(null); setExt(null); setApplied({}); setSchema(null); setFacts(null); setCss(null); setMedia(null); setSpeed(null); setErr(null); setPageUrl((s._rawUrl||s.url||"").replace(/\/$/,"")+"/"); },[s.id]);
+  const [plug,setPlug] = useState(null);   // optimize-plugin status for THIS site
+  const builder = (s.stack && s.stack.builder) || "";
+  const isBuilder = /elementor|beaver|divi|bricks|wpbakery/i.test(builder);
+  const pluginMissing = isBuilder && plug && plug.installed===false;
+  useEffect(()=>{ setLinks(null); setExt(null); setApplied({}); setSchema(null); setFacts(null); setCss(null); setMedia(null); setSpeed(null); setErr(null); setPlug(null); setPageUrl((s._rawUrl||s.url||"").replace(/\/$/,"")+"/"); },[s.id]);
+  useEffect(()=>{ if(live) API.optimizeStatus(s.id).then(r=>setPlug(r||{})).catch(()=>{}); },[s.id]);
   const copy = (t)=>{ try{ navigator.clipboard.writeText(t); ctx.toast("Copied to clipboard","teal"); }catch(e){ ctx.toast("Copy failed","gold"); } };
   // Apply schema/CSS straight to the live site (needs the seo-agent-optimize mu-plugin).
   const applySchemaLive = ()=>{ if(!schema){return;} setBusy("applySchema"); API.applySchema(s.id,{ url:pageUrl, jsonld:schema.json }).then(r=>{ if(r.error){ctx.toast("Schema: "+r.error,"clay");return;} ctx.toast("Schema applied to the live page ✓","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
@@ -1590,6 +1595,13 @@ function OptimizeScreen({ ctx }) {
             {TABS.map(([v,l,ic])=>(<button key={v} onClick={()=>setTab(v)} style={{ display:"flex", alignItems:"center", gap:6, padding:"8px 15px", fontSize:12.5, fontWeight:700, borderRadius:99, background:tab===v?"var(--surface)":"transparent", color:tab===v?"var(--t-700)":"var(--muted)", boxShadow:tab===v?"var(--neo-sm)":"none" }}><Icon name={ic} size={14} />{l}</button>))}
           </div>
           {err && <div style={{ marginBottom:14 }}><ErrBanner msg={err} onRetry={()=>setErr(null)} /></div>}
+
+          {pluginMissing && ["links","ext","schema","facts","css","images"].includes(tab) && (
+            <div style={{ marginBottom:14, padding:"12px 15px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", boxShadow:"var(--neo-in)" }}>
+              <div style={{ fontSize:13, fontWeight:800, color:"#7E5A14", marginBottom:4 }}>⚠ Optimize plugin not installed on {s.name}</div>
+              <div style={{ fontSize:12.5, color:"#7E5A14", lineHeight:1.5 }}>This is a <b>{builder}</b> site, so links / schema / CSS / WebP can only be pushed live with the <b>seo-agent-optimize</b> plugin — and it isn't installed here. Without it, every Approve will say “Add in editor.” Install <b>v1.4.0</b> (the <code>seo-agent-optimize.php</code> file) into <code>wp-content/mu-plugins/</code> on <b>{s.url}</b>, then reload. <i>(The plugin is per-site — installing it on one site doesn't cover the others.)</i></div>
+            </div>
+          )}
 
           {tab==="links" && (
             <div>
