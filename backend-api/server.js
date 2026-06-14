@@ -1264,9 +1264,14 @@ const routes = {
     try {
       const { creds } = await resolveCreds(body);
       const wp = clientFrom(creds);
+      // Reachability probe — distinguishes "WP connection broken" (bad creds/URL)
+      // from "plugin not installed". Both otherwise look like installed:false.
+      let reachable = false, connErr = null;
+      try { const me = await wp.request('/users/me?_fields=id'); reachable = !!(me && me.id); }
+      catch (e) { connErr = String((e && e.message) || e).slice(0, 180); }
       const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/optimize-selftest`).catch(() => null);
-      return { installed: !!(r && r.ok), features: (r && r.features) || [] };
-    } catch (e) { return { installed: false, error: e.message }; }
+      return { installed: !!(r && r.ok), version: (r && r.version) || null, features: (r && r.features) || [], reachable, error: reachable ? null : (connErr || 'WordPress REST not reachable with the stored credentials — reconnect this site.') };
+    } catch (e) { return { installed: false, reachable: false, error: e.message }; }
   },
   // Auto-install + activate a server-level WebP plugin (Converter for Media) via
   // the WP plugins REST API — the right tool for images (handles all paths, CSS

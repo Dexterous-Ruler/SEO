@@ -1524,7 +1524,10 @@ function OptimizeScreen({ ctx }) {
   const [plug,setPlug] = useState(null);   // optimize-plugin status for THIS site
   const builder = (s.stack && s.stack.builder) || "";
   const isBuilder = /elementor|beaver|divi|bricks|wpbakery/i.test(builder);
-  const pluginMissing = isBuilder && plug && plug.installed===false;
+  const connBroken = plug && plug.reachable===false;
+  const pluginOutdated = plug && plug.installed && plug.version && /^1\.[0-3]\./.test(String(plug.version));
+  const pluginNotInstalled = isBuilder && plug && plug.installed===false && !connBroken;
+  const pluginIssue = connBroken || pluginNotInstalled || pluginOutdated;
   useEffect(()=>{ setLinks(null); setExt(null); setApplied({}); setSchema(null); setFacts(null); setCss(null); setMedia(null); setSpeed(null); setErr(null); setPlug(null); setPageUrl((s._rawUrl||s.url||"").replace(/\/$/,"")+"/"); },[s.id]);
   useEffect(()=>{ if(live) API.optimizeStatus(s.id).then(r=>setPlug(r||{})).catch(()=>{}); },[s.id]);
   const copy = (t)=>{ try{ navigator.clipboard.writeText(t); ctx.toast("Copied to clipboard","teal"); }catch(e){ ctx.toast("Copy failed","gold"); } };
@@ -1601,10 +1604,18 @@ function OptimizeScreen({ ctx }) {
           </div>
           {err && <div style={{ marginBottom:14 }}><ErrBanner msg={err} onRetry={()=>setErr(null)} /></div>}
 
-          {pluginMissing && ["links","ext","schema","facts","css","images"].includes(tab) && (
+          {pluginIssue && ["links","ext","schema","facts","css","images"].includes(tab) && (
             <div style={{ marginBottom:14, padding:"12px 15px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", boxShadow:"var(--neo-in)" }}>
-              <div style={{ fontSize:13, fontWeight:800, color:"#7E5A14", marginBottom:4 }}>⚠ Optimize plugin not installed on {s.name}</div>
-              <div style={{ fontSize:12.5, color:"#7E5A14", lineHeight:1.5 }}>This is a <b>{builder}</b> site, so links / schema / CSS / WebP can only be pushed live with the <b>seo-agent-optimize</b> plugin — and it isn't installed here. Without it, every Approve will say “Add in editor.” Install <b>v1.4.0</b> (the <code>seo-agent-optimize.php</code> file) into <code>wp-content/mu-plugins/</code> on <b>{s.url}</b>, then reload. <i>(The plugin is per-site — installing it on one site doesn't cover the others.)</i></div>
+              {connBroken ? (<>
+                <div style={{ fontSize:13, fontWeight:800, color:"#7E5A14", marginBottom:4 }}>⚠ Can’t reach {s.name}’s WordPress</div>
+                <div style={{ fontSize:12.5, color:"#7E5A14", lineHeight:1.5 }}>The stored credentials for <b>{s.url}</b> aren’t working, so nothing (including the plugin check) can run here. <b>Reconnect this site</b> (Sites → this site → re-enter a WordPress application password). {plug.error?<span style={{ opacity:.8 }}>· {plug.error}</span>:null}</div>
+              </>) : pluginOutdated ? (<>
+                <div style={{ fontSize:13, fontWeight:800, color:"#7E5A14", marginBottom:4 }}>⚠ Optimize plugin is outdated on {s.name} (v{plug.version})</div>
+                <div style={{ fontSize:12.5, color:"#7E5A14", lineHeight:1.5 }}>Update to <b>v1.4.0</b> for reliable link insertion (whole-field anchors, entity handling). Replace <code>seo-agent-optimize.php</code> in <code>wp-content/mu-plugins/</code> on <b>{s.url}</b>, then reload.</div>
+              </>) : (<>
+                <div style={{ fontSize:13, fontWeight:800, color:"#7E5A14", marginBottom:4 }}>⚠ Optimize plugin not installed on {s.name}</div>
+                <div style={{ fontSize:12.5, color:"#7E5A14", lineHeight:1.5 }}>This is a <b>{builder}</b> site, so links / schema / CSS / WebP can only be pushed live with the <b>seo-agent-optimize</b> plugin — and it isn’t installed here. Without it, every Approve says “Add in editor.” Install <b>v1.4.0</b> into <code>wp-content/mu-plugins/</code> on <b>{s.url}</b>, then reload. <i>(Per-site — installing on one doesn’t cover the others.)</i></div>
+              </>)}
             </div>
           )}
 
