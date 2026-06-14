@@ -85,6 +85,18 @@ async function note(siteId, text, ok = true) {
   await db.logActivity({ site_id: siteId, type: ok ? 'automation' : 'failed', actor: 'Automation', icon: ok ? 'check' : 'alert', text, meta: 'scheduled' }).catch(() => {});
 }
 
+// Throttled alert: post this `kind` of recurring alert at most once a week per
+// site, so a persistent condition (e.g. Indexing API not enabled, content decay)
+// doesn't spam the bell every single daily run. Persisted via scheduler_runs.
+const ALERT_THROTTLE = 7 * DAY;
+async function alertWeekly(siteId, kind, text, ok = false) {
+  const key = '_alert:' + kind;
+  const last = await getLastRun(siteId, key);
+  if (Date.now() - last < ALERT_THROTTLE) return;
+  await note(siteId, text, ok);
+  await mark(siteId, key);
+}
+
 // ── Job: auto-index recent posts/pages via the Indexing API ─────────────────
 async function jobAutoIndex(site) {
   const saStr = await db.getGscSa(site.id).catch(() => null);
@@ -103,10 +115,9 @@ async function jobAutoIndex(site) {
   try {
     const r = await gscIndex.submitUrls(JSON.parse(saStr), urls, { type: 'URL_UPDATED' });
     if (r.succeeded) await note(site.id, `Auto-indexed ${r.succeeded}/${r.submitted} URLs with Google`);
-    else if (r.failed) await note(site.id, `Auto-index failed for ${r.failed} URL(s) — enable the Indexing API in Google Cloud & verify ownership`, false);
+    else if (r.failed) await alertWeekly(site.id, 'autoindex-setup', `Auto-index needs one-time setup: enable the Indexing API in Google Cloud, and add the connected Google account as an Owner of this property in Search Console. (${r.failed} URL(s) pending — this reminder shows weekly until fixed.)`);
   } catch (e) {
-    // Surface setup problems (Indexing API disabled / not owner) once per daily run.
-    await note(site.id, 'Auto-index could not run — ' + String(e.message || e).slice(0, 140), false);
+    await alertWeekly(site.id, 'autoindex-setup', 'Auto-index needs setup — ' + String(e.message || e).slice(0, 120) + ' (enable the Indexing API + verify ownership; weekly reminder).');
   }
 }
 
@@ -115,9 +126,9 @@ async function jobGscHealth(site) {
   const saStr = await db.getGscSa(site.id).catch(() => null);
   if (!saStr || !site.gsc_property) return;
   const sa = JSON.parse(saStr);
-  try { const h = await gscIndex.indexHealth(sa, site.gsc_property, { limit: 40 }); if (h.notIndexed && h.notIndexed.length) await note(site.id, `${h.notIndexed.length} top page(s) not indexed by Google`, false); } catch (e) {}
-  try { const d = await gscIndex.rankingDrops(sa, site.gsc_property, { windowDays: 28 }); if (d.count) await note(site.id, `${d.count} keyword(s) dropped in rankings — refresh candidates`, false); } catch (e) {}
-  try { const c = await gsc.contentDecay(sa, site.gsc_property, { windowDays: 28 }); if (c.count) await note(site.id, `${c.count} page(s) decaying (${c.totalClicksLost} clicks lost) — refresh candidates`, false); } catch (e) {}
+  try { const h = await gscIndex.indexHealth(sa, site.gsc_property, { limit: 40 }); if (h.notIndexed && h.notIndexed.length) await alertWeekly(site.id, 'notindexed', `${h.notIndexed.length} top page(s) not indexed by Google`); } catch (e) {}
+  try { const d = await gscIndex.rankingDrops(sa, site.gsc_property, { windowDays: 28 }); if (d.count) await alertWeekly(site.id, 'rankdrops', `${d.count} keyword(s) dropped in rankings — refresh candidates`); } catch (e) {}
+  try { const c = await gsc.contentDecay(sa, site.gsc_property, { windowDays: 28 }); if (c.count) await alertWeekly(site.id, 'decay', `${c.count} page(s) decaying (${c.totalClicksLost} clicks lost) — refresh candidates`); } catch (e) {}
 }
 
 // ── Job: push new content-gap keywords to Airtable (weekly, cost-gated) ─────
