@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.4.0
+ * Version:     1.5.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -158,16 +158,12 @@ class SEO_Agent_Optimize {
                 $href = trim((string) ($p['target_url'] ?? ''));
                 if (!$id || $anchor === '' || $href === '') return new WP_Error('bad', 'post_id, anchor, target_url required', ['status' => 400]);
 
-                // 1) Standard content (Classic/Gutenberg).
-                $post = get_post($id);
-                if ($post && trim((string) $post->post_content) !== '') {
-                    list($nc, $changed, $why) = seoagent_insert_into_html($post->post_content, $anchor, $href);
-                    if ($changed) { wp_update_post(['ID' => $id, 'post_content' => $nc]); $this->purge(); return ['ok' => true, 'mode' => 'content', 'post_id' => $id]; }
-                    if ($why === 'exists') return ['ok' => true, 'mode' => 'exists', 'post_id' => $id];
-                }
-                // 2) Elementor data.
+                // CRITICAL: an Elementor page RENDERS from _elementor_data, not
+                // post_content (which is just a hidden fallback copy). So if the page
+                // has Elementor data, edit THAT — editing post_content would "verify"
+                // but never appear on the live page.
                 $data = get_post_meta($id, '_elementor_data', true);
-                if ($data) {
+                if (!empty($data)) {
                     $arr = is_string($data) ? json_decode($data, true) : $data;
                     if (is_array($arr)) {
                         $done = false;
@@ -180,8 +176,16 @@ class SEO_Agent_Optimize {
                             return ['ok' => true, 'mode' => 'elementor', 'post_id' => $id];
                         }
                     }
+                    return ['ok' => false, 'mode' => 'not_found', 'reason' => 'Anchor text not found in this page’s Elementor widgets (it may be in a button/linked element, or a global header/footer).'];
                 }
-                return ['ok' => false, 'mode' => 'not_found', 'reason' => 'Anchor text not found in the page content or Elementor widgets'];
+                // Classic / Gutenberg page → post_content is what renders.
+                $post = get_post($id);
+                if ($post && trim((string) $post->post_content) !== '') {
+                    list($nc, $changed, $why) = seoagent_insert_into_html($post->post_content, $anchor, $href);
+                    if ($changed) { wp_update_post(['ID' => $id, 'post_content' => $nc]); $this->purge(); return ['ok' => true, 'mode' => 'content', 'post_id' => $id]; }
+                    if ($why === 'exists') return ['ok' => true, 'mode' => 'exists', 'post_id' => $id];
+                }
+                return ['ok' => false, 'mode' => 'not_found', 'reason' => 'Anchor text not found in the page content.'];
             },
         ]);
 
@@ -198,11 +202,12 @@ class SEO_Agent_Optimize {
                 // the inserter works (per field, per non-anchor text run). The agent must
                 // validate an anchor against a SINGLE unit, so a suggestion shown can
                 // always be inserted (no validate-pass/insert-fail).
+                // Match the inserter: Elementor pages render from _elementor_data, so
+                // collect units from there; classic pages from post_content.
                 $units = [];
-                $post = get_post($id);
-                if ($post && trim((string) $post->post_content) !== '') seoagent_text_units($post->post_content, $units);
                 $data = get_post_meta($id, '_elementor_data', true);
-                if ($data) { $arr = is_string($data) ? json_decode($data, true) : $data; if (is_array($arr)) seoagent_collect_units($arr, $units); }
+                if (!empty($data)) { $arr = is_string($data) ? json_decode($data, true) : $data; if (is_array($arr)) seoagent_collect_units($arr, $units); }
+                else { $post = get_post($id); if ($post && trim((string) $post->post_content) !== '') seoagent_text_units($post->post_content, $units); }
                 $units = array_values(array_unique(array_filter($units)));
                 return ['ok' => true, 'post_id' => $id, 'builder' => ($data ? 'elementor' : 'classic'), 'text' => implode(' ', $units), 'units' => $units];
             },
@@ -212,7 +217,7 @@ class SEO_Agent_Optimize {
             'methods'  => 'GET',
             'permission_callback' => $perm,
             'callback' => function () {
-                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text'], 'version' => '1.4.0'];
+                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text'], 'version' => '1.5.0'];
             },
         ]);
     }
