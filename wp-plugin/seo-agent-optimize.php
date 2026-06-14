@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.2.0
+ * Version:     1.3.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -185,11 +185,30 @@ class SEO_Agent_Optimize {
             },
         ]);
 
+        // Return a page's EDITABLE text (post_content + Elementor widget text) so
+        // the agent only suggests link anchors that actually live in this page's
+        // own content — not in global nav/footer/CTA blocks it can't edit.
+        register_rest_route('seoagent/v1', '/page-text', [
+            'methods'  => 'GET',
+            'permission_callback' => $perm,
+            'callback' => function ($req) {
+                $id = (int) $req->get_param('post_id');
+                if (!$id) return new WP_Error('no_id', 'post_id required', ['status' => 400]);
+                $parts = [];
+                $post = get_post($id);
+                if ($post && trim((string) $post->post_content) !== '') $parts[] = wp_strip_all_tags($post->post_content);
+                $data = get_post_meta($id, '_elementor_data', true);
+                if ($data) { $arr = is_string($data) ? json_decode($data, true) : $data; if (is_array($arr)) seoagent_collect_elementor_text($arr, $parts); }
+                $text = preg_replace('/\s+/', ' ', trim(implode(' ', $parts)));
+                return ['ok' => true, 'post_id' => $id, 'builder' => ($data ? 'elementor' : 'classic'), 'text' => $text];
+            },
+        ]);
+
         register_rest_route('seoagent/v1', '/optimize-selftest', [
             'methods'  => 'GET',
             'permission_callback' => $perm,
             'callback' => function () {
-                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link'], 'version' => '1.2.0'];
+                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text'], 'version' => '1.3.0'];
             },
         ]);
     }
@@ -232,6 +251,22 @@ function seoagent_walk_elementor(&$els, $anchor, $href, &$done) {
         if (!$done && !empty($el['elements']) && is_array($el['elements'])) {
             seoagent_walk_elementor($el['elements'], $anchor, $href, $done);
         }
+    }
+}
+
+/* Recursively collect the visible text of Elementor widgets (the same fields
+   /insert-link can edit), so the agent validates anchors against editable content. */
+function seoagent_collect_elementor_text($els, &$parts) {
+    if (!is_array($els)) return;
+    foreach ($els as $el) {
+        if (!empty($el['settings']) && is_array($el['settings'])) {
+            foreach (['editor', 'title', 'text', 'description', 'content', 'tab_content', 'item_description', 'description_text'] as $k) {
+                if (isset($el['settings'][$k]) && is_string($el['settings'][$k]) && $el['settings'][$k] !== '') {
+                    $parts[] = wp_strip_all_tags($el['settings'][$k]);
+                }
+            }
+        }
+        if (!empty($el['elements']) && is_array($el['elements'])) seoagent_collect_elementor_text($el['elements'], $parts);
     }
 }
 
