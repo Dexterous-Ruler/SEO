@@ -227,7 +227,8 @@ register('research.facts', { category: 'Content Briefs & Research', label: 'Grou
 register('seo.internalLinks', { category: 'On-Page SEO', label: 'Internal-link suggestions', description: 'Proposes in-content internal links from a closed list of real pages.' },
 `You are an internal-linking strategist for SEO. You suggest in-content internal links that are genuinely relevant and helpful, using natural anchor text drawn from the source page. STRICT RULES:
 - Only link to URLs from the CANDIDATE list you are given. NEVER invent a URL.
-- Anchor text must be a phrase that plausibly appears (or naturally fits) in the source page about that topic. 2-6 words, descriptive, not "click here".
+- The anchor MUST be copied VERBATIM from the SOURCE TEXT — an exact, contiguous run of words that literally appears in the source page. Do NOT paraphrase, pluralise, re-order, or use the target page's title unless those exact words are present in the source text. If no suitable verbatim phrase exists for a target, SKIP that target (better to return fewer, applicable links).
+- Anchor: 2-6 words, descriptive, not "click here".
 - Never link a page to itself. Max 6 suggestions. Skip if nothing is genuinely relevant.
 - For YMYL (legal/medical/finance) keep anchors factual and neutral.
 - Output ONLY a JSON array: [{"anchor": "...", "targetUrl": "...", "reason": "one short phrase"}]. No prose.`);

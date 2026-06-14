@@ -1076,7 +1076,11 @@ const routes = {
       } catch (e) {}
       const niche = (site && site.niche) || '';
       const arr = await claude.externalLinkSuggestions({ url, title: title.trim(), text, niche, siteId: body.siteId });
-      return { sourcePage: url, count: arr.length, suggestions: arr };
+      // Keep only anchors that VERBATIM appear on the page, so Approve always inserts.
+      const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const hay = norm(text);
+      const applicable = (arr || []).filter((l) => l.anchor && hay.includes(norm(l.anchor)));
+      return { sourcePage: url, count: applicable.length, suggestions: applicable };
     } catch (e) { return { error: 'External-link analysis failed: ' + e.message }; }
   },
 
