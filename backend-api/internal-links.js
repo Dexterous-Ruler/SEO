@@ -26,11 +26,11 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
 
   // 1) Build the candidate corpus from real published pages + posts.
   const [pages, posts] = await Promise.all([
-    wp.list('pages', { perPage: 100, fields: 'title,link' }).catch(() => []),
-    wp.list('posts', { perPage: 100, fields: 'title,link' }).catch(() => []),
+    wp.list('pages', { perPage: 100, fields: 'id,title,link' }).catch(() => []),
+    wp.list('posts', { perPage: 100, fields: 'id,title,link' }).catch(() => []),
   ]);
   const corpus = [...pages, ...posts]
-    .map((r) => ({ title: cleanTitle(r.title?.rendered), url: r.link }))
+    .map((r) => ({ id: r.id, title: cleanTitle(r.title?.rendered), url: r.link }))
     .filter((r) => r.title && r.url);
   if (corpus.length < 3) return { error: 'Not enough published pages to build an internal-link map.', suggestions: [] };
 
@@ -41,16 +41,22 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
     sources = sources.filter((_, i) => i % stride === 0).slice(0, maxSources);
   }
 
-  // 3) For each source, fetch content + ask Claude for constrained suggestions.
+  // 3) For each source, get its EDITABLE text (post body + Elementor widgets via
+  // the plugin), so anchors are validated against what we can actually edit — not
+  // the rendered page (which includes global nav/footer/CTA blocks we can't touch).
+  // Falls back to the rendered page when the optimize plugin isn't installed.
   const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  async function editableText(src) {
+    if (src.id) {
+      try { const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/page-text?post_id=${src.id}`); if (r && r.ok && typeof r.text === 'string' && r.text.length > 20) return r.text; } catch (e) {}
+    }
+    try { const res = await fetch(src.url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } }); return stripHtml(await res.text()); } catch (e) { return ''; }
+  }
   const out = [];
   let dropped = 0;
   for (const src of sources) {
-    let fullText = '';
-    try {
-      const res = await fetch(src.url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } });
-      fullText = stripHtml(await res.text());
-    } catch (e) { continue; }
+    const fullText = await editableText(src);
+    if (!fullText || fullText.length < 20) continue;
     const hay = norm(fullText);
     // Candidates = everything except the source itself.
     const candidates = corpus.filter((c) => c.url !== src.url);
