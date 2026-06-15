@@ -209,6 +209,17 @@ function insertAnchorLink(html, anchor, href) {
   return { html, changed: false, reason: 'The anchor text was not found in the page’s editable text (it may live in a page-builder widget).' };
 }
 
+// Sentinel's outbound (egress) IP — what a site's firewall sees. Cached 1h.
+// Needed so users can allowlist us in Wordfence/Sucuri/etc.
+let _egressIp = { v: null, exp: 0 };
+async function serverEgressIp() {
+  if (_egressIp.v && _egressIp.exp > Date.now()) return _egressIp.v;
+  for (const u of ['https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com']) {
+    try { const r = await fetch(u); if (r.ok) { const ip = (await r.text()).trim(); if (/^[0-9a-f:.]{3,45}$/i.test(ip)) { _egressIp = { v: ip, exp: Date.now() + 3600000 }; return ip; } } } catch (e) {}
+  }
+  return null;
+}
+
 // Representative sample inputs for the "Test this prompt" preview. Each runs the
 // prompt as the SYSTEM with this user message, on the right engine.
 const PROMPT_SAMPLES = {
@@ -232,6 +243,9 @@ const PROMPT_SAMPLES = {
 const routes = {
   // Health check
   'GET /health': async () => ({ ok: true, engine: 'wp-seo-agent', version: '2.0' }),
+  // Sentinel's outbound IP — to allowlist in a site's security plugin/firewall.
+  'GET /server-ip': async () => ({ ip: await serverEgressIp() }),
+  'POST /server-ip': async () => ({ ip: await serverEgressIp() }),
   // Observability: live load, provider limiter/breaker state, cache hit rates.
   'GET /status': async () => ({ ok: true, version: '2.0', uptimeSec: Math.round(process.uptime()), inFlight: INFLIGHT, infra: infraStats(), jobs: jobs.stats() }),
 
@@ -256,7 +270,19 @@ const routes = {
       throw new Error('Provide baseUrl, username, appPassword');
     }
     const wp = clientFrom(creds);
-    const me = await wp.whoAmI();                         // validates auth
+    let me;
+    try { me = await wp.whoAmI(); }                       // validates auth
+    catch (e) {
+      const msg = String((e && e.message) || e);
+      if (/blocked|security reasons|firewall|cloudflare|\b403\b|forbidden/i.test(msg)) {
+        const ip = await serverEgressIp().catch(() => null);
+        throw new Error(`A security plugin/firewall on this site (e.g. Wordfence or Sucuri) is BLOCKING Sentinel’s server${ip ? ` — our IP is ${ip}` : ''}. It was likely auto-blocked by earlier failed-login attempts. Fix: in Wordfence → Tools → Live Traffic / Blocking, remove the block, then All Options → "Allowlisted IP addresses" add ${ip || 'our IP'}. (Or briefly disable the firewall.) Then reconnect.`);
+      }
+      if (/401|not currently logged in|rest_not_logged_in|incorrect password|invalid/i.test(msg)) {
+        throw new Error('WordPress rejected the login (401). Create a fresh Application Password on this site (Users → Profile → Application Passwords) and reconnect — use the WordPress username, not the email, if the email keeps failing.');
+      }
+      throw new Error('Could not connect: ' + msg.slice(0, 200));
+    }
     const det = await detectStack(wp, creds.baseUrl).catch(() => ({}));
     const host = creds.baseUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
     const name = body.name || host;
