@@ -2540,7 +2540,15 @@ function GscScreen({ ctx }) {
 
       {!live && <SoftCard hover={false}><div style={{ padding:"12px 4px", color:"var(--muted)", fontSize:13.5 }}>Connect a live WordPress site first.</div></SoftCard>}
 
-      {live && err && <div style={{ marginBottom:16 }}><ErrBanner msg={err.msg} noUnits={false} onRetry={()=>setErr(null)} /></div>}
+      {live && err && <div style={{ marginBottom:16 }}>
+        <ErrBanner msg={err.msg} noUnits={false} onRetry={()=>setErr(null)} />
+        {(err.needsConnect || /revoked|expired|reconnect|token|connection/i.test(err.msg||"")) && (
+          <div style={{ marginTop:9, display:"flex", alignItems:"center", gap:11, flexWrap:"wrap" }}>
+            <NeoButton kind="primary" size="sm" icon="search" onClick={connectGoogle}>Reconnect with Google</NeoButton>
+            <span style={{ fontSize:12, color:"var(--muted)" }}>One reconnect re-links <b>all</b> your sites (each keeps its own property).</span>
+          </div>
+        )}
+      </div>}
 
       {/* CONNECT step */}
       {live && !connected && (

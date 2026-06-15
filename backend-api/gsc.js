@@ -84,7 +84,7 @@ async function oauthAccessToken(creds) {
     }),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error('Google token refresh failed: ' + (data.error_description || data.error || res.status) + ' — the connection may have been revoked; reconnect.');
+  if (!res.ok) { const e = new Error('Google connection expired — reconnect once on any site (it covers all your sites). Tip: if it keeps expiring weekly, your Google OAuth consent screen is in "Testing" mode (tokens die after 7 days) — set it to "In production" in Google Cloud to make it permanent.'); e.code = 'GSC_REVOKED'; throw e; }
   return data.access_token;
 }
 
