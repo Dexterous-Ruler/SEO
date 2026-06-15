@@ -170,6 +170,7 @@
     generateSchema(siteId, page, schemaConfig, faqs) { return engine("/generate-schema", { siteId, page, schemaConfig, faqs }); },
     // Live "apply" layer (needs the seo-agent-optimize mu-plugin)
     optimizeStatus(siteId) { return engine("/optimize-status", { siteId }); },
+    siteHealth(siteId, url) { return engine("/site-health", { siteId, url }); },
     installWebpPlugin(siteId) { return engine("/install-webp-plugin", { siteId }); },
     applySchema(siteId, opts) { return engine("/apply-schema", Object.assign({ siteId }, opts || {})); },
     applyCss(siteId, css) { return engine("/apply-css", { siteId, css }); },
