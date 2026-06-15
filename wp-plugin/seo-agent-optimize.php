@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.5.0
+ * Version:     1.6.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -189,6 +189,51 @@ class SEO_Agent_Optimize {
             },
         ]);
 
+        // Content-decay REFRESH: prepend (or replace, or remove) a marked
+        // "freshness" block at the TOP of the page. Elementor-aware — on a builder
+        // page it inserts an HTML widget as the first section (which actually
+        // renders), exactly like /insert-link edits _elementor_data not post_content.
+        register_rest_route('seoagent/v1', '/refresh-block', [
+            'methods'  => 'POST',
+            'permission_callback' => $perm,
+            'callback' => function ($req) {
+                $p = $req->get_json_params();
+                $id = (int) ($p['post_id'] ?? 0);
+                if (!$id) return new WP_Error('bad', 'post_id required', ['status' => 400]);
+                $open = (string) ($p['open'] ?? '<!--seoagent-refresh-->');
+                $close = (string) ($p['close'] ?? '<!--/seoagent-refresh-->');
+                $remove = !empty($p['remove']);
+                $marked = $open . "\n" . ((string) ($p['block_html'] ?? '')) . "\n" . $close;
+                $re = '#<!--seoagent-refresh-->.*?<!--/seoagent-refresh-->\s*#s';
+
+                // Elementor page → edit _elementor_data (that's what renders).
+                $data = get_post_meta($id, '_elementor_data', true);
+                if (!empty($data)) {
+                    $arr = is_string($data) ? json_decode($data, true) : $data;
+                    if (!is_array($arr)) $arr = [];
+                    $before = count($arr);
+                    // Drop any prior refresh section (makes apply idempotent + powers undo).
+                    $arr = array_values(array_filter($arr, function ($el) { return strpos(wp_json_encode($el), 'seoagent-refresh') === false; }));
+                    $replaced = count($arr) !== $before;
+                    if (!$remove) array_unshift($arr, seoagent_refresh_section($marked));
+                    update_post_meta($id, '_elementor_data', wp_slash(wp_json_encode($arr)));
+                    delete_post_meta($id, '_elementor_css');
+                    if (class_exists('\\Elementor\\Plugin')) { try { \Elementor\Plugin::$instance->files_manager->clear_cache(); } catch (\Throwable $e) {} }
+                    $this->purge();
+                    return ['ok' => true, 'mode' => 'elementor', 'post_id' => $id, 'replaced' => $replaced, 'removed' => $remove];
+                }
+                // Classic / Gutenberg → post_content is what renders.
+                $post = get_post($id);
+                $content = $post ? (string) $post->post_content : '';
+                $had = (bool) preg_match($re, $content);
+                $content = preg_replace($re, '', $content);
+                if (!$remove) $content = $marked . "\n" . $content;
+                wp_update_post(['ID' => $id, 'post_content' => $content]);
+                $this->purge();
+                return ['ok' => true, 'mode' => 'content', 'post_id' => $id, 'replaced' => $had, 'removed' => $remove];
+            },
+        ]);
+
         // Return a page's EDITABLE text (post_content + Elementor widget text) so
         // the agent only suggests link anchors that actually live in this page's
         // own content — not in global nav/footer/CTA blocks it can't edit.
@@ -217,7 +262,7 @@ class SEO_Agent_Optimize {
             'methods'  => 'GET',
             'permission_callback' => $perm,
             'callback' => function () {
-                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text'], 'version' => '1.5.0'];
+                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block'], 'version' => '1.6.0'];
             },
         ]);
     }
@@ -229,6 +274,24 @@ class SEO_Agent_Optimize {
 // Build the anchor match pattern: whitespace/&nbsp;-tolerant, entity-tolerant
 // (so a decoded anchor "R&D" matches raw "R&amp;D"), boundary via lookaround so a
 // WHOLE-field anchor (heading/CTA at end-of-string) still matches.
+// Build a top-level Elementor section holding a single HTML widget — used to
+// render the content-decay "freshness" block on builder pages. IDs are random
+// 7-char hex (Elementor's convention); settings={} so it inherits the theme.
+function seoagent_refresh_section($html) {
+    $rid = function () { return substr(md5(uniqid('', true)), 0, 7); };
+    return [
+        'id' => $rid(), 'elType' => 'section', 'settings' => new stdClass(), 'isInner' => false,
+        'elements' => [[
+            'id' => $rid(), 'elType' => 'column', 'isInner' => false,
+            'settings' => ['_column_size' => 100, '_inline_size' => null],
+            'elements' => [[
+                'id' => $rid(), 'elType' => 'widget', 'widgetType' => 'html',
+                'settings' => ['html' => $html], 'elements' => [],
+            ]],
+        ]],
+    ];
+}
+
 function seoagent_anchor_regex($anchor) {
     $q = preg_quote($anchor, '/');
     $q = str_replace(' ', '(?:\\s|&nbsp;|&#0*160;)+', $q);

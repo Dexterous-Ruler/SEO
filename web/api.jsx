@@ -180,6 +180,8 @@
     speedTest(url, strategy) { return engine("/speed-test", { url, strategy }); },
     contentDecay(siteId, windowDays) { return engine("/content-decay", { siteId, windowDays }); },
     contentDecayBrief(page) { return engine("/content-decay-brief", { page }); },
+    contentRefresh(siteId, page, apply) { return engine("/content-refresh", { siteId, page, apply: !!apply }); },
+    contentRefreshUndo(siteId, page) { return engine("/content-refresh-undo", { siteId, page }); },
     async listGeoRuns(siteId) { return sbSelect("geo_runs", "site_id=eq." + siteId + "&select=*&order=created_at.desc&limit=20"); },
     // Per-site setup completeness (site-switcher badge)
     sitesSetup() { return engine("/sites-setup", {}); },
