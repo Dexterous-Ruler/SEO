@@ -1522,14 +1522,20 @@ function OptimizeScreen({ ctx }) {
   const [speed,setSpeed] = useState(null);
   const [speedStrat,setSpeedStrat] = useState("mobile");
   const [plug,setPlug] = useState(null);   // optimize-plugin status for THIS site
+  const [health,setHealth] = useState(null); // what actually renders the LIVE site
   const builder = (s.stack && s.stack.builder) || "";
   const isBuilder = /elementor|beaver|divi|bricks|wpbakery/i.test(builder);
   const connBroken = plug && plug.reachable===false;
   const pluginOutdated = plug && plug.installed && plug.version && /^1\.[0-3]\./.test(String(plug.version));
   const pluginNotInstalled = isBuilder && plug && plug.installed===false && !connBroken;
-  const pluginIssue = connBroken || pluginNotInstalled || pluginOutdated;
-  useEffect(()=>{ setLinks(null); setExt(null); setApplied({}); setSchema(null); setFacts(null); setCss(null); setMedia(null); setSpeed(null); setErr(null); setPlug(null); setPageUrl((s._rawUrl||s.url||"").replace(/\/$/,"")+"/"); },[s.id]);
+  // CRITICAL: the live domain is served by another CMS (Drupal/Wix) or parked, so
+  // WordPress edits won't appear on it. This supersedes the plugin banner. Only a
+  // POSITIVE non-WordPress verdict triggers it (Unknown/Blocked never do).
+  const cmsMismatch = health && health.nonWordPress===true;
+  const pluginIssue = !cmsMismatch && (connBroken || pluginNotInstalled || pluginOutdated);
+  useEffect(()=>{ setLinks(null); setExt(null); setApplied({}); setSchema(null); setFacts(null); setCss(null); setMedia(null); setSpeed(null); setErr(null); setPlug(null); setHealth(null); setPageUrl((s._rawUrl||s.url||"").replace(/\/$/,"")+"/"); },[s.id]);
   useEffect(()=>{ if(live) API.optimizeStatus(s.id).then(r=>setPlug(r||{})).catch(()=>{}); },[s.id]);
+  useEffect(()=>{ if(live) API.siteHealth(s.id).then(r=>setHealth(r||{})).catch(()=>{}); },[s.id]);
   const copy = (t)=>{ try{ navigator.clipboard.writeText(t); ctx.toast("Copied to clipboard","teal"); }catch(e){ ctx.toast("Copy failed","gold"); } };
   // Apply schema/CSS straight to the live site (needs the seo-agent-optimize mu-plugin).
   const applySchemaLive = ()=>{ if(!schema){return;} setBusy("applySchema"); API.applySchema(s.id,{ url:pageUrl, jsonld:schema.json }).then(r=>{ if(r.error){ctx.toast("Schema: "+r.error,"clay");return;} ctx.toast("Schema applied to the live page ✓","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
@@ -1547,19 +1553,21 @@ function OptimizeScreen({ ctx }) {
     if(siteHost && srcHost && siteHost!==srcHost){ const msg="That suggestion is for "+srcHost+", but you're on "+siteHost+" — re-run “Find internal links” for this site."; setApplied(a=>({...a,[k]:{status:"error",reason:msg}})); ctx.toast(msg,"clay"); return res({error:msg}); }
     setApplied(a=>({...a,[k]:{busy:true}}));
     API.applyLink(s.id, l.sourcePage, l.anchor, l.targetUrl, l.sourceId, l.sourceType).then(r=>{
-      setApplied(a=>({...a,[k]:{status:r.status||(r.error?"error":"?"), reason:r.reason||r.error}}));
+      setApplied(a=>({...a,[k]:{status:r.status||(r.error?"error":"?"), reason:r.reason||r.error||r.liveWarning, notOnLive:r.notOnLive, liveCms:r.liveCms}}));
       res(r||{});
     }).catch(e=>{ setApplied(a=>({...a,[k]:{status:"error", reason:e.message}})); res({error:e.message}); });
   });
   const applyAll = (sugs)=>{
     if(!sugs||!sugs.length) return;
     ctx.toast("Pushing "+sugs.length+" link(s) to the live site…","teal");
-    (async()=>{ let ok=0,manual=0,blocked=0; for(const l of sugs){ const r=await applyOne(l); if(r.status==="verified")ok++; else if(r.status==="manual")manual++; else if(r.status==="blocked")blocked++; }
-      ctx.toast(blocked? "Site is read-only — arm writes on the Admin screen first." : (ok+" link(s) applied"+(manual?" · "+manual+" need the page-builder editor":"")), ok?"teal":(blocked?"clay":"gold")); })();
+    (async()=>{ let ok=0,manual=0,blocked=0,notlive=0; for(const l of sugs){ const r=await applyOne(l); if(r.status==="verified"){ if(r.notOnLive)notlive++; else ok++; } else if(r.status==="manual")manual++; else if(r.status==="blocked")blocked++; }
+      ctx.toast(blocked? "Site is read-only — arm writes on the Admin screen first." : notlive? ("Saved to WordPress, but your live site isn’t WordPress — "+notlive+" link(s) won’t show on it.") : (ok+" link(s) applied"+(manual?" · "+manual+" need the page-builder editor":"")), (blocked||notlive)?"clay":(ok?"teal":"gold")); })();
   };
   const linkStatus = (l)=>{
     const st=applied[linkKey(l)]; if(!st) return null;
     if(st.busy) return <span style={{ fontSize:11, color:"var(--muted)", display:"inline-flex", alignItems:"center", gap:4 }}><Icon name="cog" size={12} className="audit-spin" />Applying…</span>;
+    // Honest label: saved to WP but the live site is another CMS → not actually live.
+    if(st.status==="verified" && st.notOnLive) return <span title={st.reason||""} style={{ fontSize:11, fontWeight:700, color:"var(--clay)" }}>⚠ WP only — not on live {st.liveCms||""}</span>;
     const tones={verified:["✓ Applied to live","var(--t-700)"],dry:["Dry-run","var(--muted)"],"dry-run":["Dry-run","var(--muted)"],manual:["Add in editor","var(--gold)"],blocked:["Read-only","var(--clay)"],error:["Failed","var(--clay)"],"silent-failure":["Didn’t stick","var(--clay)"]};
     const t=tones[st.status]||["—","var(--muted)"];
     return <span title={st.reason||""} style={{ fontSize:11, fontWeight:700, color:t[1] }}>{t[0]}</span>;
@@ -1614,6 +1622,15 @@ function OptimizeScreen({ ctx }) {
           </div>
           {err && <div style={{ marginBottom:14 }}><ErrBanner msg={err} onRetry={()=>setErr(null)} /></div>}
 
+          {cmsMismatch && (
+            <div style={{ marginBottom:14, padding:"13px 16px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", boxShadow:"var(--neo-in)", borderLeft:"4px solid var(--clay)" }}>
+              <div style={{ fontSize:13.5, fontWeight:800, color:"#8a2d1f", marginBottom:4 }}>⛔ Your live site is {health.parked?"a parked / for-sale domain":("served by "+health.liveCms+" — not WordPress")}</div>
+              <div style={{ fontSize:12.5, color:"#7E5A14", lineHeight:1.55 }}>
+                {health.mismatch || ("Sentinel edits the WordPress install behind "+s.url+", but the live page is rendered by "+health.liveCms+".")} <b>On-page fixes here — internal/external links, content refresh, schema, CSS and WebP — will NOT appear on the live site.</b> {health.parked? "There’s nothing live to optimize." : "Point Sentinel at the platform that actually serves "+(s.name||s.url)+", or make these changes in "+health.liveCms+"."}
+              </div>
+            </div>
+          )}
+
           {pluginIssue && ["links","ext","schema","facts","css","images"].includes(tab) && (
             <div style={{ marginBottom:14, padding:"12px 15px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", boxShadow:"var(--neo-in)" }}>
               {connBroken ? (<>
@@ -1654,7 +1671,7 @@ function OptimizeScreen({ ctx }) {
                         <a href={l.targetUrl} target="_blank" rel="noopener" style={{ fontFamily:"var(--mono)", color:"var(--ink)", textDecoration:"none", fontSize:11.5 }}>{(l.targetUrl||"").replace(/^https?:\/\/[^/]+/,"")||"/"}</a>
                         <span style={{ marginLeft:"auto", display:"inline-flex", alignItems:"center", gap:8 }}>
                           {linkStatus(l)}
-                          <NeoButton kind="ghost" size="sm" icon="check" disabled={(applied[linkKey(l)]||{}).busy} onClick={()=>applyOne(l).then(r=>{ if(r.status==="verified")ctx.toast("Link applied to live ✓","teal"); else if(r.status==="blocked")ctx.toast("Site is read-only — arm writes on Admin first.","clay"); else if(r.status==="manual")ctx.toast(r.reason||"Add this one in your page-builder editor.","gold"); else if(r.error||r.reason)ctx.toast(r.error||r.reason,"clay"); })}>Approve</NeoButton>
+                          <NeoButton kind="ghost" size="sm" icon="check" disabled={(applied[linkKey(l)]||{}).busy} onClick={()=>applyOne(l).then(r=>{ if(r.status==="verified")ctx.toast(r.notOnLive?(r.liveWarning||"Saved to WordPress, but won’t show on your live site."):"Link applied to live ✓",r.notOnLive?"clay":"teal"); else if(r.status==="blocked")ctx.toast("Site is read-only — arm writes on Admin first.","clay"); else if(r.status==="manual")ctx.toast(r.reason||"Add this one in your page-builder editor.","gold"); else if(r.error||r.reason)ctx.toast(r.error||r.reason,"clay"); })}>Approve</NeoButton>
                         </span>
                       </div>
                       {l.reason && <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:5 }}>{l.reason}</div>}
@@ -1692,7 +1709,7 @@ function OptimizeScreen({ ctx }) {
                         {l.source && <Chip tone="teal" size="sm">{l.source}</Chip>}
                         <span style={{ marginLeft:"auto", display:"inline-flex", alignItems:"center", gap:8 }}>
                           {linkStatus(row)}
-                          <NeoButton kind="ghost" size="sm" icon="check" disabled={(applied[linkKey(row)]||{}).busy} onClick={()=>applyOne(row).then(r=>{ if(r.status==="verified")ctx.toast("External link applied to live ✓","teal"); else if(r.status==="blocked")ctx.toast("Site is read-only — arm writes on Admin first.","clay"); else if(r.status==="manual")ctx.toast(r.reason||"Add this one in your page-builder editor.","gold"); else if(r.error||r.reason)ctx.toast(r.error||r.reason,"clay"); })}>Approve</NeoButton>
+                          <NeoButton kind="ghost" size="sm" icon="check" disabled={(applied[linkKey(row)]||{}).busy} onClick={()=>applyOne(row).then(r=>{ if(r.status==="verified")ctx.toast(r.notOnLive?(r.liveWarning||"Saved to WordPress, but won’t show on your live site."):"External link applied to live ✓",r.notOnLive?"clay":"teal"); else if(r.status==="blocked")ctx.toast("Site is read-only — arm writes on Admin first.","clay"); else if(r.status==="manual")ctx.toast(r.reason||"Add this one in your page-builder editor.","gold"); else if(r.error||r.reason)ctx.toast(r.error||r.reason,"clay"); })}>Approve</NeoButton>
                         </span>
                       </div>
                       {l.reason && <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:5 }}>{l.reason}</div>}

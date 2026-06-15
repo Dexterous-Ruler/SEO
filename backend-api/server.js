@@ -25,6 +25,7 @@ import { detectStack } from './detect.js';
 import { auditPage, proposeFromFinding } from './audit-pipeline.js';
 import { db, credsForSite } from './supabase.js';
 import * as claude from './claude.js';
+import { detectLiveCms } from './site-health.js';
 import * as geo from './geo.js';
 // Keyword/competitor data now comes from DataForSEO (pay-as-you-go) instead of
 // SEMrush. The `semrush` alias is kept so existing call sites are unchanged;
@@ -307,6 +308,24 @@ const routes = {
       const sig = ['wordfence', 'sucuri', 'cloudflare', 'sitelock', 'modsecurity', 'mod_security', 'litespeed', 'imunify', 'wp engine', 'kinsta'].filter((s) => new RegExp(s, 'i').test(text) || Object.values(h).some((v) => new RegExp(s, 'i').test(v)));
       return { status: r.status, ip: await serverEgressIp(), headers: h, signatures: sig, bodySnippet: text.replace(/\s+/g, ' ').slice(0, 600) };
     } catch (e) { return { error: e.message }; }
+  },
+  // Live-site health: what actually renders the public domain (WordPress / Drupal
+  // / Wix / parked). Drives the "edits won't show on your live site" banner so we
+  // never silently edit a WordPress backend that isn't what the domain serves.
+  'POST /site-health': async (body) => {
+    const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    const url = body.url || (site && (site.url || site._rawUrl));
+    if (!url) return { error: 'No site URL' };
+    const live = await detectLiveCms(url).catch((e) => ({ cms: 'Unknown', isWordPress: false, nonWordPress: false, error: e.message }));
+    return {
+      url, liveCms: live.cms, isWordPress: !!live.isWordPress, nonWordPress: !!live.nonWordPress, parked: !!live.parked,
+      reachable: live.reachable !== false, title: live.title || '',
+      mismatch: live.nonWordPress
+        ? (live.parked
+            ? `This domain appears to be parked / for sale. There’s no live WordPress site to optimize.`
+            : `Your live site is served by ${live.cms}, not WordPress. On-page fixes Sentinel applies to the WordPress install will NOT appear on the live ${live.cms} pages.`)
+        : null,
+    };
   },
   // Observability: live load, provider limiter/breaker state, cache hit rates.
   'GET /status': async () => ({ ok: true, version: '2.0', uptimeSec: Math.round(process.uptime()), inFlight: INFLIGHT, infra: infraStats(), jobs: jobs.stats() }),
@@ -1290,13 +1309,22 @@ const routes = {
       }
     }
     if (!found) return { status: 'manual', reason: 'Could not resolve the source page on WordPress.' };
+    // Honesty guard: if the live site isn't actually served by this WordPress
+    // (e.g. Drupal/Wix in front, or a parked domain), a successful WP write won't
+    // show on the live page — so we must NOT report a plain "applied to live".
+    const live = await detectLiveCms(sourcePage).catch(() => null);
+    const liveWarn = (live && live.nonWordPress)
+      ? { notOnLive: true, liveCms: live.cms, liveWarning: live.parked
+          ? `Saved to WordPress, but ${(() => { try { return new URL(sourcePage).hostname; } catch (e) { return 'this domain'; } })()} appears to be parked/for-sale — there’s no live page to show it on.`
+          : `Saved to WordPress, but your live site is served by ${live.cms} (not WordPress), so this link will NOT appear on the live page.` }
+      : {};
     // Preferred path: the optimize plugin inserts into standard content AND
     // Elementor widgets (server-side, safe). Falls through if the plugin is absent.
     try {
       const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/insert-link`, { method: 'POST', body: { post_id: found.id, anchor, target_url: targetUrl } });
       if (r && r.ok && ['content', 'elementor', 'exists'].includes(r.mode)) {
-        if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'link', text: `Linked “${anchor}” → ${targetUrl}`, meta: r.mode === 'elementor' ? 'Elementor widget' : (r.mode === 'exists' ? 'already linked' : 'page content') }).catch(() => {});
-        return { status: 'verified', sourcePage, anchor, targetUrl, postId: found.id, mode: r.mode, reversible: true };
+        if (site) await db.logActivity({ site_id: site.id, type: liveWarn.notOnLive ? 'warning' : 'verified', actor: 'Agent', icon: 'link', text: `Linked “${anchor}” → ${targetUrl}`, meta: liveWarn.notOnLive ? `WordPress only — live site is ${liveWarn.liveCms}` : (r.mode === 'elementor' ? 'Elementor widget' : (r.mode === 'exists' ? 'already linked' : 'page content')) }).catch(() => {});
+        return { status: 'verified', sourcePage, anchor, targetUrl, postId: found.id, mode: r.mode, reversible: true, ...liveWarn };
       }
       if (r && r.ok === false && r.mode === 'not_found') return { status: 'manual', reason: r.reason || 'Anchor text not found in the page content or Elementor widgets.' };
     } catch (e) { /* plugin not installed → fall back to standard-content insertion below */ }
@@ -1317,8 +1345,8 @@ const routes = {
     if (upd && upd.dryRun) return { status: 'dry-run', wouldLink: { sourcePage, anchor, targetUrl } };
     const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content`).catch(() => null);
     const stuck = !!(after && after.content && String(after.content.raw || '').includes(targetUrl));
-    if (site) await db.logActivity({ site_id: site.id, type: stuck ? 'verified' : 'failed', actor: 'Agent', icon: 'link', text: `Linked “${anchor}” → ${targetUrl}`, meta: sourcePage }).catch(() => {});
-    return { status: stuck ? 'verified' : 'silent-failure', sourcePage, anchor, targetUrl, postId: found.id, reversible: true };
+    if (site) await db.logActivity({ site_id: site.id, type: (stuck && liveWarn.notOnLive) ? 'warning' : (stuck ? 'verified' : 'failed'), actor: 'Agent', icon: 'link', text: `Linked “${anchor}” → ${targetUrl}`, meta: liveWarn.notOnLive ? `WordPress only — live site is ${liveWarn.liveCms}` : sourcePage }).catch(() => {});
+    return { status: stuck ? 'verified' : 'silent-failure', sourcePage, anchor, targetUrl, postId: found.id, reversible: true, ...liveWarn };
   },
 
   // Per-page schema generator: builds a JSON-LD @graph (WebPage + BreadcrumbList,
