@@ -100,32 +100,37 @@ export async function detectLiveCms(rawUrl, { ttlMs = 30 * 60 * 1000 } = {}) {
     const parked = /\bthis domain (is|may be|name is)\b[^<]{0,40}\bfor sale\b|\bdomain (is )?(for sale|available for (sale|purchase))\b|\bbuy this domain\b|\bparked (free|by|domain)\b|sedoparking|domain for sale/i.test(low);
     if (parked) return pack('Parked', { parked: true, status, title: title.slice(0, 90) });
 
-    // PRECEDENCE — the <meta generator> / X-Generator declares what RENDERED the
-    // page and is authoritative: a Drupal site with stray wp-content/wp-json
-    // leftovers (common after a WP→Drupal migration) is still Drupal. Only when
-    // no generator is present do we fall back to the WP REST Link header
-    // (rel="https://api.w.org/", header-based & truncation-immune) and then to
-    // weaker body fingerprints.
+    // CLASSIFY by RUNTIME evidence, NOT the <meta generator> tag — that tag is
+    // frequently a STALE LEFTOVER after a migration. Real example on this account:
+    // go-visa.co.uk & settlement-…co.uk are WordPress+Elementor sites that STILL
+    // emit `generator: Drupal 11` with ZERO Drupal runtime. So we fingerprint what
+    // the page actually loads to render; the generator is only a last-resort hint.
     const wpHeader = /rel=["']https:\/\/api\.w\.org\/["']/i.test(H('link')) || !!H('x-pingback');
+    const wpRuntime = wpHeader || /wp-content|wp-includes|\/wp-json|wpr-usedcss|elementor|jet-engine|jet-form|wp-block-|--wp--preset/i.test(low);
+    const drupalRuntime = /drupalsettings\s*=|\/core\/misc\/drupal|data-drupal-|\/sites\/default\/files|drupal-settings-json/i.test(low);
+    const wixRuntime = /static\.wixstatic\.com|x-wix-/i.test(low);
+    const sqspRuntime = /static1\.squarespace\.com|squarespace-cdn/i.test(low);
+    const shopifyRuntime = /cdn\.shopify\.com/i.test(low) || /shopify/i.test(server);
+    const webflowRuntime = /assets\.website-files\.com/i.test(low);
+
     let cms = 'Unknown';
-    if (/drupal/.test(gen)) cms = 'Drupal';
-    else if (/wordpress/.test(gen)) cms = 'WordPress';
-    else if (/wix/.test(gen)) cms = 'Wix';
-    else if (/squarespace/.test(gen)) cms = 'Squarespace';
-    else if (/shopify/.test(gen)) cms = 'Shopify';
-    else if (/webflow/.test(gen)) cms = 'Webflow';
-    else if (/joomla/.test(gen)) cms = 'Joomla';
-    else if (/ghost/.test(gen)) cms = 'Ghost';
-    else if (wpHeader) cms = 'WordPress';
+    if (wpRuntime && !drupalRuntime) cms = 'WordPress';        // WP markers, no real Drupal → WordPress (ignore a stale Drupal generator)
+    else if (drupalRuntime && !wpRuntime) cms = 'Drupal';
+    else if (wpRuntime && drupalRuntime) cms = /wordpress/.test(gen) ? 'WordPress' : (/drupal/.test(gen) ? 'Drupal' : 'WordPress');
+    else if (wixRuntime) cms = 'Wix';
+    else if (sqspRuntime) cms = 'Squarespace';
+    else if (shopifyRuntime) cms = 'Shopify';
+    else if (webflowRuntime) cms = 'Webflow';
     else {
-      // No generator and no WP header → body fingerprints (weakest signal).
-      const drupalMarkers = [/\/sites\/default\/files/, /\/core\/misc\/drupal/, /drupal-settings-json/, /data-drupal-/, /\/core\/[a-z]+\//].reduce((n, re) => n + (re.test(low) ? 1 : 0), 0);
-      if (drupalMarkers >= 2) cms = 'Drupal';
-      else if (low.includes('wp-content') || low.includes('wp-json') || low.includes('wp-includes')) cms = 'WordPress';
-      else if (/wix\.com|static\.wixstatic\.com/.test(low)) cms = 'Wix';
-      else if (/static1\.squarespace\.com/.test(low)) cms = 'Squarespace';
-      else if (/cdn\.shopify\.com/.test(low + server)) cms = 'Shopify';
-      else if (/assets\.website-files\.com/.test(low)) cms = 'Webflow';
+      // No runtime fingerprint at all → fall back to the generator/header hint.
+      if (/wordpress/.test(gen) || wpHeader) cms = 'WordPress';
+      else if (/drupal/.test(gen)) cms = 'Drupal';
+      else if (/wix/.test(gen)) cms = 'Wix';
+      else if (/squarespace/.test(gen)) cms = 'Squarespace';
+      else if (/shopify/.test(gen)) cms = 'Shopify';
+      else if (/webflow/.test(gen)) cms = 'Webflow';
+      else if (/joomla/.test(gen)) cms = 'Joomla';
+      else if (/ghost/.test(gen)) cms = 'Ghost';
     }
     return pack(cms, { status, title: title.slice(0, 90) });
 
