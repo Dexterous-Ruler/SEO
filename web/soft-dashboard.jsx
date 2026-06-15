@@ -1564,6 +1564,16 @@ function OptimizeScreen({ ctx }) {
     const t=tones[st.status]||["—","var(--muted)"];
     return <span title={st.reason||""} style={{ fontSize:11, fontWeight:700, color:t[1] }}>{t[0]}</span>;
   };
+  const pathOnly = (u)=>{ try{ return new URL(u).pathname; }catch(e){ return (u||"").replace(/^https?:\/\/[^/]+/,"")||"/"; } };
+  // When a row couldn't be auto-applied, show WHY + how to do it manually inline.
+  const manualHint = (l)=>{
+    const st=applied[linkKey(l)];
+    if(!st || st.status!=="manual") return null;
+    return <div style={{ marginTop:6, padding:"8px 11px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", fontSize:11.5, color:"#7E5A14", lineHeight:1.55 }}>
+      <b>Why “Add in editor”:</b> {st.reason || "this anchor sits in a button, menu, or a global header/footer/template — linking it automatically could break the layout, so it’s left for you."}<br/>
+      <b>Add it manually (1 min):</b> open <a href={l.sourcePage} target="_blank" rel="noopener" style={{ color:"#7E5A14", textDecoration:"underline", fontFamily:"var(--mono)" }}>{pathOnly(l.sourcePage)}</a> in your page builder, select the text “<b>{l.anchor}</b>”, and link it to <b style={{ fontFamily:"var(--mono)" }}>{pathOnly(l.targetUrl)}</b>.
+    </div>;
+  };
   const genSchema = ()=>{ if(!pageUrl){ctx.toast("Enter a page URL","gold");return;} setBusy("schema"); setErr(null); API.generateSchema(s.id,{url:pageUrl,type:pageType,title:""}).then(r=>{ if(r.error){setErr(r.error);return;} setSchema(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const genFacts = ()=>{ if(!pageUrl){ctx.toast("Enter a page URL","gold");return;} setBusy("facts"); setErr(null); API.aiSeoFacts(s.id,pageUrl).then(r=>{ if(r.error){setErr(r.error);return;} setFacts(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const genCss = ()=>{ setBusy("css"); setErr(null); API.generateCss(s.id).then(r=>{ if(r.error){setErr(r.error);return;} setCss(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
@@ -1648,6 +1658,7 @@ function OptimizeScreen({ ctx }) {
                         </span>
                       </div>
                       {l.reason && <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:5 }}>{l.reason}</div>}
+                      {manualHint(l)}
                     </div>
                   ))}
                   {(links.suggestions||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No strong internal-link opportunities found — pages are already well interlinked.</div>}
@@ -1685,6 +1696,7 @@ function OptimizeScreen({ ctx }) {
                         </span>
                       </div>
                       {l.reason && <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:5 }}>{l.reason}</div>}
+                      {manualHint(row)}
                     </div>
                   );})}
                   {(ext.suggestions||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No strong authoritative outbound links found for this page.</div>}
