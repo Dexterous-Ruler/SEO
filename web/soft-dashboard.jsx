@@ -2428,6 +2428,34 @@ function GscScreen({ ctx }) {
     setBriefFor({ page:pg.page, loading:true });
     API.contentDecayBrief(pg).then(r=>setBriefFor({ page:pg.page, brief:r.brief })).catch(e=>setBriefFor({ page:pg.page, brief:"⚠️ "+e.message }));
   };
+  // One-click content refresh: write a grounded freshness block live + re-index.
+  const [refreshFor,setRefreshFor] = useState(null);  // { page, loading?, result? }
+  const [refreshAll,setRefreshAll] = useState(null);  // { done, total } while bulk-running
+  const doRefresh = (d)=>{
+    setRefreshFor({ page:d.page, loading:true });
+    return API.contentRefresh(s.id, d, true).then(r=>{
+      setRefreshFor({ page:d.page, result:r });
+      if(r.status==="applied") ctx.toast("Refreshed live"+(r.indexed&&r.indexed.ok?" + submitted to Google for re-indexing":"")+" ✓","teal");
+      else if(r.status==="blocked") ctx.toast("This site is read-only — arm writes first","gold");
+      else if(r.status==="manual") ctx.toast("Page-builder page — copy the block into your editor","gold");
+      else if(r.error) ctx.toast(r.error,"clay");
+      return r;
+    }).catch(e=>{ setRefreshFor({ page:d.page, result:{ error:e.message } }); ctx.toast(e.message,"clay"); });
+  };
+  const undoRefresh = (d)=>{
+    API.contentRefreshUndo(s.id, d).then(r=>{ ctx.toast(r.status==="removed"?"Refresh removed from the page":(r.reason||"Nothing to undo"),"teal"); setRefreshFor(null); }).catch(e=>ctx.toast(e.message,"clay"));
+  };
+  const doRefreshAll = async ()=>{
+    const pages=(decay&&decay.pages)||[]; if(!pages.length) return;
+    let applied=0,manual=0,blocked=0;
+    for(let i=0;i<pages.length;i++){
+      setRefreshAll({ done:i, total:pages.length });
+      try{ const r=await API.contentRefresh(s.id, pages[i], true); if(r.status==="applied")applied++; else if(r.status==="manual")manual++; else if(r.status==="blocked")blocked++; }catch(e){}
+    }
+    setRefreshAll(null);
+    if(blocked) ctx.toast("Site is read-only — arm writes for it, then retry","gold");
+    else ctx.toast(applied+" refreshed & re-indexed"+(manual?(" · "+manual+" need pasting (page-builder)"):"")+" ✓","teal");
+  };
 
   const connect = ()=>{
     if(!saText.trim()){ ctx.toast("Paste the service-account JSON key","gold"); return; }
@@ -2693,7 +2721,12 @@ function GscScreen({ ctx }) {
                     <div style={{ fontSize:13.5, fontWeight:700 }}>Content decay — pages losing clicks</div>
                     <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Compares the last 28 days vs the prior 28, ranked by absolute clicks lost. High-value declines that need a refresh.</div>
                   </div>
-                  <NeoButton kind="primary" size="sm" icon={decayBusy?undefined:"trend"} disabled={decayBusy} onClick={loadDecay}>{decayBusy&&<Icon name="cog" size={15} className="audit-spin" />}{decayBusy?"Analyzing…":"Find decaying pages"}</NeoButton>
+                  <span style={{ display:"inline-flex", gap:8 }}>
+                    {decay && (decay.pages||[]).length>0 && (
+                      <NeoButton kind="soft" size="sm" icon={refreshAll?undefined:"sparkles"} disabled={!!refreshAll} onClick={doRefreshAll}>{refreshAll&&<Icon name="cog" size={15} className="audit-spin" />}{refreshAll?("Refreshing "+(refreshAll.done+1)+"/"+refreshAll.total+"…"):"Refresh all & index"}</NeoButton>
+                    )}
+                    <NeoButton kind="primary" size="sm" icon={decayBusy?undefined:"trend"} disabled={decayBusy} onClick={loadDecay}>{decayBusy&&<Icon name="cog" size={15} className="audit-spin" />}{decayBusy?"Analyzing…":"Find decaying pages"}</NeoButton>
+                  </span>
                 </div>
                 {decay && (
                   <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
@@ -2712,10 +2745,42 @@ function GscScreen({ ctx }) {
                         <div style={{ display:"flex", alignItems:"center", gap:10, marginTop:7, flexWrap:"wrap" }}>
                           <span style={{ fontSize:11.5, color:"var(--muted)" }}>{d.priorClicks}→{d.recentClicks} clicks · pos {d.prevPosition}→{d.position} {d.positionDrift>0?<b style={{color:"var(--clay)"}}>(+{d.positionDrift})</b>:null}</span>
                           <span style={{ marginLeft:"auto", display:"inline-flex", gap:7 }}>
-                            <NeoButton kind="ghost" size="sm" icon="sparkles" onClick={()=>genBrief(d)}>Refresh brief</NeoButton>
-                            <NeoButton kind="soft" size="sm" icon="bolt" onClick={()=>{ try{ window.SENTINEL_CHAT_SEED = `The page ${d.page} dropped ${d.clicksLost} clicks (position ${d.prevPosition}→${d.position}). Please: 1) review the page, 2) apply an improved SEO title and meta description to it live, and 3) tell me exactly what content/sections to add to recover the rankings.`; }catch(e){} ctx.goto("chat"); ctx.toast("Sent to the AI assistant — review & send to apply fixes live","teal"); }}>Fix in chat</NeoButton>
+                            <NeoButton kind="primary" size="sm" icon={(refreshFor&&refreshFor.page===d.page&&refreshFor.loading)?undefined:"sparkles"} disabled={refreshFor&&refreshFor.page===d.page&&refreshFor.loading} onClick={()=>doRefresh(d)}>{refreshFor&&refreshFor.page===d.page&&refreshFor.loading&&<Icon name="cog" size={14} className="audit-spin" />}{refreshFor&&refreshFor.page===d.page&&refreshFor.loading?"Refreshing…":"Refresh & index"}</NeoButton>
+                            <NeoButton kind="ghost" size="sm" icon="doc" onClick={()=>genBrief(d)}>Brief</NeoButton>
                           </span>
                         </div>
+                        {/* One-click refresh result */}
+                        {refreshFor && refreshFor.page===d.page && refreshFor.result && (()=>{ const r=refreshFor.result; const ok=r.status==="applied"; const manual=r.status==="manual"; const blocked=r.status==="blocked"; const failed=r.error||r.status==="silent-failure";
+                          return (
+                          <div style={{ marginTop:10, padding:"12px 14px", background:"var(--surface)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", borderLeft:"3px solid "+(ok?"var(--teal)":blocked?"var(--gold)":failed?"var(--clay)":"var(--gold)") }}>
+                            {ok && (<>
+                              <div style={{ fontSize:12.5, fontWeight:700, color:"var(--teal)", display:"flex", alignItems:"center", gap:7 }}><Icon name="check" size={14} />{r.replaced?"Refresh updated on the live page":"Freshness block added to the live page"} · modified date bumped{r.indexed&&r.indexed.ok?" · submitted to Google for re-indexing":""}</div>
+                              {r.indexed && r.indexed.skipped && <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:4 }}>{r.indexed.reason}</div>}
+                              {r.indexed && r.indexed.error && <div style={{ fontSize:11.5, color:"var(--clay)", marginTop:4 }}>{r.indexed.error}</div>}
+                              {r.parts && (
+                                <div style={{ marginTop:8, padding:"9px 11px", background:"var(--bg)", borderRadius:8, boxShadow:"var(--neo-in)", fontSize:12 }}>
+                                  <div style={{ fontWeight:800, marginBottom:3 }}>{r.parts.heading}</div>
+                                  {r.parts.intro && <div style={{ color:"var(--ink)", marginBottom:4 }}>{r.parts.intro}</div>}
+                                  {(r.parts.points||[]).length>0 && <ul style={{ margin:"2px 0 0 16px", padding:0 }}>{r.parts.points.map((p,j)=><li key={j} style={{ fontSize:11.5, marginBottom:2 }}>{p}</li>)}</ul>}
+                                </div>
+                              )}
+                              <div style={{ marginTop:8 }}><NeoButton kind="ghost" size="sm" icon="undo" onClick={()=>undoRefresh(d)}>Undo (remove block)</NeoButton></div>
+                            </>)}
+                            {blocked && <div style={{ fontSize:12.5, color:"var(--gold)" }}><b>Site is read-only.</b> {r.reason} Arm writes for this site in its settings, then click Refresh again.</div>}
+                            {manual && (<>
+                              <div style={{ fontSize:12.5, fontWeight:700, color:"var(--gold)", marginBottom:4 }}>Add in editor — here's exactly how</div>
+                              <div style={{ fontSize:12, color:"var(--ink)", marginBottom:6 }}>{r.reason}</div>
+                              <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:6 }}><b>How:</b> {r.manualHint}</div>
+                              {r.blockHtml && (<>
+                                <div style={{ position:"relative" }}>
+                                  <pre className="scroll" style={{ maxHeight:140, overflow:"auto", fontSize:11, background:"var(--bg)", padding:"9px 11px", borderRadius:8, boxShadow:"var(--neo-in)", whiteSpace:"pre-wrap", margin:0 }}>{r.blockHtml}</pre>
+                                  <NeoButton kind="soft" size="sm" icon="copy" style={{ marginTop:6 }} onClick={()=>{ try{ navigator.clipboard.writeText(r.blockHtml); ctx.toast("Block copied — paste it at the top of the page","teal"); }catch(e){ ctx.toast("Select & copy the block above","gold"); } }}>Copy block</NeoButton>
+                                </div>
+                              </>)}
+                            </>)}
+                            {failed && <div style={{ fontSize:12.5, color:"var(--clay)" }}>{r.error||r.reason}</div>}
+                          </div>
+                          ); })()}
                         {briefFor && briefFor.page===d.page && (
                           <div style={{ marginTop:10, padding:"12px 14px", background:"var(--surface)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)" }}>
                             {briefFor.loading ? <div style={{ fontSize:12.5, color:"var(--muted)", display:"flex", alignItems:"center", gap:8 }}><Icon name="cog" size={14} className="audit-spin" />Claude is writing a refresh brief…</div>

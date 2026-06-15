@@ -209,6 +209,54 @@ function insertAnchorLink(html, anchor, href) {
   return { html, changed: false, reason: 'The anchor text was not found in the page’s editable text (it may live in a page-builder widget).' };
 }
 
+// ── Content-decay refresh block ───────────────────────────────────────────
+// A marked, idempotent, reversible "freshness" block prepended to a page's
+// content. Markers are HTML comments so the block is easy to find, replace on
+// re-refresh, and strip on undo — the original article body is never touched.
+const REFRESH_OPEN = '<!--seoagent-refresh-->';
+const REFRESH_CLOSE = '<!--/seoagent-refresh-->';
+const REFRESH_RE = /<!--seoagent-refresh-->[\s\S]*?<!--\/seoagent-refresh-->\s*/g;
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+// Build the freshness block HTML from Claude's structured parts.
+function buildRefreshBlock(parts, monthYear) {
+  const heading = parts.heading || ('Updated for ' + (monthYear || 'this year'));
+  const bullets = (parts.points || []).filter(Boolean).map((p) => '<li>' + esc(p) + '</li>').join('');
+  const intro = parts.intro ? '<p>' + esc(parts.intro) + '</p>' : '';
+  const ul = bullets ? '<ul>' + bullets + '</ul>' : '';
+  const note = parts.note ? '<p><em>' + esc(parts.note) + '</em></p>' : '';
+  const stamp = '<p style="font-size:.85em;opacity:.7;margin-top:.5em">Reviewed and updated ' + esc(monthYear || '') + '</p>';
+  const inner = '<div class="seoagent-refresh" style="border-left:3px solid #2f6fed;padding:.25em 0 .25em 1em;margin:0 0 1.25em">'
+    + '<h2 style="margin:.2em 0">' + esc(heading) + '</h2>' + intro + ul + note + stamp + '</div>';
+  return REFRESH_OPEN + '\n' + inner + '\n' + REFRESH_CLOSE + '\n';
+}
+
+// Insert (or replace an existing) refresh block at the TOP of post_content.
+function applyRefreshBlock(raw, blockHtml) {
+  const had = REFRESH_RE.test(raw); REFRESH_RE.lastIndex = 0;
+  const stripped = raw.replace(REFRESH_RE, '');
+  return { html: blockHtml + stripped, replaced: had };
+}
+// Remove the refresh block (undo). Returns {html, removed}.
+function stripRefreshBlock(raw) {
+  const had = REFRESH_RE.test(raw); REFRESH_RE.lastIndex = 0;
+  return { html: raw.replace(REFRESH_RE, ''), removed: had };
+}
+
+// Submit a single freshened URL to Google's Indexing API. Never throws —
+// returns a small status object the UI can surface ({ok|skipped|error}).
+async function submitOneForIndex(siteId, url) {
+  const saStr = await db.getGscSa(siteId).catch(() => null);
+  if (!saStr) return { skipped: true, reason: 'Google not connected — content updated, but not auto-submitted for indexing.' };
+  try {
+    const r = await gscIndex.submitUrls(JSON.parse(saStr), [url], { type: 'URL_UPDATED' });
+    return { ok: true, result: r };
+  } catch (e) {
+    return { error: 'Indexed-submit failed: ' + e.message + ' — enable the Indexing API and make the service account an OWNER of the property.' };
+  }
+}
+
 // Sentinel's outbound (egress) IP — what a site's firewall sees. Cached 1h.
 // Needed so users can allowlist us in Wordfence/Sucuri/etc.
 let _egressIp = { v: null, exp: 0 };
@@ -1495,6 +1543,112 @@ const routes = {
     return { brief };
   },
 
+  // One-click content REFRESH for a decaying page: generate a grounded freshness
+  // block, push it live (idempotent, reversible), and re-index — no chat needed.
+  //   apply:false → preview the block.  apply:true → write live + submit to index.
+  'POST /content-refresh': async (body) => {
+    const page = body.page || {};
+    const pageUrl = page.url || page.page || body.url;
+    if (!pageUrl) return { error: 'No page specified' };
+    const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    const niche = (site && (site.niche || (site.stack && site.stack.niche))) || '';
+    let monthYear = ''; try { monthYear = new Date().toLocaleString('en-GB', { month: 'long', year: 'numeric' }); } catch (e) {}
+
+    // 1) Ground the refresh in the page's real, current text (works on any builder).
+    let pageText = '';
+    try {
+      const res = await fetch(pageUrl, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } });
+      const html = await res.text();
+      pageText = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
+    } catch (e) {}
+
+    // 2) Generate the freshness block (Claude — strictly grounded, no invented facts).
+    const parts = await claude.refreshContent({
+      url: pageUrl, title: page.title || '', currentText: pageText, niche,
+      decay: { clicksLost: page.clicksLost, pctDrop: page.pctDrop, positionDrift: page.positionDrift },
+      monthYear, siteId: body.siteId,
+    });
+    const blockHtml = buildRefreshBlock(parts, monthYear);
+    // A clean, paste-ready version (markers stripped) for the manual fallback.
+    const pasteHtml = blockHtml.replace(REFRESH_OPEN + '\n', '').replace('\n' + REFRESH_CLOSE + '\n', '');
+
+    if (!body.apply) {
+      return { status: 'preview', parts, blockHtml: pasteHtml, monthYear, willIndex: true };
+    }
+
+    // 3) Apply live. Resolve the post, gate on write-arming, write, verify.
+    if (site && site.write_armed === false && !body.force) {
+      return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then refresh.', blockHtml: pasteHtml };
+    }
+    let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
+    const wp = new WordPressClient(creds);
+    // Prefer the IDs the decay scan already resolved; else resolve by URL.
+    let found = (page._id && page._type) ? { id: page._id, type: page._type } : null;
+    if (!found) { try { found = await wp.resolvePostByUrl(pageUrl); } catch (e) {} }
+    if (!found || !found.id) return { status: 'manual', reason: 'Could not match this URL to a WordPress post/page.', blockHtml: pasteHtml, manualHint: 'Open the page in your editor and paste the block at the top.' };
+
+    // 3a) Plugin path first — Elementor/Divi-aware prepend (if the optimize plugin
+    //     is installed and new enough to expose refresh-block).
+    try {
+      const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/refresh-block`, { method: 'POST', body: { post_id: found.id, block_html: pasteHtml, open: REFRESH_OPEN, close: REFRESH_CLOSE } });
+      if (r && r.ok) {
+        const indexed = await submitOneForIndex(body.siteId, pageUrl);
+        if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'sparkles', text: `Refreshed “${page.title || pageUrl}”`, meta: r.replaced ? 'updated block' : 'added block' }).catch(() => {});
+        return { status: 'applied', via: r.mode || 'plugin', replaced: !!r.replaced, parts, blockHtml: pasteHtml, indexed, postId: found.id, reversible: true };
+      }
+    } catch (e) { /* plugin absent / old → fall back to post_content below */ }
+
+    // 3b) Server-side path — prepend the marked block to post_content. Safe for
+    //     classic/Gutenberg posts; not for page-builder pages (content wouldn't render).
+    const builder = (site && site.stack && site.stack.builder) || '';
+    const isBuilder = /elementor|beaver|divi|bricks|wpbakery/i.test(builder);
+    const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content`).catch(() => null);
+    const raw = (post && post.content && (post.content.raw != null ? post.content.raw : '')) || '';
+    if (isBuilder || raw.trim().length < 40) {
+      return { status: 'manual', builder: builder || 'page-builder', pluginMissing: true, blockHtml: pasteHtml,
+        reason: `This is a ${builder || 'page-builder'} page, so the refresh can’t be auto-written into the visible content. Install/update the “seo-agent-optimize” plugin on this site to enable one-click refresh here, or paste the block manually.`,
+        manualHint: `In ${builder || 'your page builder'}: edit the page → add a Text/HTML widget at the very top → paste the block below → Update. (Updating the page also refreshes its “modified” date, which is itself a ranking-freshness signal.)` };
+    }
+    const { html, replaced } = applyRefreshBlock(raw, blockHtml);
+    const upd = await wp.update(found.type, found.id, { content: html }, { force: true });
+    if (upd && upd.dryRun) return { status: 'dry-run', blockHtml: pasteHtml };
+    const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content,modified`).catch(() => null);
+    const stuck = !!(after && after.content && String(after.content.raw || '').includes(REFRESH_OPEN));
+    if (!stuck) {
+      if (site) await db.logActivity({ site_id: site.id, type: 'failed', actor: 'Agent', icon: 'sparkles', text: `Refresh didn’t stick on “${page.title || pageUrl}”`, meta: pageUrl }).catch(() => {});
+      return { status: 'silent-failure', reason: 'The update was sent but the block isn’t in the saved content (a security plugin may strip HTML).', blockHtml: pasteHtml };
+    }
+    // 3c) Re-index the freshened URL.
+    const indexed = await submitOneForIndex(body.siteId, pageUrl);
+    if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'sparkles', text: `Refreshed “${page.title || pageUrl}”`, meta: replaced ? 'updated block + re-indexed' : 'added block + re-indexed' }).catch(() => {});
+    return { status: 'applied', via: 'content', replaced, parts, blockHtml: pasteHtml, indexed, postId: found.id, modified: after && after.modified, reversible: true };
+  },
+
+  // Undo a content refresh — strip the marked freshness block from the page.
+  'POST /content-refresh-undo': async (body) => {
+    const page = body.page || {};
+    const pageUrl = page.url || page.page || body.url;
+    if (!pageUrl) return { error: 'No page specified' };
+    let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.' }; }
+    const wp = new WordPressClient(creds);
+    let found = (page._id && page._type) ? { id: page._id, type: page._type } : null;
+    if (!found) { try { found = await wp.resolvePostByUrl(pageUrl); } catch (e) {} }
+    if (!found || !found.id) return { error: 'Could not resolve the page.' };
+    // Try plugin undo first (handles Elementor), else strip from post_content.
+    try {
+      const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/refresh-block`, { method: 'POST', body: { post_id: found.id, remove: true, open: REFRESH_OPEN, close: REFRESH_CLOSE } });
+      if (r && r.ok) return { status: 'removed', via: r.mode || 'plugin' };
+    } catch (e) {}
+    const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content`).catch(() => null);
+    const raw = (post && post.content && (post.content.raw != null ? post.content.raw : '')) || '';
+    const { html, removed } = stripRefreshBlock(raw);
+    if (!removed) return { status: 'none', reason: 'No refresh block found on this page.' };
+    await wp.update(found.type, found.id, { content: html }, { force: true });
+    const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    if (site) await db.logActivity({ site_id: site.id, type: 'config', actor: 'You', icon: 'undo', text: `Removed refresh from “${page.title || pageUrl}”`, meta: pageUrl }).catch(() => {});
+    return { status: 'removed', via: 'content' };
+  },
+
   // Save/read a site's competitors + negative keywords (per-site config).
   'POST /site-competitors': async (body) => {
     const patch = {};
@@ -1835,7 +1989,7 @@ const REQ_TIMEOUT_MS = Number(process.env.REQ_TIMEOUT_MS) || 280000; // safety n
 const HEAVY_ROUTES = new Set([
   'POST /content-intel', 'POST /generate-content', 'POST /generate-schema', 'POST /generate-css',
   'POST /ai-seo-facts', 'POST /internal-links', 'POST /external-links', 'POST /apply-link',
-  'POST /content-decay', 'POST /content-decay-brief', 'POST /content-brief', 'POST /project-plan',
+  'POST /content-decay', 'POST /content-decay-brief', 'POST /content-refresh', 'POST /content-brief', 'POST /project-plan',
   'POST /narrate', 'POST /scorecard', 'POST /weekly-briefing', 'POST /research', 'POST /auditPage',
   'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
   'POST /media-scan', 'POST /media-optimize', 'POST /airtable-sync', 'POST /generate-opportunities',

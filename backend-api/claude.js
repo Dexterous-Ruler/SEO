@@ -203,6 +203,48 @@ Output only the proposed fix (the value to apply), nothing else.`,
   return txt.trim();
 }
 
+// Content-decay REFRESH (not a redraft). Produces a conservative "freshness"
+// block to PREPEND to a decaying page: an updated lede + a few targeted points
+// that re-establish relevance for the queries it's losing. Grounded strictly in
+// the existing page content — no invented facts (critical for YMYL/legal).
+// Returns { heading, intro, points[], note } as data; the server assembles HTML.
+export async function refreshContent({ url, title, currentText, niche, decay, monthYear, siteId }) {
+  const txt = await complete({
+    system: SYSTEM(siteId), promptKey: 'content.rules',
+    maxTokens: 700, temperature: 0.25,
+    messages: [{
+      role: 'user',
+      content: `Write a SHORT "freshness refresh" block to add to the TOP of an existing page that has lost search rankings. This is a REFRESH, not a rewrite — reinforce and update what's already there; do NOT contradict or duplicate the body wholesale.
+
+Page title: ${title || '(none)'}
+URL: ${url || ''}
+Niche: ${niche || '(general)'}
+Decline: lost ${decay && decay.clicksLost != null ? decay.clicksLost : '?'} clicks (${decay && decay.pctDrop != null ? decay.pctDrop : '?'}% drop); avg position moved ${decay && decay.positionDrift != null ? (decay.positionDrift > 0 ? '+' + decay.positionDrift + ' (worse)' : decay.positionDrift + ' (better)') : '?'}.
+Current page content (verbatim excerpt — use ONLY facts present here, invent nothing):
+"""${(currentText || '').slice(0, 3500)}"""
+
+Rules:
+- Strictly grounded in the excerpt. If a fact isn't in it, don't state it. NEVER invent statistics, dates, prices, legal claims, or guarantees.
+- Conservative and factual. This may be a legal/financial (YMYL) page — accuracy over flourish.
+- "intro": 1–2 fresh sentences that restate the page's value for someone searching now (${monthYear || 'this year'}).
+- "points": 3–5 concise bullet points that surface the most useful, decision-relevant info already in the page (each ≤ 18 words).
+- "heading": a short H2 like "Updated for ${monthYear || 'this year'}" or a topical refresh heading.
+- "note": one short line inviting the reader to read on / contact (no fake urgency, no invented offers).
+
+Output ONLY a JSON object: {"heading":"...","intro":"...","points":["...","..."],"note":"..."}`,
+    }],
+  });
+  let obj;
+  try { obj = JSON.parse(txt.replace(/^```(?:json)?\s*|\s*```$/g, '').trim()); } catch (e) { obj = null; }
+  if (!obj || typeof obj !== 'object') return { heading: '', intro: txt.slice(0, 400), points: [], note: '' };
+  return {
+    heading: String(obj.heading || '').slice(0, 120),
+    intro: String(obj.intro || '').slice(0, 600),
+    points: Array.isArray(obj.points) ? obj.points.map((p) => String(p).slice(0, 160)).slice(0, 6) : [],
+    note: String(obj.note || '').slice(0, 300),
+  };
+}
+
 // Executive narrative — Claude writes a weekly story OVER pre-computed metrics.
 // CRITICAL: it narrates the numbers; it must never invent or recompute them.
 export async function narrate({ siteName, metrics, siteId }) {
