@@ -1838,8 +1838,14 @@ setTimeout(function(){try{window.close();}catch(e){} if(!window.closed){location
       const siteId = verifyState(url.searchParams.get('state') || '');
       if (!code || !siteId) return closePage(false, 'Invalid or expired authorization. Please try again.');
       const creds = await gsc.oauthExchangeCode({ code, redirectUri: gscRedirectUri(req) });
-      await db.setGscSa(siteId, JSON.stringify(creds));
-      return closePage(true, creds.email ? ('Connected as ' + creds.email + '. Choose a property in the dashboard.') : 'Choose a property in the dashboard.');
+      const credStr = JSON.stringify(creds);
+      await db.setGscSa(siteId, credStr);
+      // GLOBAL model: one Google account covers EVERY site. Write the fresh token
+      // to all connected sites so reconnecting once refreshes them all (each keeps
+      // its own gsc_property). Future new sites fall back to it automatically.
+      let synced = 0;
+      try { const sites = await db.listSites(); for (const s of (sites || [])) { if (s.id !== siteId && (!s.status || s.status === 'connected')) { await db.setGscSa(s.id, credStr).catch(() => {}); synced++; } } } catch (e) {}
+      return closePage(true, (creds.email ? ('Connected as ' + creds.email + '. ') : '') + 'This Google account now covers all ' + (synced + 1) + ' site(s) — pick each one’s property in the dashboard.');
     } catch (e) {
       return closePage(false, e.message);
     }
