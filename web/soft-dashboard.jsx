@@ -1529,8 +1529,9 @@ function OptimizeScreen({ ctx }) {
   const pluginOutdated = plug && plug.installed && plug.version && /^1\.[0-3]\./.test(String(plug.version));
   const pluginNotInstalled = isBuilder && plug && plug.installed===false && !connBroken;
   // CRITICAL: the live domain is served by another CMS (Drupal/Wix) or parked, so
-  // WordPress edits won't appear on it. This supersedes the plugin banner.
-  const cmsMismatch = health && health.isWordPress===false && health.liveCms && health.liveCms!=="Unknown";
+  // WordPress edits won't appear on it. This supersedes the plugin banner. Only a
+  // POSITIVE non-WordPress verdict triggers it (Unknown/Blocked never do).
+  const cmsMismatch = health && health.nonWordPress===true;
   const pluginIssue = !cmsMismatch && (connBroken || pluginNotInstalled || pluginOutdated);
   useEffect(()=>{ setLinks(null); setExt(null); setApplied({}); setSchema(null); setFacts(null); setCss(null); setMedia(null); setSpeed(null); setErr(null); setPlug(null); setHealth(null); setPageUrl((s._rawUrl||s.url||"").replace(/\/$/,"")+"/"); },[s.id]);
   useEffect(()=>{ if(live) API.optimizeStatus(s.id).then(r=>setPlug(r||{})).catch(()=>{}); },[s.id]);

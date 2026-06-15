@@ -316,11 +316,11 @@ const routes = {
     const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
     const url = body.url || (site && (site.url || site._rawUrl));
     if (!url) return { error: 'No site URL' };
-    const live = await detectLiveCms(url).catch((e) => ({ cms: 'Unknown', isWordPress: true, error: e.message }));
+    const live = await detectLiveCms(url).catch((e) => ({ cms: 'Unknown', isWordPress: false, nonWordPress: false, error: e.message }));
     return {
-      url, liveCms: live.cms, isWordPress: !!live.isWordPress, parked: !!live.parked,
+      url, liveCms: live.cms, isWordPress: !!live.isWordPress, nonWordPress: !!live.nonWordPress, parked: !!live.parked,
       reachable: live.reachable !== false, title: live.title || '',
-      mismatch: (!live.isWordPress && live.cms !== 'Unknown')
+      mismatch: live.nonWordPress
         ? (live.parked
             ? `This domain appears to be parked / for sale. There’s no live WordPress site to optimize.`
             : `Your live site is served by ${live.cms}, not WordPress. On-page fixes Sentinel applies to the WordPress install will NOT appear on the live ${live.cms} pages.`)
@@ -1313,7 +1313,7 @@ const routes = {
     // (e.g. Drupal/Wix in front, or a parked domain), a successful WP write won't
     // show on the live page — so we must NOT report a plain "applied to live".
     const live = await detectLiveCms(sourcePage).catch(() => null);
-    const liveWarn = (live && !live.isWordPress && live.cms !== 'Unknown')
+    const liveWarn = (live && live.nonWordPress)
       ? { notOnLive: true, liveCms: live.cms, liveWarning: live.parked
           ? `Saved to WordPress, but ${(() => { try { return new URL(sourcePage).hostname; } catch (e) { return 'this domain'; } })()} appears to be parked/for-sale — there’s no live page to show it on.`
           : `Saved to WordPress, but your live site is served by ${live.cms} (not WordPress), so this link will NOT appear on the live page.` }
@@ -1323,7 +1323,7 @@ const routes = {
     try {
       const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/insert-link`, { method: 'POST', body: { post_id: found.id, anchor, target_url: targetUrl } });
       if (r && r.ok && ['content', 'elementor', 'exists'].includes(r.mode)) {
-        if (site) await db.logActivity({ site_id: site.id, type: liveWarn.notOnLive ? 'failed' : 'verified', actor: 'Agent', icon: 'link', text: `Linked “${anchor}” → ${targetUrl}`, meta: liveWarn.notOnLive ? `WordPress only — live site is ${liveWarn.liveCms}` : (r.mode === 'elementor' ? 'Elementor widget' : (r.mode === 'exists' ? 'already linked' : 'page content')) }).catch(() => {});
+        if (site) await db.logActivity({ site_id: site.id, type: liveWarn.notOnLive ? 'warning' : 'verified', actor: 'Agent', icon: 'link', text: `Linked “${anchor}” → ${targetUrl}`, meta: liveWarn.notOnLive ? `WordPress only — live site is ${liveWarn.liveCms}` : (r.mode === 'elementor' ? 'Elementor widget' : (r.mode === 'exists' ? 'already linked' : 'page content')) }).catch(() => {});
         return { status: 'verified', sourcePage, anchor, targetUrl, postId: found.id, mode: r.mode, reversible: true, ...liveWarn };
       }
       if (r && r.ok === false && r.mode === 'not_found') return { status: 'manual', reason: r.reason || 'Anchor text not found in the page content or Elementor widgets.' };
@@ -1345,7 +1345,7 @@ const routes = {
     if (upd && upd.dryRun) return { status: 'dry-run', wouldLink: { sourcePage, anchor, targetUrl } };
     const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content`).catch(() => null);
     const stuck = !!(after && after.content && String(after.content.raw || '').includes(targetUrl));
-    if (site) await db.logActivity({ site_id: site.id, type: (stuck && !liveWarn.notOnLive) ? 'verified' : 'failed', actor: 'Agent', icon: 'link', text: `Linked “${anchor}” → ${targetUrl}`, meta: liveWarn.notOnLive ? `WordPress only — live site is ${liveWarn.liveCms}` : sourcePage }).catch(() => {});
+    if (site) await db.logActivity({ site_id: site.id, type: (stuck && liveWarn.notOnLive) ? 'warning' : (stuck ? 'verified' : 'failed'), actor: 'Agent', icon: 'link', text: `Linked “${anchor}” → ${targetUrl}`, meta: liveWarn.notOnLive ? `WordPress only — live site is ${liveWarn.liveCms}` : sourcePage }).catch(() => {});
     return { status: stuck ? 'verified' : 'silent-failure', sourcePage, anchor, targetUrl, postId: found.id, reversible: true, ...liveWarn };
   },
 

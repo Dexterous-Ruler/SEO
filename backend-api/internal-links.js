@@ -82,11 +82,12 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
     try { const res = await fetch(src.url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } }); const t = stripHtml(await res.text()); return { text: t, units: t ? [t] : [], authoritative: false }; } catch (e) { return { text: '', units: [], authoritative: false }; }
   }
 
-  // What actually renders the live site? If it's not WordPress (e.g. Drupal/Wix)
-  // or the domain is parked, WordPress edits won't appear on the live page — warn.
-  let cms = { cms: 'Unknown', isWordPress: true };
+  // What actually renders the live site? If it's a KNOWN non-WordPress platform
+  // (Drupal/Wix/…) or parked, WordPress edits won't appear live — warn. We only
+  // warn on positive evidence: Unknown / Blocked / Unreachable never trigger it.
+  let cms = { cms: 'Unknown', nonWordPress: false };
   try { cms = await detectLiveCms(corpus[0].url); } catch (e) {}
-  const cmsMismatch = (cms && !cms.isWordPress && cms.cms !== 'Unknown') ? {
+  const cmsMismatch = (cms && cms.nonWordPress) ? {
     cms: cms.cms, parked: !!cms.parked,
     message: cms.parked
       ? `This domain appears to be parked / for sale (“${cms.title || ''}”). There’s nothing live to optimize.`
@@ -94,13 +95,15 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
   } : null;
   // Parked domain → there's no point generating suggestions.
   if (cmsMismatch && cmsMismatch.parked) {
-    return { corpusSize: corpus.length, analyzed: 0, count: 0, droppedNotOnPage: 0, liveCms: cms.cms, cmsMismatch, suggestions: [] };
+    return { corpusSize: corpus.length, analyzed: 0, count: 0, droppedNotOnPage: 0, skippedNoUnits: 0, liveCms: cms.cms, cmsMismatch, suggestions: [] };
   }
 
   const out = [];
   let dropped = 0;
+  let skippedNoUnits = 0;     // pages the plugin reports as having no editable text
   for (const src of sources) {
-    const { text: fullText, units } = await editable(src);
+    const { text: fullText, units, authoritative } = await editable(src);
+    if (authoritative && !units.length) { skippedNoUnits++; continue; }
     if (!fullText || fullText.length < 20 || !units.length) continue;
     const normUnits = units.map(norm);
     // Candidates = everything except the source itself.
@@ -117,7 +120,7 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
       out.push({ sourcePage: src.url, sourceId: src.id, sourceType: src.type, sourceTitle: src.title, anchor: l.anchor, targetUrl: l.targetUrl, targetTitle: target ? target.title : '', reason: l.reason });
     }
   }
-  return { corpusSize: corpus.length, analyzed: sources.length, count: out.length, droppedNotOnPage: dropped, liveCms: cms.cms, cmsMismatch, suggestions: out };
+  return { corpusSize: corpus.length, analyzed: sources.length, count: out.length, droppedNotOnPage: dropped, skippedNoUnits, liveCms: cms.cms, cmsMismatch, suggestions: out };
 }
 
 export default { suggestForSite };
