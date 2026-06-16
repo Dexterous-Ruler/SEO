@@ -37,17 +37,31 @@ export const RECIPES = {
   'image-alt': { disc: 'accessibility', risk: 'low', channel: 'rest-write', title: 'Generate alt text for images', impact: '+A11y +SEO', target: 'staging', field: 'media alt', before: '(empty alt)', after: 'AI-drafted, human-reviewable alt text' },
 };
 
+// Stable, content-derived key for a finding (and the proposal that fixes it), so
+// a resolution SURVIVES re-audits. The sequential `f${i}` id changes every run;
+// this — Lighthouse audit-id / metadata-field / title-slug + page — does not.
+// Used to cross off already-actioned findings instead of re-suggesting them (#3).
+export function findingKey({ auditId, field, title, page } = {}) {
+  const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  const what = auditId || field || slug(title) || 'misc';
+  return what + '::' + (page || '/');
+}
+function keyForFinding(finding) {
+  return finding.key || findingKey({ auditId: finding._auditId, field: finding._field || finding.field, title: finding.title, page: finding.page });
+}
+
 // Build a single proposal from one finding (used by the "Propose fix" button).
 // Falls back to a generic manual proposal when there's no specific recipe.
 export function proposeFromFinding(finding) {
   const id = finding._auditId || finding.id;
   const recipe = RECIPES[id] || RECIPES[finding.field];
+  const fk = keyForFinding(finding);
   if (recipe) {
-    return { findingId: finding.id, status: 'proposed', page: finding.page || '/', ...recipe };
+    return { findingId: fk, status: 'proposed', page: finding.page || '/', ...recipe };
   }
   // Generic fallback — surfaces as a manual proposal for human handling.
   return {
-    findingId: finding.id, status: 'proposed', page: finding.page || '/',
+    findingId: fk, status: 'proposed', page: finding.page || '/',
     disc: finding.disc || 'performance', risk: 'medium',
     channel: finding.channel || 'manual',
     title: 'Fix: ' + finding.title, impact: '+' + (finding.gapPts || 3) + ' pts',
@@ -97,6 +111,7 @@ export async function auditPage(url, { creds, withContent = false, siteId = null
     const savingsMs = 0;
     findings.push({
       id: `f${++fi}`,
+      key: findingKey({ auditId: f.id, page: path }),
       disc,
       title: f.title,
       page: path,
@@ -113,6 +128,7 @@ export async function auditPage(url, { creds, withContent = false, siteId = null
   for (const p of seoProposals) {
     findings.push({
       id: `f${++fi}`,
+      key: findingKey({ field: p.field, page: path }),
       disc: 'seo',
       title: p.title,
       page: path,
@@ -138,7 +154,7 @@ export async function auditPage(url, { creds, withContent = false, siteId = null
     const recipe = FIX_RECIPES[f.id];
     if (!recipe || proposedIds.has(f.id)) continue;
     proposedIds.add(f.id);
-    proposals.push({ id: `p${++pi}`, findingId: null, status: 'proposed', page: path, ...recipe });
+    proposals.push({ id: `p${++pi}`, findingId: findingKey({ auditId: f.id, page: path }), status: 'proposed', page: path, ...recipe });
   }
 
   // 2) From SEO metadata reads with a concrete writable value.
@@ -160,7 +176,7 @@ export async function auditPage(url, { creds, withContent = false, siteId = null
       } catch (e) { /* keep placeholder on Claude error */ }
     }
     proposals.push({
-      id: `p${++pi}`, findingId: null, disc: 'seo', risk: 'low', channel: 'rest-write',
+      id: `p${++pi}`, findingId: findingKey({ field: p.field, page: path }), disc: 'seo', risk: 'low', channel: 'rest-write',
       title: p.title, page: path, impact: '+SEO', target: 'staging', field: rmField,
       before: head[p.field === 'meta_description' ? 'description' : p.field] || '(empty)',
       after, status: 'proposed',

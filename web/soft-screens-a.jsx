@@ -276,9 +276,22 @@ function RunAuditModal({ ctx }) {
 }
 
 /* ================= AUDITS ================= */
+// Stable, content-derived finding key — MUST match backend audit-pipeline.js
+// findingKey() so resolutions (verified/approved/dismissed proposals) cross off
+// the matching finding across re-audits. f.key is set by newer audits; older
+// saved findings fall back to the same formula.
+function seoFindingKey(f){
+  if(f && f.key) return f.key;
+  const slug=s=>String(s||"").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,40);
+  const what=(f&&(f._auditId||f._field||f.field))||slug(f&&f.title)||"misc";
+  return what+"::"+((f&&f.page)||"/");
+}
+const RESOLVED_STATUSES = { verified:1, approved:1, applied:1, dismissed:1 };
+
 function FindingRow({ f, ctx, open, onToggle }) {
   const dm = softDisc[f.disc], [imTone,imLabel]=impactTone[f.impact];
-  const inQueue = ctx.proposals.find(p=>p.findingId===f.id);
+  const fk = seoFindingKey(f);
+  const inQueue = ctx.proposals.find(p=>p.findingId===fk);
   const ch = { "rest-write":["teal","REST write"], "theme/css":["gold","Theme / CSS"], manual:["gray","Manual"] }[f.channel];
   return (
     <div style={{ borderRadius:"var(--r-md)", overflow:"hidden", background:open?"var(--t-50)":"var(--bg)", boxShadow:open?"var(--neo-xs)":"var(--neo-in)", transition:"all .16s" }}>
@@ -301,6 +314,7 @@ function FindingRow({ f, ctx, open, onToggle }) {
             <Chip tone={ch[0]} size="sm" icon="upload">{ch[1]}</Chip>
             {inQueue ? <Chip tone="plum" size="sm" icon="list">In review queue</Chip> : <NeoButton kind="soft" size="sm" icon="sparkles" onClick={()=>ctx.proposeFix(f)}>Propose fix</NeoButton>}
             {inQueue && <NeoButton kind="ghost" size="sm" iconR="chevR" onClick={()=>ctx.goto("review")}>Open in queue</NeoButton>}
+            <NeoButton kind="ghost" size="sm" icon="check" onClick={()=>ctx.dismissFinding(f)}>Mark done</NeoButton>
           </div>
         </div>
       )}
@@ -323,14 +337,22 @@ function AuditsScreen({ ctx }) {
   const [openId,setOpenId] = useState("f1");
   const [prio,setPrio] = useState(null);
   const [prioBusy,setPrioBusy] = useState(false);
+  const [showResolved,setShowResolved] = useState(false);
   const API = window.SentinelAPI;
   const loadPrio = ()=>{
     setPrioBusy(true);
     const findings=(ctx.findings||[]);
     API.prioritizeFindings(s.id, findings).then(r=>setPrio(r)).catch(e=>setPrio({error:e.message})).finally(()=>setPrioBusy(false));
   };
-  useEffect(()=>{ setPrio(null); },[s.id]);
-  const filtered = (ctx.findings||[]).filter(f=>filter==="all"||f.disc===filter);
+  useEffect(()=>{ setPrio(null); setShowResolved(false); },[s.id]);
+  // Cross off findings whose fix has been ACTIONED (verified/approved/applied) or
+  // manually dismissed — matched by stable key so it survives re-audits (#3).
+  const resolvedKeys={};
+  for(const p of (ctx.proposals||[])){ if(p&&p.findingId&&RESOLVED_STATUSES[p.status]) resolvedKeys[p.findingId]=p.status; }
+  const tagged=(ctx.findings||[]).map(f=>({ ...f, _res:resolvedKeys[seoFindingKey(f)]||null }));
+  const activeAll=tagged.filter(f=>!f._res);
+  const resolvedAll=tagged.filter(f=>f._res);
+  const filtered = activeAll.filter(f=>filter==="all"||f.disc===filter);
   const FILTERS=[{v:"all",l:"All"},{v:"seo",l:"SEO"},{v:"performance",l:"Perf"},{v:"accessibility",l:"A11y"},{v:"image",l:"Images"}];
   return (
     <div className="rise">
@@ -360,7 +382,7 @@ function AuditsScreen({ ctx }) {
       {/* Road to 100 — per-category gap + what's blocking it (priority: 4×100) */}
       {(()=>{
         const sc=s.scores||{};
-        const F=(ctx.findings||[]);
+        const F=activeAll;   // gap reflects UNRESOLVED findings only
         const bucket={performance:[],accessibility:[],bestPractices:[],seo:[]};
         for(const f of F){ const d=(f.disc||"").toLowerCase(); if(d==="performance"||d==="image")bucket.performance.push(f); else if(d==="accessibility")bucket.accessibility.push(f); else if(d==="seo")bucket.seo.push(f); else bucket.bestPractices.push(f); }
         const cats=[["Performance","performance"],["Accessibility","accessibility"],["Best Practices","bestPractices"],["SEO","seo"]];
@@ -465,10 +487,36 @@ function AuditsScreen({ ctx }) {
         </SectionHead>
         <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
           {filtered.map(f=><FindingRow key={f.id} f={f} ctx={ctx} open={openId===f.id} onToggle={()=>setOpenId(openId===f.id?null:f.id)} />)}
+          {filtered.length===0 && <div style={{ padding:"14px 2px", fontSize:13, color:"var(--muted)" }}>{resolvedAll.length>0?"No open findings in this view — all actioned. 🎉":"No findings — run an audit to populate."}</div>}
         </div>
+
+        {/* Resolved / crossed-off — actioned or dismissed, kept out of the worklist */}
+        {resolvedAll.length>0 && (
+          <div style={{ marginTop:16 }}>
+            <button onClick={()=>setShowResolved(v=>!v)} style={{ display:"flex", alignItems:"center", gap:8, width:"100%", textAlign:"left", padding:"10px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", border:"none", cursor:"pointer", color:"var(--ink)" }}>
+              <Icon name="check" size={15} style={{ color:"var(--teal)" }} />
+              <span style={{ fontSize:13, fontWeight:700 }}>Resolved · {resolvedAll.length}</span>
+              <span style={{ fontSize:12, color:"var(--muted)" }}>actioned or dismissed — won't be re-suggested</span>
+              <Icon name="chevD" size={16} style={{ marginLeft:"auto", color:"var(--faint)", transform:showResolved?"rotate(180deg)":"none", transition:"transform .2s" }} />
+            </button>
+            {showResolved && (
+              <div style={{ display:"flex", flexDirection:"column", gap:6, marginTop:8 }}>
+                {resolvedAll.map((f,i)=>(
+                  <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5, opacity:.7 }}>
+                    <Icon name="check" size={14} style={{ color:"var(--teal)" }} />
+                    <span style={{ flex:1, textDecoration:"line-through", textDecorationColor:"var(--faint)" }}>{f.title}</span>
+                    <span style={{ fontFamily:"var(--mono)", color:"var(--muted)", fontSize:11 }}>{f.page}</span>
+                    <Chip tone={f._res==="dismissed"?"gray":"teal"} size="sm">{f._res==="dismissed"?"dismissed":(f._res==="verified"?"fixed":f._res)}</Chip>
+                    {f._res==="dismissed" && <NeoButton kind="ghost" size="sm" icon="undo" onClick={()=>ctx.reopenFinding(f)}>Reopen</NeoButton>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </SoftCard>
     </div>
   );
 }
 
-Object.assign(window, { PageHead, SitesScreen, AddSiteModal, RunAuditModal, AuditsScreen });
+Object.assign(window, { PageHead, SitesScreen, AddSiteModal, RunAuditModal, AuditsScreen, seoFindingKey });

@@ -25,18 +25,19 @@ export function hasKey() { return Boolean(process.env.PERPLEXITY_API_KEY); }
 // briefs / deeper synthesis with more sources; sonar-reasoning = multi-step.
 const MODELS = { fast: 'sonar', pro: 'sonar-pro', reason: 'sonar-reasoning' };
 
-// Low-level grounded ask. Always UK-scoped. Returns { answer, sources, cost }.
-export async function ask({ system = '', user, model = 'fast', recency, domains, maxTokens = 900, temperature = 0.2 } = {}) {
+// Low-level grounded ask. Scope + geo default to the UK but can be overridden per
+// site's target market (scope clause + ISO geo). Returns { answer, sources, cost }.
+export async function ask({ system = '', user, model = 'fast', recency, domains, maxTokens = 900, temperature = 0.2, scope, geo } = {}) {
   const body = {
     model: MODELS[model] || model,
     messages: [
-      { role: 'system', content: `${system}\n\n${ukScope()}`.trim() },
+      { role: 'system', content: `${system}\n\n${scope || ukScope()}`.trim() },
       { role: 'user', content: user },
     ],
     max_tokens: maxTokens,
     temperature,
-    // Geo-lock results to the United Kingdom.
-    web_search_options: { user_location: { country: UK.country } },
+    // Geo-lock results to the target market (UK by default).
+    web_search_options: { user_location: { country: geo || UK.country } },
   };
   if (recency) body.search_recency_filter = recency;             // 'day'|'week'|'month'
   if (domains && domains.length) body.search_domain_filter = domains.slice(0, 10);
