@@ -4253,6 +4253,28 @@ function App() {
       }
       toast("Fix proposal generated → review queue","teal");
     },
+    // Manually cross off a finding (stable key) so re-audits stop re-suggesting it.
+    dismissFinding:(finding)=>{
+      const key=(window.seoFindingKey?window.seoFindingKey(finding):(finding.key||finding.id));
+      if(isLive()){
+        API.createProposal({site_id:siteId,owner:site.owner,finding_id:key,disc:finding.disc||"seo",risk:"low",channel:"manual",title:finding.title,page:finding.page||"/",impact:"—",target:"—",field:"manual",before_val:finding.detail||finding.title,after_val:"Marked done by user",status:"dismissed"}).then(async()=>{
+          const fresh=await API.listProposals(siteId); window.PROPOSALS=(fresh||[]).map(window.mapProposalRow||(x=>x)); setProposals(window.PROPOSALS);
+          try{ await API.logActivity({site_id:siteId,owner:site.owner,type:"approved",actor:"You",icon:"check",text:"Marked done — "+finding.title,meta:finding.page||""}); }catch(e){}
+        }).catch(e=>toast("Couldn't mark done: "+e.message,"clay"));
+      }
+      toast("Marked done — crossed off, won't be re-suggested","teal");
+    },
+    // Undo a manual dismissal (only dismissals; real fixes stay resolved).
+    reopenFinding:(finding)=>{
+      const key=(window.seoFindingKey?window.seoFindingKey(finding):(finding.key||finding.id));
+      const row=(window.PROPOSALS||[]).find(p=>p.findingId===key && p.status==="dismissed");
+      if(isLive() && row){
+        API.updateProposal(row.id,{status:"reopened"}).then(async()=>{
+          const fresh=await API.listProposals(siteId); window.PROPOSALS=(fresh||[]).map(window.mapProposalRow||(x=>x)); setProposals(window.PROPOSALS);
+        }).catch(e=>toast("Couldn't reopen: "+e.message,"clay"));
+      }
+      toast("Reopened","gold");
+    },
     openRunAudit:()=>setRunAuditOpen(true),
     closeRunAudit:()=>setRunAuditOpen(false),
     openAddSite:(s)=>{ setAddSiteFor(s); setAddSiteOpen(true); },
