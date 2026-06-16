@@ -2487,30 +2487,43 @@ function GscScreen({ ctx }) {
   // One-click content refresh: write a grounded freshness block live + re-index.
   const [refreshFor,setRefreshFor] = useState(null);  // { page, loading?, result? }
   const [refreshAll,setRefreshAll] = useState(null);  // { done, total } while bulk-running
-  const doRefresh = (d)=>{
-    setRefreshFor({ page:d.page, loading:true });
-    return API.contentRefresh(s.id, d, true).then(r=>{
-      setRefreshFor({ page:d.page, result:r });
-      if(r.status==="applied") ctx.toast("Refreshed live"+(r.indexed&&r.indexed.ok?" + submitted to Google for re-indexing":"")+" ✓","teal");
-      else if(r.status==="blocked") ctx.toast("This site is read-only — arm writes first","gold");
-      else if(r.status==="manual") ctx.toast("Page-builder page — copy the block into your editor","gold");
-      else if(r.error) ctx.toast(r.error,"clay");
-      return r;
-    }).catch(e=>{ setRefreshFor({ page:d.page, result:{ error:e.message } }); ctx.toast(e.message,"clay"); });
+  const doRefresh = async (d)=>{
+    setRefreshFor({ page:d.page, loading:true, step:"content" });
+    let r;
+    try{ r = await API.contentRefresh(s.id, d, true); }
+    catch(e){ setRefreshFor({ page:d.page, result:{ error:e.message } }); ctx.toast(e.message,"clay"); return {error:e.message}; }
+    // Then optimise THAT page's images (best-effort) — "update + optimise" in one action.
+    let img=null;
+    if(r.status==="applied" || r.status==="manual"){
+      setRefreshFor({ page:d.page, loading:true, step:"images", result:r });
+      try{ img = await API.pageOptimizeImages(s.id, d, true); }catch(e){ img={ error:e.message }; }
+    }
+    const merged = Object.assign({}, r, { images:img });
+    setRefreshFor({ page:d.page, result:merged });
+    const imgN = (img && img.uploaded) || 0, imgKB = (img && img.savedKB) || 0;
+    if(r.status==="applied") ctx.toast("Refreshed live"+(imgN?(" · "+imgN+" image(s) optimised ("+(imgKB/1024).toFixed(1)+" MB)"):"")+(r.indexed&&r.indexed.ok?" · re-indexed":"")+" ✓","teal");
+    else if(r.status==="blocked") ctx.toast("This site is read-only — arm writes first","gold");
+    else if(r.status==="manual") ctx.toast("Content needs pasting (page-builder)"+(imgN?(" · "+imgN+" image(s) optimised"):""),"gold");
+    else if(r.error) ctx.toast(r.error,"clay");
+    return merged;
   };
   const undoRefresh = (d)=>{
     API.contentRefreshUndo(s.id, d).then(r=>{ ctx.toast(r.status==="removed"?"Refresh removed from the page":(r.reason||"Nothing to undo"),"teal"); setRefreshFor(null); }).catch(e=>ctx.toast(e.message,"clay"));
   };
   const doRefreshAll = async ()=>{
     const pages=(decay&&decay.pages)||[]; if(!pages.length) return;
-    let applied=0,manual=0,blocked=0;
+    let applied=0,manual=0,blocked=0,imgs=0;
     for(let i=0;i<pages.length;i++){
       setRefreshAll({ done:i, total:pages.length });
-      try{ const r=await API.contentRefresh(s.id, pages[i], true); if(r.status==="applied")applied++; else if(r.status==="manual")manual++; else if(r.status==="blocked")blocked++; }catch(e){}
+      try{
+        const r=await API.contentRefresh(s.id, pages[i], true);
+        if(r.status==="applied")applied++; else if(r.status==="manual")manual++; else if(r.status==="blocked"){blocked++;continue;}
+        if(r.status==="applied"||r.status==="manual"){ try{ const im=await API.pageOptimizeImages(s.id, pages[i], true); imgs+=(im&&im.uploaded)||0; }catch(e){} }
+      }catch(e){}
     }
     setRefreshAll(null);
     if(blocked) ctx.toast("Site is read-only — arm writes for it, then retry","gold");
-    else ctx.toast(applied+" refreshed & re-indexed"+(manual?(" · "+manual+" need pasting (page-builder)"):"")+" ✓","teal");
+    else ctx.toast(applied+" refreshed & re-indexed"+(imgs?(" · "+imgs+" image(s) optimised"):"")+(manual?(" · "+manual+" need pasting (page-builder)"):"")+" ✓","teal");
   };
 
   const connect = ()=>{
@@ -2779,7 +2792,7 @@ function GscScreen({ ctx }) {
                   </div>
                   <span style={{ display:"inline-flex", gap:8 }}>
                     {decay && (decay.pages||[]).length>0 && (
-                      <NeoButton kind="soft" size="sm" icon={refreshAll?undefined:"sparkles"} disabled={!!refreshAll} onClick={doRefreshAll}>{refreshAll&&<Icon name="cog" size={15} className="audit-spin" />}{refreshAll?("Refreshing "+(refreshAll.done+1)+"/"+refreshAll.total+"…"):"Refresh all & index"}</NeoButton>
+                      <NeoButton kind="soft" size="sm" icon={refreshAll?undefined:"sparkles"} disabled={!!refreshAll} onClick={doRefreshAll}>{refreshAll&&<Icon name="cog" size={15} className="audit-spin" />}{refreshAll?("Refreshing "+(refreshAll.done+1)+"/"+refreshAll.total+"…"):"Refresh all & optimise"}</NeoButton>
                     )}
                     <NeoButton kind="primary" size="sm" icon={decayBusy?undefined:"trend"} disabled={decayBusy} onClick={loadDecay}>{decayBusy&&<Icon name="cog" size={15} className="audit-spin" />}{decayBusy?"Analyzing…":"Find decaying pages"}</NeoButton>
                   </span>
@@ -2801,7 +2814,7 @@ function GscScreen({ ctx }) {
                         <div style={{ display:"flex", alignItems:"center", gap:10, marginTop:7, flexWrap:"wrap" }}>
                           <span style={{ fontSize:11.5, color:"var(--muted)" }}>{d.priorClicks}→{d.recentClicks} clicks · pos {d.prevPosition}→{d.position} {d.positionDrift>0?<b style={{color:"var(--clay)"}}>(+{d.positionDrift})</b>:null}</span>
                           <span style={{ marginLeft:"auto", display:"inline-flex", gap:7 }}>
-                            <NeoButton kind="primary" size="sm" icon={(refreshFor&&refreshFor.page===d.page&&refreshFor.loading)?undefined:"sparkles"} disabled={refreshFor&&refreshFor.page===d.page&&refreshFor.loading} onClick={()=>doRefresh(d)}>{refreshFor&&refreshFor.page===d.page&&refreshFor.loading&&<Icon name="cog" size={14} className="audit-spin" />}{refreshFor&&refreshFor.page===d.page&&refreshFor.loading?"Refreshing…":"Refresh & index"}</NeoButton>
+                            <NeoButton kind="primary" size="sm" icon={(refreshFor&&refreshFor.page===d.page&&refreshFor.loading)?undefined:"sparkles"} disabled={refreshFor&&refreshFor.page===d.page&&refreshFor.loading} onClick={()=>doRefresh(d)}>{refreshFor&&refreshFor.page===d.page&&refreshFor.loading&&<Icon name="cog" size={14} className="audit-spin" />}{refreshFor&&refreshFor.page===d.page&&refreshFor.loading?(refreshFor.step==="images"?"Optimising images…":"Refreshing…"):"Refresh & optimise"}</NeoButton>
                             <NeoButton kind="ghost" size="sm" icon="doc" onClick={()=>genBrief(d)}>Brief</NeoButton>
                           </span>
                         </div>
@@ -2820,6 +2833,9 @@ function GscScreen({ ctx }) {
                                   {(r.parts.points||[]).length>0 && <ul style={{ margin:"2px 0 0 16px", padding:0 }}>{r.parts.points.map((p,j)=><li key={j} style={{ fontSize:11.5, marginBottom:2 }}>{p}</li>)}</ul>}
                                 </div>
                               )}
+                              {r.images && (r.images.uploaded>0
+                                ? <div style={{ fontSize:11.5, color:"var(--t-700)", marginTop:6, display:"flex", alignItems:"center", gap:6 }}><Icon name="image" size={13} />Optimised {r.images.uploaded} image(s) on this page · {(r.images.savedKB/1024).toFixed(1)} MB lighter{r.images.relinked?(" · "+r.images.relinked+" re-linked"):""}</div>
+                                : <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:6 }}>{r.images.error?("Images: "+r.images.error):(r.images.note||"Images: already optimised on this page")}</div>)}
                               <div style={{ marginTop:8 }}><NeoButton kind="ghost" size="sm" icon="undo" onClick={()=>undoRefresh(d)}>Undo (remove block)</NeoButton></div>
                             </>)}
                             {blocked && <div style={{ fontSize:12.5, color:"var(--gold)" }}><b>Site is read-only.</b> {r.reason} Arm writes for this site in its settings, then click Refresh again.</div>}
