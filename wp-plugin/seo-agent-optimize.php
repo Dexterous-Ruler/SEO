@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.6.0
+ * Version:     1.6.1
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -262,7 +262,7 @@ class SEO_Agent_Optimize {
             'methods'  => 'GET',
             'permission_callback' => $perm,
             'callback' => function () {
-                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block'], 'version' => '1.6.0'];
+                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets'], 'version' => '1.6.1'];
             },
         ]);
     }
@@ -353,11 +353,12 @@ function seoagent_text_units($html, &$units) {
 }
 
 // Text-bearing Elementor widget settings we may edit/scan (kept in ONE place so
-// insertion and validation always agree).
+// insertion and validation always agree). Includes repeater-item fields (icon-list
+// 'text', tabs/accordion 'tab_title'/'tab_content') which v1.6.1 now reaches.
 function seoagent_text_fields() {
-    return ['editor', 'title', 'text', 'description', 'content', 'tab_content', 'item_description',
-            'description_text', 'title_text', 'heading_title', 'testimonial_content', 'blockquote_content',
-            'alert_title', 'alert_description', 'caption'];
+    return ['editor', 'title', 'text', 'description', 'content', 'tab_content', 'tab_title', 'item_text',
+            'item_description', 'description_text', 'title_text', 'heading_title', 'testimonial_content',
+            'blockquote_content', 'alert_title', 'alert_description', 'caption'];
 }
 // A widget that is itself a link (button, or any widget with a link URL) — wrapping
 // its text would create nested <a>, so we never insert into / suggest those.
@@ -370,20 +371,46 @@ function seoagent_widget_is_linked($el) {
     return false;
 }
 
+/* Walk ONE widget's settings (incl. nested repeater arrays — icon-list, tabs,
+   accordion, price-list…) and insert the link into the first text field (from
+   seoagent_text_fields) that contains the anchor. Skips any sub-item that is
+   itself a link (link.url set) to avoid nesting <a>. v1.6.1. */
+function seoagent_walk_settings(&$settings, $anchor, $href, &$done) {
+    if ($done || !is_array($settings)) return;
+    $fields = seoagent_text_fields();
+    foreach ($settings as $k => &$v) {
+        if ($done) return;
+        if (is_string($v) && $v !== '' && in_array($k, $fields, true)) {
+            list($nh, $changed) = seoagent_insert_into_html($v, $anchor, $href);
+            if ($changed) { $v = $nh; $done = true; return; }
+        } elseif (is_array($v)) {
+            if (isset($v['link']['url']) && $v['link']['url'] !== '') continue;   // linked repeater item → skip
+            seoagent_walk_settings($v, $anchor, $href, $done);
+        }
+    }
+    unset($v);
+}
+/* Same recursion, read-only: collect linkable text units. */
+function seoagent_collect_settings_units($settings, &$units) {
+    if (!is_array($settings)) return;
+    $fields = seoagent_text_fields();
+    foreach ($settings as $k => $v) {
+        if (is_string($v) && $v !== '' && in_array($k, $fields, true)) seoagent_text_units($v, $units);
+        elseif (is_array($v)) {
+            if (isset($v['link']['url']) && $v['link']['url'] !== '') continue;
+            seoagent_collect_settings_units($v, $units);
+        }
+    }
+}
+
 /* Recursively walk Elementor's element tree; insert the link into the first
-   HTML-bearing widget setting that contains the anchor text. */
+   text-bearing widget setting (incl. repeater items) that contains the anchor. */
 function seoagent_walk_elementor(&$els, $anchor, $href, &$done) {
     if ($done || !is_array($els)) return;
-    $fields = seoagent_text_fields();
     foreach ($els as &$el) {
         if ($done) return;
         if (!empty($el['settings']) && is_array($el['settings']) && !seoagent_widget_is_linked($el)) {
-            foreach ($fields as $k) {
-                if (isset($el['settings'][$k]) && is_string($el['settings'][$k]) && $el['settings'][$k] !== '') {
-                    list($nh, $changed) = seoagent_insert_into_html($el['settings'][$k], $anchor, $href);
-                    if ($changed) { $el['settings'][$k] = $nh; $done = true; break; }
-                }
-            }
+            seoagent_walk_settings($el['settings'], $anchor, $href, $done);
         }
         if (!$done && !empty($el['elements']) && is_array($el['elements'])) {
             seoagent_walk_elementor($el['elements'], $anchor, $href, $done);
@@ -392,18 +419,13 @@ function seoagent_walk_elementor(&$els, $anchor, $href, &$done) {
 }
 
 /* Recursively collect the linkable text UNITS of Elementor widgets (same fields
-   /insert-link edits, skipping linked widgets, split per text-run via
-   seoagent_text_units) so validation agrees exactly with insertion. */
+   /insert-link edits, incl. repeater items, skipping linked widgets) so
+   validation agrees exactly with insertion. */
 function seoagent_collect_units($els, &$units) {
     if (!is_array($els)) return;
-    $fields = seoagent_text_fields();
     foreach ($els as $el) {
         if (!empty($el['settings']) && is_array($el['settings']) && !seoagent_widget_is_linked($el)) {
-            foreach ($fields as $k) {
-                if (isset($el['settings'][$k]) && is_string($el['settings'][$k]) && $el['settings'][$k] !== '') {
-                    seoagent_text_units($el['settings'][$k], $units);
-                }
-            }
+            seoagent_collect_settings_units($el['settings'], $units);
         }
         if (!empty($el['elements']) && is_array($el['elements'])) seoagent_collect_units($el['elements'], $units);
     }

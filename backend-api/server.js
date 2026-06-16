@@ -295,20 +295,6 @@ const routes = {
   // Sentinel's outbound IP — to allowlist in a site's security plugin/firewall.
   'GET /server-ip': async () => ({ ip: await serverEgressIp() }),
   'POST /server-ip': async () => ({ ip: await serverEgressIp() }),
-  // Diagnostic: fetch a public URL FROM Sentinel's server and report status +
-  // identifying headers + a body snippet (to see which firewall is blocking us).
-  'POST /probe-url': async (body) => {
-    let u; try { u = new URL(body.url); } catch (e) { return { error: 'invalid url' }; }
-    if (!/^https?:$/.test(u.protocol) || /^(localhost|127\.|10\.|192\.168\.|169\.254\.|::1)/i.test(u.hostname)) return { error: 'only public http(s) URLs allowed' };
-    try {
-      const r = await fetch(u.toString(), { headers: { 'User-Agent': 'SentinelSEO/1.0' }, redirect: 'manual' });
-      const h = {};
-      for (const k of ['server', 'cf-ray', 'cf-cache-status', 'x-powered-by', 'x-sucuri-id', 'x-sucuri-block', 'location']) { const v = r.headers.get(k); if (v) h[k] = v; }
-      const text = await r.text().catch(() => '');
-      const sig = ['wordfence', 'sucuri', 'cloudflare', 'sitelock', 'modsecurity', 'mod_security', 'litespeed', 'imunify', 'wp engine', 'kinsta'].filter((s) => new RegExp(s, 'i').test(text) || Object.values(h).some((v) => new RegExp(s, 'i').test(v)));
-      return { status: r.status, ip: await serverEgressIp(), headers: h, signatures: sig, bodySnippet: text.replace(/\s+/g, ' ').slice(0, 600) };
-    } catch (e) { return { error: e.message }; }
-  },
   // Live-site health: what actually renders the public domain (WordPress / Drupal
   // / Wix / parked). Drives the "edits won't show on your live site" banner so we
   // never silently edit a WordPress backend that isn't what the domain serves.
