@@ -93,7 +93,7 @@
     contentIntel(siteId, niche) { return engine("/content-intel", { siteId, niche }); },
     contentOpportunities(siteId, opts) { return engine("/content-opportunities", Object.assign({ siteId }, opts || {})); },
     contentBrief(siteId, keyword, intent) { return engine("/content-brief", { siteId, keyword, intent }); },
-    trendingIntel(siteId, niche) { return engine("/trending-intel", { siteId, niche }); },
+    trendingIntel(siteId, niche, db) { return engine("/trending-intel", { siteId, niche, db }); },
     researchStatus() { return engine("/research-status", {}); },
     adminStatus() { return engine("/admin-status", {}); },
     promptsList(siteId) { return engine("/prompts-list", { siteId }); },

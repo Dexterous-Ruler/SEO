@@ -1346,10 +1346,23 @@ function OpportunitiesScreen({ ctx }) {
   const [trendBusy,setTrendBusy] = useState(false);
   const [briefs,setBriefs] = useState({});   // clusterIndex → {brief, sources}
   const [briefBusy,setBriefBusy] = useState(-1);
-  useEffect(()=>{ setData(null); setErr(null); setTrend(null); setBriefs({}); },[s.id]);
+  // Target country — same per-site market as the keyword data (semrush_db). Switching it
+  // here re-points opportunities, trends & briefs at that country (mirrors Content Intel).
+  const [dbVal,setDbVal] = useState(s.semrush_db||"uk");
+  const [dbList,setDbList] = useState(null);
+  useEffect(()=>{ setData(null); setErr(null); setTrend(null); setBriefs({}); setDbVal(s.semrush_db||"uk"); },[s.id]);
+  useEffect(()=>{ if(live&&!dbList) API.siteDatabase(s.id).then(r=>{ if(r&&r.countries) setDbList(r.countries); }).catch(()=>{}); },[live]);
+  const changeCountry = (db)=>{
+    if(!db||db===dbVal) return;
+    setDbVal(db); s.semrush_db=db;
+    var site=window.SITES.find(x=>x.id===s.id); if(site) site.semrush_db=db;
+    setData(null); setTrend(null); setBriefs({});   // stale to the old market
+    if(live) API.siteDatabase(s.id, db).then(()=>ctx.toast("Target country set to "+db.toUpperCase()+" — re-run to refresh for this market","teal")).catch(()=>{});
+  };
+  const cName = ((dbList||[]).find(c=>c.db===dbVal)||{}).label || dbVal.toUpperCase();
 
-  const load = ()=>{ setBusy(true); setErr(null); API.contentOpportunities(s.id,{}).then(r=>{ if(r.error){setErr(r.error);return;} setData(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy(false)); };
-  const loadTrending = ()=>{ setTrendBusy(true); API.trendingIntel(s.id).then(r=>setTrend(r)).catch(e=>setTrend({error:e.message})).finally(()=>setTrendBusy(false)); };
+  const load = ()=>{ setBusy(true); setErr(null); API.contentOpportunities(s.id,{db:dbVal}).then(r=>{ if(r.error){setErr(r.error);return;} setData(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy(false)); };
+  const loadTrending = ()=>{ setTrendBusy(true); API.trendingIntel(s.id, undefined, dbVal).then(r=>setTrend(r)).catch(e=>setTrend({error:e.message})).finally(()=>setTrendBusy(false)); };
   const genBrief = (c,i)=>{
     setBriefBusy(i);
     API.contentBrief(s.id, c.primaryKeyword||c.suggestedTitle, c.intent).then(r=>{
@@ -1375,8 +1388,14 @@ function OpportunitiesScreen({ ctx }) {
   return (
     <div className="rise">
       <PageHead title="Content Opportunities" sub="Keyword clusters from your rankings, competitors & live trends (in your target market) — gap-checked against your sitemap.">
-        <div style={{ display:"flex", gap:10, alignItems:"center" }}>
-          <Chip tone="gray" size="sm" icon="globe">UK only</Chip>
+        <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+          <div title="Target country for opportunities, trends & briefs — sets this site's market" style={{ display:"inline-flex", alignItems:"center", gap:5, padding:"5px 9px 5px 11px", borderRadius:99, background:"var(--surface)", boxShadow:"var(--neo-xs)", fontSize:12, fontWeight:700, color:"var(--ink)" }}>
+            <Icon name="globe" size={13} style={{ color:"var(--muted)" }} />
+            <select value={dbVal} onChange={e=>changeCountry(e.target.value)} style={{ appearance:"none", WebkitAppearance:"none", border:"none", background:"transparent", fontSize:12, fontWeight:700, fontFamily:"inherit", color:"var(--ink)", cursor:"pointer", outline:"none", paddingRight:1 }}>
+              {(dbList||[{db:dbVal,label:dbVal.toUpperCase()}]).map(c=>(<option key={c.db} value={c.db}>{c.label}</option>))}
+            </select>
+            <span style={{ color:"var(--muted)", fontSize:10, marginLeft:-2 }}>▾</span>
+          </div>
           {data && <NeoButton kind="soft" size="sm" icon="layers" onClick={()=>pushAirtable(clusters.filter(c=>c.isGap),"gaps")} disabled={pushing==="gaps"}>{pushing==="gaps"&&<Icon name="cog" size={14} className="audit-spin" />}Send gaps → Airtable</NeoButton>}
           <NeoButton kind="primary" size="sm" icon={busy?undefined:"sparkles"} disabled={busy} onClick={load}>{busy&&<Icon name="cog" size={15} className="audit-spin" />}{busy?"Analyzing…":data?"Re-analyze":"Find opportunities"}</NeoButton>
         </div>
@@ -1387,9 +1406,9 @@ function OpportunitiesScreen({ ctx }) {
       {/* Live UK trending intelligence (Perplexity + Tavily) */}
       {live && (
         <SoftCard hover={false} style={{ marginBottom:18 }}>
-          <SectionHead sub="What's trending in your niche across the UK web right now — grounded & sourced" right={
+          <SectionHead sub={`What's trending in your niche in ${cName} right now — grounded & sourced`} right={
             <NeoButton kind="soft" size="sm" icon={trendBusy?undefined:"trend"} disabled={trendBusy} onClick={loadTrending}>{trendBusy&&<Icon name="cog" size={14} className="audit-spin" />}{trendBusy?"Scanning…":trend?"Refresh":"What's trending?"}</NeoButton>
-          }>Trending now (UK)</SectionHead>
+          }>{`Trending now (${cName})`}</SectionHead>
           {trend && trend.error && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"4px 2px" }}>{trend.error}</div>}
           {trend && !trend.error && (
             <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
@@ -1398,7 +1417,7 @@ function OpportunitiesScreen({ ctx }) {
               {(trend.sources||[]).length>0 && <div style={{ fontSize:11, color:"var(--faint)" }}>Sources: {(trend.sources||[]).slice(0,5).map((s,i)=>(<a key={i} href={s.url} target="_blank" style={{ color:"var(--t-600)", marginRight:8 }}>{s.domain||(i+1)}</a>))}</div>}
             </div>
           )}
-          {!trend && !trendBusy && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"2px" }}>Surface this week's trending UK topics in your niche, with sources — fresh content ideas grounded in the live web.</div>}
+          {!trend && !trendBusy && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"2px" }}>{`Surface this week's trending topics in ${cName} in your niche, with sources — fresh content ideas grounded in the live web.`}</div>}
         </SoftCard>
       )}
       {live && err && <div style={{ marginBottom:16 }}><ErrBanner msg={err} onRetry={load} /></div>}
@@ -1453,7 +1472,7 @@ function OpportunitiesScreen({ ctx }) {
                         ))}
                       </div>
                       <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                        <NeoButton kind="primary" size="sm" icon={briefBusy===i?undefined:"sparkles"} disabled={briefBusy===i} onClick={()=>genBrief(c,i)}>{briefBusy===i&&<Icon name="cog" size={14} className="audit-spin" />}{briefBusy===i?"Researching…":briefs[i]?"Regenerate brief":"Generate brief (UK)"}</NeoButton>
+                        <NeoButton kind="primary" size="sm" icon={briefBusy===i?undefined:"sparkles"} disabled={briefBusy===i} onClick={()=>genBrief(c,i)}>{briefBusy===i&&<Icon name="cog" size={14} className="audit-spin" />}{briefBusy===i?"Researching…":briefs[i]?"Regenerate brief":`Generate brief (${cName})`}</NeoButton>
                         <NeoButton kind="soft" size="sm" icon="layers" onClick={()=>pushAirtable([c],"one"+i)} disabled={pushing==="one"+i}>{pushing==="one"+i&&<Icon name="cog" size={14} className="audit-spin" />}Send to Airtable</NeoButton>
                       </div>
                       {briefs[i] && (()=>{ const b=briefs[i].brief||{}; return (

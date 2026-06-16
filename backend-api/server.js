@@ -1067,7 +1067,7 @@ const routes = {
     const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
     const niche = body.niche || (site && site.niche) || (site && site.stack && site.stack.type) || (site && site.name);
     if (!niche) return { error: 'No niche to research.' };
-    try { return await research.trendingIntel({ niche, db: site && site.semrush_db, now: Date.now() }); }
+    try { return await research.trendingIntel({ niche, db: body.db || (site && site.semrush_db), now: Date.now() }); }
     catch (e) { return { error: 'Trending analysis failed: ' + e.message }; }
   },
 
