@@ -29,17 +29,25 @@ async function download(url) {
 }
 const kb = (b) => Math.round(b / 1024);
 
-async function fetchImages(wp, perPage = 100) {
-  // Media REST uses status "inherit"; media_type=image filters to images.
-  const items = await wp.request(`/media?per_page=${perPage}&media_type=image&_fields=id,source_url,mime_type,media_details,title`).catch(() => []);
-  return (Array.isArray(items) ? items : [])
-    .filter((m) => /image\/(jpe?g|png)/i.test(m.mime_type || ''))
-    .map((m) => ({
-      id: m.id, url: m.source_url, mime: m.mime_type,
-      sizeKB: kb(m.media_details?.filesize || 0),
-      w: m.media_details?.width, h: m.media_details?.height,
-      title: (m.title?.rendered || '').replace(/<[^>]+>/g, ''),
-    }));
+// Fetch ALL raster images across the media library (paginated), not just the
+// first 100 — a big library hid most heavy images behind page 1.
+async function fetchImages(wp, maxPages = 15) {
+  const out = [];
+  for (let p = 1; p <= maxPages; p++) {
+    const items = await wp.request(`/media?per_page=100&page=${p}&media_type=image&_fields=id,source_url,mime_type,media_details,title`).catch(() => []);
+    if (!Array.isArray(items) || !items.length) break;
+    for (const m of items) {
+      if (!/image\/(jpe?g|png)/i.test(m.mime_type || '')) continue;
+      out.push({
+        id: m.id, url: m.source_url, mime: m.mime_type,
+        sizeKB: kb(m.media_details?.filesize || 0),
+        w: m.media_details?.width, h: m.media_details?.height,
+        title: (m.title?.rendered || '').replace(/<[^>]+>/g, ''),
+      });
+    }
+    if (items.length < 100) break;
+  }
+  return out;
 }
 
 // WebP files already in the media library. Returns:
@@ -68,46 +76,57 @@ async function existingWebp(wp, pages = 8) {
 const stemOf = (url) => (url.split('/').pop() || '').replace(/\.(jpe?g|png)$/i, '').toLowerCase();
 
 // Scan: list heavy raster images + the savings opportunity (read-only).
-export async function scanMedia(siteId, { minKB = 80, limit = 60 } = {}) {
+// Each heavy image is tagged `alreadyWebp` (a WebP sibling exists) so converted
+// ones visibly drop off on re-scan instead of re-appearing. `heavyCount` is the
+// ACTIONABLE count (still needing conversion); `alreadyCount` are done.
+export async function scanMedia(siteId, { minKB = 80, limit = 200 } = {}) {
   const { baseUrl, username, appPassword } = await credsForSite(siteId);
   const wp = new WordPressClient({ baseUrl, username, appPassword });
   const all = await fetchImages(wp);
-  const heavy = all.filter((i) => i.sizeKB >= minKB).sort((a, b) => b.sizeKB - a.sizeKB);
-  const totalKB = heavy.reduce((s, i) => s + i.sizeKB, 0);
+  const ex = await existingWebp(wp).catch(() => ({ byStem: new Set(), byExact: new Map() }));
+  const heavy = all.filter((i) => i.sizeKB >= minKB).sort((a, b) => b.sizeKB - a.sizeKB)
+    .map((i) => { const st = stemOf(i.url); return { ...i, alreadyWebp: ex.byExact.has(st) || ex.byStem.has(st) }; });
+  const needing = heavy.filter((i) => !i.alreadyWebp);
+  const totalKB = needing.reduce((s, i) => s + i.sizeKB, 0);
   return {
-    totalImages: all.length, heavyCount: heavy.length,
+    totalImages: all.length,
+    heavyCount: needing.length,                 // still needing conversion (actionable)
+    alreadyCount: heavy.length - needing.length, // already have WebP
     totalHeavyKB: totalKB, estSavingKB: Math.round(totalKB * 0.65),
-    images: heavy.slice(0, limit),
+    images: heavy.slice(0, limit),              // includes done ones (flagged) so UI shows progress
   };
 }
 
 // Optimize: compress to WebP. apply=false → preview savings (no write);
 // apply=true → upload WebP to the media library (force-bypasses DRY_RUN since
 // the click is the explicit approval). Capped + sequential for safety.
-export async function optimizeImages(siteId, { ids = null, quality = 80, max = 8, apply = false, skipExisting = false } = {}) {
+export async function optimizeImages(siteId, { ids = null, quality = 80, max = 10, apply = false, skipExisting = false } = {}) {
   const { baseUrl, username, appPassword } = await credsForSite(siteId);
   const wp = new WordPressClient({ baseUrl, username, appPassword });
   let targets = await fetchImages(wp);
   if (ids && ids.length) targets = targets.filter((i) => ids.includes(i.id));
-  // Work on the heaviest first.
-  const work = targets.sort((a, b) => b.sizeKB - a.sizeKB).slice(0, Math.min(max, 20));
-  // Split into "needs converting" vs "already has WebP". The already-converted ones
-  // get RE-LINKED (original→existing WebP) so the live page actually serves them —
-  // a re-run is no longer a no-op.
+  // Heaviest first across the WHOLE library.
+  targets.sort((a, b) => b.sizeKB - a.sizeKB);
+  // CRITICAL: filter out already-converted FIRST, then take the heaviest `max`
+  // of what REMAINS — so successive runs march through the full backlog instead
+  // of forever re-considering the same top-8 (the old slice-before-filter bug).
   const relinkMap = {};
-  let toProcess = work;
+  let needing = targets;
   if (skipExisting) {
     const ex = await existingWebp(wp).catch(() => ({ byStem: new Set(), byExact: new Map() }));
-    toProcess = [];
-    for (const i of work) {
+    needing = [];
+    for (const i of targets) {
       const st = stemOf(i.url);
       const webpUrl = ex.byExact.get(st);
-      if (webpUrl || ex.byStem.has(st)) { if (webpUrl) relinkMap[i.url] = webpUrl; }
-      else toProcess.push(i);
+      if (webpUrl || ex.byStem.has(st)) { if (webpUrl) relinkMap[i.url] = webpUrl; }  // already converted → re-link
+      else needing.push(i);
     }
   }
+  const batchMax = Math.min(max, 20);                          // per-request safety cap (memory/timeout)
+  const toProcess = needing.slice(0, batchMax);
+  const remaining = Math.max(0, needing.length - toProcess.length); // still queued for the next batch
   const relinked = Object.keys(relinkMap).length;
-  if (!toProcess.length && !relinked) return apply ? { applied: true, processed: 0, uploaded: 0, relinked: 0, failed: 0, errors: [], savedKB: 0, results: [], note: 'nothing to optimize' } : { error: 'No matching images to optimize.' };
+  if (!toProcess.length && !relinked) return apply ? { applied: true, processed: 0, uploaded: 0, relinked: 0, remaining: 0, failed: 0, errors: [], savedKB: 0, results: [], note: 'nothing to optimize' } : { error: 'No images need converting — every heavy image already has a WebP.' };
 
   const results = [];
   for (const img of toProcess) {
@@ -147,7 +166,7 @@ export async function optimizeImages(siteId, { ids = null, quality = 80, max = 8
   const failed = results.filter((r) => r.error || r.skip).length;
   const errors = results.filter((r) => r.error).map((r) => r.error).slice(0, 3);
   const note = (!uploaded && relinked) ? `${relinked} image(s) already converted — re-linked their WebP so pages now serve them (needs the optimize plugin installed).` : undefined;
-  return { applied: !!apply, processed: results.length, uploaded, relinked, mapped, failed, errors, savedKB, results, note };
+  return { applied: !!apply, processed: results.length, uploaded, relinked, mapped, remaining, failed, errors, savedKB, results, note };
 }
 
 export default { scanMedia, optimizeImages };

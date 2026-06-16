@@ -19,7 +19,6 @@ import { findOpportunities } from './content-opportunities.js';
 import * as airtable from './airtable.js';
 import * as imageOpt from './image-optimize.js';
 import { generateCssFixes } from './css-fixes.js';
-import * as linkengine from './backlinks.js';
 import * as semrush from './dataforseo.js';
 import { WordPressClient } from '../src/wp/client.js';
 
@@ -188,35 +187,12 @@ async function jobAutoApplyCss(site) {
   } catch (e) { console.error('[scheduler] auto-apply-css', site.id, e && e.message); }
 }
 
-// ── Job: outreach send — send approved (manual) / auto-approved (auto) emails
-// via Resend + follow-ups, per the site's outreach_mode + daily cap. Leader-only,
-// so >1 instance never double-sends. Skips silently if email isn't configured.
-async function jobOutreachSend(site) {
-  try { const r = await linkengine.sendOutreach(site.id, { trigger: 'scheduler' }); if (r && (r.sent || r.followups)) await note(site.id, `Outreach: ${r.sent} sent, ${r.followups} follow-up(s) (${r.mode})`); }
-  catch (e) { /* email/airtable not set up → silent */ }
-}
-
-// ── Job: backlink watch — new / lost / toxic referring domains → alerts ─────
-// Read-only. Costs one DataForSEO referring-domains call per site per run, so
-// it runs weekly. Surfaces lost high-authority links (reclamation) + toxic ones.
-async function jobBacklinkWatch(site) {
-  if (!semrush.hasKey() || !site.url) return;
-  let m;
-  try { m = await linkengine.monitor(site.id, { windowDays: 30 }); } catch (e) { return; }
-  if (!m || m.error) return;
-  if (m.newCount) await note(site.id, `${m.newCount} new referring domain(s) in the last 30 days`, true);
-  if (m.lostHighValue) await note(site.id, `${m.lostHighValue} high-authority backlink(s) lost (30d) — reclamation candidates in Backlinks → Monitor`, false);
-  if (m.toxicCount) await note(site.id, `${m.toxicCount} toxic referring domain(s) flagged (spam ≥ 30) — review in Backlinks → Monitor`, false);
-}
-
 const JOBS = [
   { name: 'auto-index', every: DAY, run: jobAutoIndex },
   { name: 'gsc-health', every: DAY, run: jobGscHealth },
   { name: 'keyword-push', every: 7 * DAY, run: jobKeywordPush },
   { name: 'image-optimize', every: 7 * DAY, run: jobAutoOptimizeImages },
   { name: 'apply-css', every: 7 * DAY, run: jobAutoApplyCss },
-  { name: 'backlink-watch', every: 7 * DAY, run: jobBacklinkWatch },
-  { name: 'outreach-send', every: 6 * 3600000, run: jobOutreachSend },  // every 6h
 ];
 
 async function tick() {
