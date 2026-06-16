@@ -66,8 +66,12 @@ async function existingWebp(wp, pages = 8) {
       const fn = (m.source_url || '').split('/').pop() || '';
       const exact = fn.replace(/\.webp$/i, '').toLowerCase();
       if (exact && !byExact.has(exact)) byExact.set(exact, m.source_url);
-      const base = fn.replace(/(-\d+x\d+)?\.webp$/i, '').toLowerCase();  // strip WxH size variant
-      if (base) byStem.add(base);
+      // Strip WxH size variant AND WordPress's collision suffix (X.webp → X-18.webp
+      // when the name already exists). Without the -N strip, a re-scan never matches
+      // a Sentinel-uploaded WebP back to its original → it re-converts forever and
+      // piles up duplicates. -\d{1,3} avoids eating long numeric IDs / years.
+      const base = fn.replace(/(-\d+x\d+)?(-\d{1,3})?\.webp$/i, '').toLowerCase();
+      if (base) { byStem.add(base); if (!byExact.has(base)) byExact.set(base, m.source_url); }
     }
     if (items.length < 100) break;
   }
