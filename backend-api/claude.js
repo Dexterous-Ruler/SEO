@@ -185,8 +185,8 @@ Rules:
   if (fence) json = fence[1].trim();
   const start = json.indexOf('{'); const end = json.lastIndexOf('}');
   if (start >= 0 && end > start) json = json.slice(start, end + 1);
-  try { return JSON.parse(json); }
-  catch (e) { return { clusters: [], gaps: [], suggestions: [], internalLinks: [], _parseError: true, _raw: txt.slice(0, 500) }; }
+  try { const o = JSON.parse(json); o._targetMarket = country; return o; }
+  catch (e) { return { clusters: [], gaps: [], suggestions: [], internalLinks: [], _targetMarket: country, _parseError: true, _raw: txt.slice(0, 500) }; }
 }
 
 // Generic: ask Claude to draft the "after" value for any proposal, given the finding.
