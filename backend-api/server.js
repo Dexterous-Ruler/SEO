@@ -1579,6 +1579,19 @@ const routes = {
     return { status: 'removed', via: 'content' };
   },
 
+  // Optimise the images USED ON one page (content-decay "refresh & optimise").
+  // apply=false previews; apply=true converts the page's heavy raster images to WebP.
+  'POST /page-optimize-images': async (body) => {
+    const url = (body.page && (body.page.url || body.page.page)) || body.url;
+    if (!body.siteId || !url) return { error: 'siteId and url required' };
+    if (body.apply) {
+      const site = await db.getSite(body.siteId).catch(() => null);
+      if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'This site is read-only — arm writes first.' };
+    }
+    try { return await imageOpt.optimizePageImages(body.siteId, url, { apply: !!body.apply, max: body.max || 12 }); }
+    catch (e) { return { error: 'Page image optimize failed: ' + e.message }; }
+  },
+
   // Save/read a site's competitors + negative keywords (per-site config).
   'POST /site-competitors': async (body) => {
     const patch = {};
@@ -1922,7 +1935,7 @@ const HEAVY_ROUTES = new Set([
   'POST /content-decay', 'POST /content-decay-brief', 'POST /content-refresh', 'POST /content-brief', 'POST /project-plan',
   'POST /narrate', 'POST /scorecard', 'POST /weekly-briefing', 'POST /research', 'POST /auditPage',
   'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
-  'POST /media-scan', 'POST /media-optimize', 'POST /airtable-sync', 'POST /generate-opportunities',
+  'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',
 ]);
 
 const server = createServer(async (req, res) => {

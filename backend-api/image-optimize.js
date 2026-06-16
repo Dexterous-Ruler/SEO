@@ -169,4 +169,29 @@ export async function optimizeImages(siteId, { ids = null, quality = 80, max = 1
   return { applied: !!apply, processed: results.length, uploaded, relinked, mapped, remaining, failed, errors, savedKB, results, note };
 }
 
-export default { scanMedia, optimizeImages };
+// Optimize only the images USED ON a specific page (content-decay "refresh &
+// optimise" flow). Fetches the page, extracts uploads images (incl. srcset +
+// CSS backgrounds), matches them to media items (size-variant tolerant), and
+// converts the heavy ones to WebP. Best-effort; never throws into the caller.
+export async function optimizePageImages(siteId, pageUrl, { apply = false, max = 12 } = {}) {
+  const baseStem = (u) => (String(u).split('/').pop() || '').replace(/(-\d+x\d+)?\.(jpe?g|png)(\?.*)?$/i, '').toLowerCase();
+  let html = '';
+  try { const r = await fetch(pageUrl, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } }); html = await r.text(); }
+  catch (e) { return { error: 'Could not fetch the page to find its images.' }; }
+  const wanted = new Set();
+  let m;
+  const reAttr = /(?:src|data-src|srcset|data-srcset)=["']([^"']+)["']/gi;
+  while ((m = reAttr.exec(html))) { for (const part of m[1].split(',')) { const u = part.trim().split(/\s+/)[0]; if (/\.(jpe?g|png)(\?|$)/i.test(u)) wanted.add(baseStem(u)); } }
+  const reBg = /url\((['"]?)([^'")]+\.(?:jpe?g|png)(?:\?[^'")]*)?)\1\)/gi;
+  while ((m = reBg.exec(html))) { wanted.add(baseStem(m[2])); }
+  if (!wanted.size) return apply ? { applied: true, processed: 0, uploaded: 0, savedKB: 0, results: [], note: 'no raster images on the page' } : { error: 'No raster images found on this page.' };
+
+  const { baseUrl, username, appPassword } = await credsForSite(siteId);
+  const wp = new WordPressClient({ baseUrl, username, appPassword });
+  const all = await fetchImages(wp);
+  const ids = all.filter((i) => wanted.has(baseStem(i.url))).map((i) => i.id);
+  if (!ids.length) return apply ? { applied: true, processed: 0, uploaded: 0, savedKB: 0, results: [], note: 'page images not found in the media library' } : { error: 'This page’s images aren’t in the WordPress media library.' };
+  return optimizeImages(siteId, { ids, apply, max, skipExisting: apply });
+}
+
+export default { scanMedia, optimizeImages, optimizePageImages };
