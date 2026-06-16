@@ -1733,9 +1733,9 @@ function OptimizeScreen({ ctx }) {
                 <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
                   <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4, flexWrap:"wrap" }}>
                     <span style={{ fontSize:12.5, fontWeight:700, color:"var(--ink-2)" }}>{ext.count} authoritative link(s) suggested</span>
-                    {(ext.suggestions||[]).length>0 && <NeoButton kind="soft" size="sm" icon="check" style={{ marginLeft:"auto" }} onClick={()=>applyAll((ext.suggestions||[]).map(l=>({sourcePage:ext.sourcePage,anchor:l.anchor,targetUrl:l.targetUrl})))}>Approve &amp; push all</NeoButton>}
+                    {(ext.suggestions||[]).length>0 && <NeoButton kind="soft" size="sm" icon="check" style={{ marginLeft:"auto" }} onClick={()=>applyAll((ext.suggestions||[]).map(l=>({sourcePage:ext.sourcePage,anchor:l.anchor,targetUrl:l.targetUrl,sourceId:l.sourceId,sourceType:l.sourceType})))}>Approve &amp; push all</NeoButton>}
                   </div>
-                  {(ext.suggestions||[]).map((l,i)=>{ const row={sourcePage:ext.sourcePage,anchor:l.anchor,targetUrl:l.targetUrl}; return (
+                  {(ext.suggestions||[]).map((l,i)=>{ const row={sourcePage:ext.sourcePage,anchor:l.anchor,targetUrl:l.targetUrl,sourceId:l.sourceId,sourceType:l.sourceType}; return (
                     <div key={i} style={{ padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
                       <div style={{ display:"flex", alignItems:"center", gap:9, flexWrap:"wrap", fontSize:13 }}>
                         <span style={{ fontWeight:700, color:"var(--t-700)" }}>“{l.anchor}”</span>
@@ -1751,7 +1751,7 @@ function OptimizeScreen({ ctx }) {
                       {manualHint(row)}
                     </div>
                   );})}
-                  {(ext.suggestions||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No strong authoritative outbound links found for this page.</div>}
+                  {(ext.suggestions||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>{ext.note || "No strong authoritative outbound links found for this page."}</div>}
                 </div>
               )}
               {(!ext || ext._siteId!==s.id) && busy!=="ext" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Enter a page URL to find authoritative outbound links. <b>Approve</b> pushes the link into the live page (Classic/Gutenberg); page-builder pages are flagged for the editor. Links open in a new tab.</div>}

@@ -19,6 +19,61 @@ function stripHtml(html) {
 }
 function cleanTitle(t) { return (t || '').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim(); }
 
+// ── Shared link-grounding helpers (used by internal AND external links so both
+// only ever surface anchors the inserter can actually place — no "Add in editor") ──
+
+// Normalize text for anchor matching (lowercase, collapse whitespace).
+export function normText(s) { return (s || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+
+// Is `anchor` insertable into one of these (normalized) units? FAITHFUL to the
+// plugin inserter's seoagent_anchor_regex: a whole-word/boundary match
+// (non-letter/digit on both sides), spaces flexible — NOT a loose substring.
+// (A loose .includes() passes anchors the inserter then can't place.)
+export function insertableIn(anchor, normUnits) {
+  const a = normText(anchor);
+  if (!a || a.length < 2) return false;
+  const esc = a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+  let re;
+  try { re = new RegExp('(^|[^\\p{L}\\p{N}])(' + esc + ')(?![\\p{L}\\p{N}])', 'iu'); }
+  catch (e) { re = new RegExp('(^|[^A-Za-z0-9])(' + esc + ')(?![A-Za-z0-9])', 'i'); }
+  return normUnits.some((u) => re.test(u));
+}
+
+// Get a page's EDITABLE content as { text, units, authoritative } via the optimize
+// plugin's /page-text (exactly what the inserter can edit) — NOT the rendered page
+// (which includes global nav/footer/CTA blocks we can't touch). Falls back to the
+// rendered page (loose) only when the plugin isn't installed on the site.
+export async function editablePageContent(wp, src) {
+  if (src && src.id) {
+    try {
+      const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/page-text?post_id=${src.id}`);
+      if (r && r.ok) {
+        // Plugin installed → its units are AUTHORITATIVE: exactly the text the
+        // inserter can edit. Trust them even when empty (empty → nothing linkable).
+        const units = (Array.isArray(r.units) ? r.units : (r.text ? [r.text] : [])).filter(Boolean);
+        return { text: r.text || units.join(' '), units, authoritative: true };
+      }
+    } catch (e) {}
+  }
+  try { const res = await fetch(src.url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } }); const t = stripHtml(await res.text()); return { text: t, units: t ? [t] : [], authoritative: false }; }
+  catch (e) { return { text: '', units: [], authoritative: false }; }
+}
+
+// Resolve a page URL → { id, type, title, url } from the site's real pages/posts
+// (handles the homepage, whose link is the site root). Nulls if not matched.
+export async function resolveSourceByUrl(wp, url) {
+  const n = (u) => String(u || '').replace(/\/+$/, '');
+  const [pages, posts] = await Promise.all([
+    wp.list('pages', { perPage: 100, fields: 'id,title,link' }).catch(() => []),
+    wp.list('posts', { perPage: 100, fields: 'id,title,link' }).catch(() => []),
+  ]);
+  const all = [
+    ...(Array.isArray(pages) ? pages : []).map((r) => ({ id: r.id, type: 'pages', title: cleanTitle(r.title?.rendered), url: r.link })),
+    ...(Array.isArray(posts) ? posts : []).map((r) => ({ id: r.id, type: 'posts', title: cleanTitle(r.title?.rendered), url: r.link })),
+  ];
+  return all.find((r) => n(r.url) === n(url)) || { id: null, type: null, title: '', url };
+}
+
 // Suggest internal links for a site. opts.maxSources caps how many source pages
 // we analyze per run (cost control); opts.targetUrl analyses a single page.
 export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null } = {}) {
@@ -47,40 +102,7 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
   // the plugin), so anchors are validated against what we can actually edit — not
   // the rendered page (which includes global nav/footer/CTA blocks we can't touch).
   // Falls back to the rendered page when the optimize plugin isn't installed.
-  const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-  // Is `anchor` insertable into one of these (normalized) units? FAITHFUL to the
-  // plugin inserter's seoagent_anchor_regex: a whole-word/boundary match
-  // (non-letter/digit on both sides), spaces flexible — NOT a loose substring.
-  // (A loose .includes() passed anchors the inserter then can't place.)
-  function insertableIn(anchor, normUnits) {
-    const a = norm(anchor);
-    if (!a || a.length < 2) return false;
-    const esc = a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
-    let re;
-    try { re = new RegExp('(^|[^\\p{L}\\p{N}])(' + esc + ')(?![\\p{L}\\p{N}])', 'iu'); }
-    catch (e) { re = new RegExp('(^|[^A-Za-z0-9])(' + esc + ')(?![A-Za-z0-9])', 'i'); }
-    return normUnits.some((u) => re.test(u));
-  }
-  // Get the page's editable content as { text (for Claude grounding), units (the
-  // individual linkable segments) }. An anchor is only insertable if it fits inside
-  // ONE unit — matching the inserter's per-field/per-segment granularity exactly.
-  async function editable(src) {
-    if (src.id) {
-      try {
-        const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/page-text?post_id=${src.id}`);
-        if (r && r.ok) {
-          // Plugin installed → its units are AUTHORITATIVE: exactly the text the
-          // inserter can edit. Trust them even when empty; do NOT fall back to the
-          // rendered page (which would offer nav/button/menu text we can't link,
-          // producing "Add in editor" anchors). Empty units → nothing linkable here.
-          const units = (Array.isArray(r.units) ? r.units : (r.text ? [r.text] : [])).filter(Boolean);
-          return { text: r.text || units.join(' '), units, authoritative: true };
-        }
-      } catch (e) {}
-    }
-    // Plugin absent/unreachable → best-effort from the rendered page (loose).
-    try { const res = await fetch(src.url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } }); const t = stripHtml(await res.text()); return { text: t, units: t ? [t] : [], authoritative: false }; } catch (e) { return { text: '', units: [], authoritative: false }; }
-  }
+  const norm = normText;   // shared module-level helpers (insertableIn / editablePageContent — see top of file)
 
   // What actually renders the live site? If it's a KNOWN non-WordPress platform
   // (Drupal/Wix/…) or parked, WordPress edits won't appear live — warn. We only
@@ -102,7 +124,7 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
   let dropped = 0;
   let skippedNoUnits = 0;     // pages the plugin reports as having no editable text
   for (const src of sources) {
-    const { text: fullText, units, authoritative } = await editable(src);
+    const { text: fullText, units, authoritative } = await editablePageContent(wp, src);
     if (authoritative && !units.length) { skippedNoUnits++; continue; }
     if (!fullText || fullText.length < 20 || !units.length) continue;
     const normUnits = units.map(norm);

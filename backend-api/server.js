@@ -40,7 +40,7 @@ import { startScheduler } from './scheduler.js';
 import { detectGscDaily, detectAuditHistory } from './anomaly.js';
 import * as tv from './traffic-value.js';
 import { correlationMatrix } from './correlation.js';
-import { suggestForSite as suggestInternalLinks } from './internal-links.js';
+import { suggestForSite as suggestInternalLinks, editablePageContent, insertableIn, normText, resolveSourceByUrl } from './internal-links.js';
 import { generatePageSchema } from './schema-gen.js';
 import { generateCssFixes } from './css-fixes.js';
 import { findOpportunities } from './content-opportunities.js';
@@ -1157,21 +1157,25 @@ const routes = {
     const url = body.targetUrl;
     if (!url) return { error: 'A page URL is required.' };
     try {
-      const site = await db.getSite(body.siteId).catch(() => null);
-      let title = '', text = '';
-      try {
-        const r = await fetch(url, { headers: { 'User-Agent': 'SentinelSEO/1.0' } });
-        const htmlRaw = await r.text();
-        title = (htmlRaw.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
-        text = htmlRaw.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 5000);
-      } catch (e) {}
-      const niche = (site && site.niche) || '';
-      const arr = await claude.externalLinkSuggestions({ url, title: title.trim(), text, niche, siteId: body.siteId });
-      // Keep only anchors that VERBATIM appear on the page, so Approve always inserts.
-      const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-      const hay = norm(text);
-      const applicable = (arr || []).filter((l) => l.anchor && hay.includes(norm(l.anchor)));
-      return { sourcePage: url, count: applicable.length, suggestions: applicable };
+      const { creds, site } = await resolveCreds(body);
+      const wp = clientFrom(creds);
+      // Ground on the page's EDITABLE content (same as internal links) — so every
+      // anchor we surface is one the inserter can actually place. This is what
+      // eliminates "Add in editor": we never suggest nav/header/footer/menu text.
+      const src = await resolveSourceByUrl(wp, url);
+      const { text, units, authoritative } = await editablePageContent(wp, src);
+      if (authoritative && !units.length) {
+        return { sourcePage: url, count: 0, suggestions: [], note: 'No editable body text on this page — its visible text lives in the nav/header/footer or non-editable widgets, which can’t take an in-content link.' };
+      }
+      const niche = (site && site.niche) || (site && site.stack && site.stack.type) || '';
+      const arr = await claude.externalLinkSuggestions({ url, title: src.title || '', text: (text || '').slice(0, 5000), niche, siteId: body.siteId });
+      // Keep only anchors the inserter would actually place: a boundary match inside a
+      // SINGLE editable unit (faithful to the plugin) — not a loose substring of the page.
+      const normUnits = units.map(normText);
+      const applicable = (arr || [])
+        .filter((l) => l.anchor && insertableIn(l.anchor, normUnits))
+        .map((l) => ({ ...l, sourceId: src.id, sourceType: src.type }));
+      return { sourcePage: url, count: applicable.length, suggestions: applicable, droppedNotApplicable: (arr || []).length - applicable.length };
     } catch (e) { return { error: 'External-link analysis failed: ' + e.message }; }
   },
 
