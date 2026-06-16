@@ -40,7 +40,7 @@ export async function findOpportunities(siteId, { db: region, maxKeywords = 160,
   const site = await db.getSite(siteId);
   if (!site) return { error: 'Site not found.' };
   const domain = (site.url || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-  const dbRegion = 'uk'; // UK-ONLY platform — all keyword data geo-locked to the United Kingdom
+  const dbRegion = String(region || site.semrush_db || 'uk').toLowerCase(); // per-site target market (switchable from the UI)
   const sources = {};
 
   // 1) SITEMAP — real published pages (for gap detection + seeds).
