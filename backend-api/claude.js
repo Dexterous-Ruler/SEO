@@ -145,15 +145,16 @@ Describe what the image likely shows. Output only the alt text.`,
 export async function contentIntelligence({ siteName, niche, titles, sampleHeadings, siteId, market }) {
   const list = (titles || []).slice(0, 90).map((t, i) => `${i + 1}. ${t}`).join('\n');
   const country = (market && market.country) || 'United Kingdom';
+  const scope = (market && market.scope) ? market.scope + '\n\n' : '';
   const txt = await complete({
     system: SYSTEM(siteId), promptKey: 'content.rules',
     maxTokens: 4096,
     messages: [{
       role: 'user',
-      content: `You are an SEO content strategist for a ${country} audience. Analyze this site's existing content and return a JSON object. Target market: ${country} — use ${country} spelling, examples, regulations and search intent throughout.
+      content: `${scope}You are an SEO content strategist. TARGET MARKET: ${country}. Analyze the site's existing content and return a JSON object.
 Site: ${siteName || ''}${niche ? ' — niche: ' + niche : ''}
 
-Existing page titles (sample of the library):
+Existing page titles (what's ALREADY covered):
 ${list || '(none provided)'}
 
 Return ONLY valid JSON (no markdown fences) with this exact shape:
@@ -162,7 +163,7 @@ Return ONLY valid JSON (no markdown fences) with this exact shape:
     { "name": "topic cluster name", "theme": "what unifies it", "pageCount": <int est. from titles>, "keywords": ["kw1","kw2","kw3","kw4"], "strength": "strong|moderate|thin" }
   ],
   "gaps": [
-    { "topic": "missing topic", "why": "why it matters for this audience", "intent": "informational|commercial|transactional", "priority": "high|medium|low" }
+    { "topic": "missing topic", "why": "why it matters for the ${country} market", "intent": "informational|commercial|transactional", "priority": "high|medium|low" }
   ],
   "suggestions": [
     { "title": "proposed new article title (<=60 chars)", "cluster": "which cluster it strengthens", "targetKeyword": "primary kw", "rationale": "1 sentence", "format": "guide|comparison|faq|listicle|how-to" }
@@ -171,7 +172,11 @@ Return ONLY valid JSON (no markdown fences) with this exact shape:
     { "from": "topic/keyword", "to": "topic/keyword", "reason": "why link these" }
   ]
 }
-Rules: 4-7 clusters, 5-8 gaps, 6-10 suggestions, 3-5 internalLinks. Base everything on the actual titles. Be specific to this site's niche. For YMYL niches stay factual.`,
+Rules:
+- clusters: group the EXISTING titles (reflect what's there).
+- gaps + suggestions: these MUST target the ${country} market specifically — ${country} search intent, regulations, institutions, spelling and examples. If the site sells an international service (e.g. UK visas) to ${country} users, frame gaps/ideas for ${country} applicants (e.g. "… for ${country} nationals"). Surface what's missing FOR A ${country} AUDIENCE, not generic.
+- targetKeyword must reflect how someone in ${country} actually searches.
+- 4-7 clusters, 5-8 gaps, 6-10 suggestions, 3-5 internalLinks. Specific to the niche AND ${country}. YMYL: factual.`,
     }],
   });
   // Robust JSON extraction
