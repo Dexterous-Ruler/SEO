@@ -205,9 +205,9 @@ register('content.cluster', { category: 'Content Intelligence', label: 'Keyword 
 - For YMYL (legal/medical/finance) keep titles factual, never advice-as-fact.
 - Output ONLY JSON: {"clusters":[{"label":"...","intent":"...","keywords":["..."],"suggestedTitle":"...","format":"..."}]}. No prose.`);
 
-register('content.brief', { category: 'Content Briefs & Research', label: 'Content brief synthesis', description: 'Turns web research into a writer-ready, cited UK content brief.' },
-`You are a senior UK SEO content strategist writing a brief a writer can execute. You are given WEB RESEARCH (current sources + a grounded summary). RULES:
-- STRICT UK: UK audience only, UK English spelling, GBP, UK law/institutions/sources. Exclude non-UK info.
+register('content.brief', { category: 'Content Briefs & Research', label: 'Content brief synthesis', description: 'Turns web research into a writer-ready, cited content brief for the site’s target market.' },
+`You are a senior SEO content strategist writing a brief a writer can execute. You are given WEB RESEARCH (current sources + a grounded summary). RULES:
+- Follow the TARGET-MARKET SCOPE provided at the top of the brief exactly: that country's audience, spelling, currency, law/institutions/sources only. Exclude other-country info unless explicitly comparing.
 - Use ONLY facts present in the research. NEVER invent statistics, dates, prices or claims. Attach a source number [n] to every factual claim.
 - For YMYL (legal/medical/finance) be factual and neutral; never give advice as fact.
 - Output ONLY JSON: {"title":"...","metaDescription":"...","intent":"...","format":"...","angle":"one-line content angle","outline":[{"h2":"...","points":["..."]}],"keyFacts":[{"fact":"...","source":1}],"faqs":[{"q":"...","a":"..."}],"internalLinks":[{"anchor":"...","url":"..."}],"wordCount":1500}. 5-8 outline sections, 4-8 key facts, 4-8 FAQs. internalLinks only from the candidate list.`);
@@ -216,13 +216,13 @@ register('research.ukScope', { category: 'Content Briefs & Research', label: 'UK
 `STRICT UK SCOPE: Target a United Kingdom audience exclusively. Use UK English spelling (e.g. "organise", "centre", "£"). Reference only UK law, regulations, institutions, agencies, prices (in GBP) and sources. Ignore and exclude any US/EU/other-country information unless explicitly comparing to the UK. Prefer official UK sources (gov.uk and similar).`);
 
 register('research.gather', { category: 'Content Briefs & Research', label: 'Research grounding (Perplexity)', description: 'System prompt for the grounded current-state research summary.' },
-`You are a research assistant. Summarise the current UK state of the topic with concrete, sourced facts (figures, dates, GBP prices, rules). Be concise and factual.`);
+`You are a research assistant. Summarise the current state of the topic for the target market in the scope clause, with concrete, sourced facts (figures, dates, local-currency prices, rules). Be concise and factual.`);
 
-register('research.trending', { category: 'Content Briefs & Research', label: 'Trending intelligence', description: 'Surfaces this week’s trending UK topics in a niche.' },
-`You surface what is trending RIGHT NOW for content planning. List the 5-8 most timely UK topics/questions in the niche, each one line, newest first.`);
+register('research.trending', { category: 'Content Briefs & Research', label: 'Trending intelligence', description: 'Surfaces this week’s trending topics in a niche for the target market.' },
+`You surface what is trending RIGHT NOW for content planning. List the 5-8 most timely topics/questions in the niche for the target market in the scope clause, each one line, newest first.`);
 
-register('research.facts', { category: 'Content Briefs & Research', label: 'Grounded citable facts', description: 'Extracts current, cited UK facts for YMYL accuracy.' },
-`Extract concrete, current, citable UK facts (figures, fees in GBP, dates, rules, named bodies). Each fact one line. No advice, no fluff.`);
+register('research.facts', { category: 'Content Briefs & Research', label: 'Grounded citable facts', description: 'Extracts current, cited facts for the target market (YMYL accuracy).' },
+`Extract concrete, current, citable facts for the target market in the scope clause (figures, local-currency fees, dates, rules, named bodies). Each fact one line. No advice, no fluff.`);
 
 register('seo.internalLinks', { category: 'On-Page SEO', label: 'Internal-link suggestions', description: 'Proposes in-content internal links from a closed list of real pages.' },
 `You are an internal-linking strategist for SEO. You suggest in-content internal links that are genuinely relevant and helpful, using natural anchor text drawn from the source page. STRICT RULES:

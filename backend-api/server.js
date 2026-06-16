@@ -26,6 +26,7 @@ import { auditPage, proposeFromFinding } from './audit-pipeline.js';
 import { db, credsForSite } from './supabase.js';
 import * as claude from './claude.js';
 import { detectLiveCms } from './site-health.js';
+import { marketFor } from './market.js';
 import * as geo from './geo.js';
 // Keyword/competitor data now comes from DataForSEO (pay-as-you-go) instead of
 // SEMrush. The `semrush` alias is kept so existing call sites are unchanged;
@@ -1056,7 +1057,7 @@ const routes = {
       return await research.contentBrief({
         keyword: body.keyword, intent: body.intent,
         siteName: site && site.name, niche: (site && site.niche) || (site && site.stack && site.stack.type),
-        excludeDomain, internalLinkCandidates, siteId: body.siteId, now: Date.now(),
+        excludeDomain, internalLinkCandidates, siteId: body.siteId, db: site && site.semrush_db, now: Date.now(),
       });
     } catch (e) { return { error: 'Brief generation failed: ' + e.message }; }
   },
@@ -1066,7 +1067,7 @@ const routes = {
     const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
     const niche = body.niche || (site && site.niche) || (site && site.stack && site.stack.type) || (site && site.name);
     if (!niche) return { error: 'No niche to research.' };
-    try { return await research.trendingIntel({ niche, now: Date.now() }); }
+    try { return await research.trendingIntel({ niche, db: site && site.semrush_db, now: Date.now() }); }
     catch (e) { return { error: 'Trending analysis failed: ' + e.message }; }
   },
 
@@ -1366,7 +1367,7 @@ const routes = {
     // on-page facts reflect today's reality, not just what's already on the page.
     let grounded = null;
     if (research.status().perplexity) {
-      try { const g = await research.citableFactsGrounded({ topic: title || url, niche, now: Date.now() }); if (!g.error) grounded = { summary: g.summary, sources: g.sources }; } catch (e) {}
+      try { const g = await research.citableFactsGrounded({ topic: title || url, niche, db: site && site.semrush_db, now: Date.now() }); if (!g.error) grounded = { summary: g.summary, sources: g.sources }; } catch (e) {}
     }
     // Build a FAQPage schema from the extracted Q&A (ready to publish).
     const { buildFaqPage } = await import('./schema-gen.js');
@@ -1856,7 +1857,7 @@ const routes = {
     for (let i = 0; i < clean.length && sample.length < 90; i += step) sample.push(clean[i]);
     let intel;
     try {
-      intel = await claude.contentIntelligence({ siteName: body.siteName || creds.baseUrl, niche: body.niche, titles: sample, siteId: body.siteId });
+      intel = await claude.contentIntelligence({ siteName: body.siteName || creds.baseUrl, niche: body.niche, titles: sample, siteId: body.siteId, market: marketFor(creds.site && creds.site.semrush_db) });
     } catch (e) {
       return { error: 'Content analysis failed: ' + e.message };
     }

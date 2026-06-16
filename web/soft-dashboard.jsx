@@ -1374,7 +1374,7 @@ function OpportunitiesScreen({ ctx }) {
 
   return (
     <div className="rise">
-      <PageHead title="Content Opportunities" sub="UK keyword clusters from your rankings, competitors & live trends — gap-checked against your sitemap.">
+      <PageHead title="Content Opportunities" sub="Keyword clusters from your rankings, competitors & live trends (in your target market) — gap-checked against your sitemap.">
         <div style={{ display:"flex", gap:10, alignItems:"center" }}>
           <Chip tone="gray" size="sm" icon="globe">UK only</Chip>
           {data && <NeoButton kind="soft" size="sm" icon="layers" onClick={()=>pushAirtable(clusters.filter(c=>c.isGap),"gaps")} disabled={pushing==="gaps"}>{pushing==="gaps"&&<Icon name="cog" size={14} className="audit-spin" />}Send gaps → Airtable</NeoButton>}
@@ -2117,6 +2117,19 @@ function ContentScreen({ ctx }) {
   const [pushing,setPushing] = useState(false);
   const strengthTone = { strong:"teal", moderate:"gold", thin:"clay" };
   const prioTone = { high:"clay", medium:"gold", low:"gray" };
+  // Target country for content/intel/briefs/research — same per-site market as the
+  // keyword data (semrush_db), so changing it here switches the whole content focus.
+  const live = API && window.SENTINEL_LIVE;
+  const [dbVal,setDbVal] = useState(s.semrush_db||"uk");
+  const [dbList,setDbList] = useState(null);
+  useEffect(()=>{ setDbVal(s.semrush_db||"uk"); },[s.id]);
+  useEffect(()=>{ if(live&&!dbList) API.siteDatabase(s.id).then(r=>{ if(r&&r.countries) setDbList(r.countries); }).catch(()=>{}); },[live]);
+  const changeCountry = (db)=>{
+    if(!db||db===dbVal) return;
+    setDbVal(db); s.semrush_db=db;
+    var site=window.SITES.find(x=>x.id===s.id); if(site) site.semrush_db=db;
+    if(live) API.siteDatabase(s.id, db).then(()=>ctx.toast("Target country set to "+db.toUpperCase()+" — re-run Analyze to refresh for this market","teal")).catch(()=>{});
+  };
 
   // Push the analysed keywords (suggestions + gaps) into the site's Airtable
   // keyword column → feeds the n8n article writer.
@@ -2136,6 +2149,13 @@ function ContentScreen({ ctx }) {
     <div className="rise">
       <PageHead title="Content Intelligence" sub={`Keyword clusters, content gaps & new-article ideas for ${s.name}.`}>
         <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+          <div title="Target country for content intel, briefs & research — sets this site's market" style={{ display:"inline-flex", alignItems:"center", gap:5, padding:"5px 9px 5px 11px", borderRadius:99, background:"var(--surface)", boxShadow:"var(--neo-xs)", fontSize:12, fontWeight:700, color:"var(--ink)" }}>
+            <Icon name="globe" size={13} style={{ color:"var(--muted)" }} />
+            <select value={dbVal} onChange={e=>changeCountry(e.target.value)} style={{ appearance:"none", WebkitAppearance:"none", border:"none", background:"transparent", fontSize:12, fontWeight:700, fontFamily:"inherit", color:"var(--ink)", cursor:"pointer", outline:"none", paddingRight:1 }}>
+              {(dbList||[{db:dbVal,label:dbVal.toUpperCase()}]).map(c=>(<option key={c.db} value={c.db}>{c.label}</option>))}
+            </select>
+            <span style={{ color:"var(--muted)", fontSize:10, marginLeft:-2 }}>▾</span>
+          </div>
           {d && !d.error && !loading && <NeoButton kind="soft" size="sm" icon={pushing?undefined:"upload"} disabled={pushing} onClick={pushToAirtable}>{pushing&&<Icon name="cog" size={15} className="audit-spin" />}{pushing?"Pushing…":"Push to Airtable"}</NeoButton>}
           <NeoButton kind="primary" icon={loading?undefined:"sparkles"} disabled={loading} onClick={ctx.runContentIntel}>
             {loading && <Icon name="cog" size={17} className="audit-spin" />}{loading?"Analyzing…":d?"Re-analyze":"Analyze content"}

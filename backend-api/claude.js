@@ -142,14 +142,15 @@ Describe what the image likely shows. Output only the alt text.`,
 // Content intelligence: analyze a site's existing content (titles/URLs/topics)
 // and return content gaps, new-content suggestions, and keyword clusters.
 // Returns structured JSON the UI renders. Generic across niches.
-export async function contentIntelligence({ siteName, niche, titles, sampleHeadings, siteId }) {
+export async function contentIntelligence({ siteName, niche, titles, sampleHeadings, siteId, market }) {
   const list = (titles || []).slice(0, 90).map((t, i) => `${i + 1}. ${t}`).join('\n');
+  const country = (market && market.country) || 'United Kingdom';
   const txt = await complete({
     system: SYSTEM(siteId), promptKey: 'content.rules',
     maxTokens: 4096,
     messages: [{
       role: 'user',
-      content: `You are an SEO content strategist. Analyze this site's existing content and return a JSON object.
+      content: `You are an SEO content strategist for a ${country} audience. Analyze this site's existing content and return a JSON object. Target market: ${country} — use ${country} spelling, examples, regulations and search intent throughout.
 Site: ${siteName || ''}${niche ? ' — niche: ' + niche : ''}
 
 Existing page titles (sample of the library):
@@ -368,15 +369,17 @@ export async function clusterKeywords({ keywords, siteName, niche, siteId }) {
 // Perplexity grounded answer). Claude structures + writes the brief but must use
 // ONLY the supplied research — every fact ties to a provided source, nothing
 // invented. UK audience, UK English. Returns structured JSON.
-export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId }) {
+export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market }) {
   const sources = (research.sources || []).map((s, i) => `[${i + 1}] ${s.title || ''} — ${s.url}`).join('\n');
   const material = (research.material || '').slice(0, 9000);
   const links = (internalLinkCandidates || []).slice(0, 25).map((p) => `${p.title} → ${p.url}`).join('\n');
+  const country = (market && market.country) || 'United Kingdom';
+  const scope = (market && market.scope) ? market.scope + '\n\n' : '';
   const txt = await complete({
     system: sys('content.brief', siteId),
     promptKey: 'content.brief',
     maxTokens: 3000,
-    messages: [{ role: 'user', content: `KEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}\n\nWrite the UK content brief as JSON.` }],
+    messages: [{ role: 'user', content: `${scope}TARGET MARKET: ${country}\nKEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}\n\nWrite the ${country} content brief as JSON.` }],
   });
   try {
     const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));

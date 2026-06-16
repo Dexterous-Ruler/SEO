@@ -13,6 +13,7 @@ import * as tavily from './tavily.js';
 import * as perplexity from './perplexity.js';
 import * as claude from './claude.js';
 import { UK } from './uk.js';
+import { marketFor } from './market.js';
 import { P, modelFor, tempFor } from './prompts.js';
 const mt = (key, fallbackModel) => ({ model: modelFor(key) || fallbackModel, temperature: tempFor(key) != null ? tempFor(key) : undefined });
 
@@ -47,25 +48,26 @@ function cacheSet(k, v, now) { CACHE.set(k, { v, t: now }); if (CACHE.size > 200
 
 // Core: gather UK web material on a topic from both engines. Returns
 // { summary, material, sources[], cost }.
-export async function gather(topic, { recency = 'month', excludeDomains, now = 0, ttlMs = 0 } = {}) {
-  const cacheKey = `g:${topic}:${recency}`;
+export async function gather(topic, { recency = 'month', excludeDomains, now = 0, ttlMs = 0, market } = {}) {
+  const mk = market || marketFor('uk');
+  const cacheKey = `g:${mk.db}:${topic}:${recency}`;   // cache per market (UK ≠ US results)
   if (ttlMs && now) { const c = cacheGet(cacheKey, now, ttlMs); if (c) return c; }
 
   const out = { summary: '', material: '', sources: [], cost: 0, engines: {} };
-  // 1) Tavily — gather UK source documents (parallel-safe).
+  // 1) Tavily — gather source documents for the market (parallel-safe).
   let tav = null;
   if (tavily.hasKey()) {
     try { tav = await tavily.search(topic, { depth: 'advanced', maxResults: 8, excludeDomains }); out.engines.tavily = (tav.results || []).length; }
     catch (e) { out.engines.tavilyError = String(e.message || e); }
   }
-  // 2) Perplexity — grounded, cited current-state summary (UK).
+  // 2) Perplexity — grounded, cited current-state summary for the market.
   let pp = null;
   if (perplexity.hasKey()) {
     try {
       pp = await perplexity.ask({
         system: P('research.gather'),
-        user: `Topic: ${topic}\n\nGive the key current facts, recent changes, and the main questions UK readers ask — for content planning.`,
-        ...mt('research.gather', 'pro'), recency, domains: UK.preferDomains,
+        user: `Topic: ${topic}\n\nGive the key current facts, recent changes, and the main questions ${mk.country} readers ask — for content planning.`,
+        ...mt('research.gather', 'pro'), recency, domains: mk.preferDomains, scope: mk.scope, geo: mk.geo,
       });
       out.engines.perplexity = (pp.sources || []).length;
       if (pp.cost) out.cost += pp.cost;
@@ -87,46 +89,49 @@ export async function gather(topic, { recency = 'month', excludeDomains, now = 0
 
 // Research-backed content brief for a keyword/cluster. Tavily+Perplexity gather,
 // Claude structures into a writer-ready UK brief with cited facts + internal links.
-export async function contentBrief({ keyword, intent, siteName, niche, excludeDomain, internalLinkCandidates, siteId, now = 0 }) {
+export async function contentBrief({ keyword, intent, siteName, niche, excludeDomain, internalLinkCandidates, siteId, db, now = 0 }) {
   if (!perplexity.hasKey() && !tavily.hasKey()) return { error: 'No research engine configured — add PERPLEXITY_API_KEY and/or TAVILY_API_KEY.' };
-  const research = await gather(keyword, { recency: 'month', excludeDomains: excludeDomain ? [excludeDomain] : undefined, now, ttlMs: 6 * 60 * 60 * 1000 });
+  const market = marketFor(db);
+  const research = await gather(keyword, { recency: 'month', excludeDomains: excludeDomain ? [excludeDomain] : undefined, now, ttlMs: 6 * 60 * 60 * 1000, market });
   if (!research.summary && !research.material) return { error: 'Research returned nothing for this keyword.', engines: research.engines };
-  const brief = await claude.synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId });
-  return { keyword, intent, brief, sources: research.sources, engines: research.engines, researchCost: research.cost };
+  const brief = await claude.synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market });
+  return { keyword, intent, brief, country: market.country, sources: research.sources, engines: research.engines, researchCost: research.cost };
 }
 
 // Current UK trending topics in a niche (news-weighted), with sources.
-export async function trendingIntel({ niche, now = 0 }) {
+export async function trendingIntel({ niche, db, now = 0 }) {
   if (!perplexity.hasKey() && !tavily.hasKey()) return { error: 'No research engine configured.' };
+  const mk = marketFor(db);
   const ttl = 6 * 60 * 60 * 1000;
-  const cacheKey = `trend:${niche}`;
+  const cacheKey = `trend:${mk.db}:${niche}`;
   if (now) { const c = cacheGet(cacheKey, now, ttl); if (c) return c; }
-  const out = { niche, topics: [], summary: '', sources: [], engines: {}, cost: 0 };
+  const out = { niche, country: mk.country, topics: [], summary: '', sources: [], engines: {}, cost: 0 };
   if (perplexity.hasKey()) {
     try {
       const pp = await perplexity.ask({
         system: P('research.trending'),
-        user: `Niche: ${niche}. What is trending in the UK this week that we could write about? Give concrete topics with why each matters now.`,
-        ...mt('research.trending', 'fast'), recency: 'week', domains: UK.preferDomains, maxTokens: 700,
+        user: `Niche: ${niche}. What is trending in ${mk.country} this week that we could write about? Give concrete topics with why each matters now.`,
+        ...mt('research.trending', 'fast'), recency: 'week', domains: mk.preferDomains, scope: mk.scope, geo: mk.geo, maxTokens: 700,
       });
       out.summary = pp.answer; out.sources = rankSources(pp.sources); out.engines.perplexity = (pp.sources || []).length; if (pp.cost) out.cost += pp.cost;
     } catch (e) { out.engines.perplexityError = String(e.message || e); }
   }
   if (tavily.hasKey()) {
-    try { const t = await tavily.search(`${niche} UK`, { topic: 'news', days: 7, maxResults: 8 }); out.topics = (t.results || []).map((r) => ({ title: r.title, url: r.url })); out.engines.tavily = out.topics.length; if (!out.sources.length) out.sources = rankSources(t.results); }
+    try { const t = await tavily.search(`${niche} ${mk.country}`, { topic: 'news', days: 7, maxResults: 8 }); out.topics = (t.results || []).map((r) => ({ title: r.title, url: r.url })); out.engines.tavily = out.topics.length; if (!out.sources.length) out.sources = rankSources(t.results); }
     catch (e) { out.engines.tavilyError = String(e.message || e); }
   }
   if (now) cacheSet(cacheKey, out, now);
   return out;
 }
 
-// Grounded, cited current UK facts on a topic (for YMYL accuracy / citable facts).
-export async function citableFactsGrounded({ topic, niche, now = 0 }) {
+// Grounded, cited current facts on a topic for the market (YMYL accuracy / citable facts).
+export async function citableFactsGrounded({ topic, niche, db, now = 0 }) {
   if (!perplexity.hasKey()) return { error: 'Perplexity not configured — needed for grounded facts.' };
+  const mk = marketFor(db);
   const pp = await perplexity.ask({
     system: P('research.facts'),
-    user: `Topic: ${topic}${niche ? ` (niche: ${niche})` : ''}. List the current UK facts most useful to cite in an article.`,
-    ...mt('research.facts', 'pro'), recency: 'month', domains: UK.preferDomains, maxTokens: 900,
+    user: `Topic: ${topic}${niche ? ` (niche: ${niche})` : ''}. List the current ${mk.country} facts most useful to cite in an article.`,
+    ...mt('research.facts', 'pro'), recency: 'month', domains: mk.preferDomains, scope: mk.scope, geo: mk.geo, maxTokens: 900,
   });
   return { topic, summary: pp.answer, sources: rankSources(pp.sources), cost: pp.cost };
 }
