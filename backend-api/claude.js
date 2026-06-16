@@ -174,8 +174,8 @@ Return ONLY valid JSON (no markdown fences) with this exact shape:
 }
 Rules:
 - clusters: group the EXISTING titles (reflect what's there).
-- gaps + suggestions: these MUST target the ${country} market specifically — ${country} search intent, regulations, institutions, spelling and examples. If the site sells an international service (e.g. UK visas) to ${country} users, frame gaps/ideas for ${country} applicants (e.g. "… for ${country} nationals"). Surface what's missing FOR A ${country} AUDIENCE, not generic.
-- targetKeyword must reflect how someone in ${country} actually searches.
+- gaps + suggestions: you are planning content to win ${country} searchers. EVERY gap "topic" and suggestion "title" MUST carry an explicit ${country} angle, and EVERY targetKeyword MUST be how a ${country} user actually searches. A generic title/topic with NO ${country} relevance is INVALID — rewrite it. The site's service can be foreign (e.g. UK visas); then plan for ${country} users of that service.
+  Example for India: topic "UK Skilled Worker Visa — guide for Indian applicants"; title "UK Skilled Worker Visa from India: Eligibility & Documents"; targetKeyword "uk skilled worker visa for indians". Mirror this ${country} framing every time.
 - 4-7 clusters, 5-8 gaps, 6-10 suggestions, 3-5 internalLinks. Specific to the niche AND ${country}. YMYL: factual.`,
     }],
   });
