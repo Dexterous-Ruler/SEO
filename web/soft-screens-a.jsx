@@ -326,11 +326,11 @@ function AuditsScreen({ ctx }) {
   const API = window.SentinelAPI;
   const loadPrio = ()=>{
     setPrioBusy(true);
-    const findings=(window.FINDINGS||FINDINGS||[]);
+    const findings=(ctx.findings||[]);
     API.prioritizeFindings(s.id, findings).then(r=>setPrio(r)).catch(e=>setPrio({error:e.message})).finally(()=>setPrioBusy(false));
   };
   useEffect(()=>{ setPrio(null); },[s.id]);
-  const filtered = (window.FINDINGS||FINDINGS).filter(f=>filter==="all"||f.disc===filter);
+  const filtered = (ctx.findings||[]).filter(f=>filter==="all"||f.disc===filter);
   const FILTERS=[{v:"all",l:"All"},{v:"seo",l:"SEO"},{v:"performance",l:"Perf"},{v:"accessibility",l:"A11y"},{v:"image",l:"Images"}];
   return (
     <div className="rise">
@@ -360,7 +360,7 @@ function AuditsScreen({ ctx }) {
       {/* Road to 100 — per-category gap + what's blocking it (priority: 4×100) */}
       {(()=>{
         const sc=s.scores||{};
-        const F=(window.FINDINGS||FINDINGS||[]);
+        const F=(ctx.findings||[]);
         const bucket={performance:[],accessibility:[],bestPractices:[],seo:[]};
         for(const f of F){ const d=(f.disc||"").toLowerCase(); if(d==="performance"||d==="image")bucket.performance.push(f); else if(d==="accessibility")bucket.accessibility.push(f); else if(d==="seo")bucket.seo.push(f); else bucket.bestPractices.push(f); }
         const cats=[["Performance","performance"],["Accessibility","accessibility"],["Best Practices","bestPractices"],["SEO","seo"]];

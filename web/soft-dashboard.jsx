@@ -20,7 +20,6 @@ const SNAV_GROUPS = [
   { group:"Content & Growth", items:[
     { k:"plan",     label:"Content Plan", icon:"sparkles" },
     { k:"content",  label:"Content Intel", icon:"sparkles" },
-    { k:"backlinks",label:"Backlinks", icon:"link" },
     { k:"geo",      label:"AI Visibility", icon:"globe" },
   ]},
   { group:"Data Sources", items:[
@@ -62,10 +61,6 @@ const NAV_INDEX = [
   { title:"Audit History", screen:"history", icon:"trend", kw:"audit history past audits score trend regression timeline" },
   { title:"Content Plan", screen:"plan", icon:"sparkles", kw:"content plan trending topics find opportunities keyword clusters gaps calendar ideas" },
   { title:"Content Intel", screen:"content", icon:"sparkles", kw:"content intelligence analyze content topic clusters suggestions" },
-  { title:"Backlinks — Link Gap", screen:"backlinks", tab:"gap", icon:"link", kw:"backlinks link building domain authority dr da referring domains competitor link gap outreach prospects link engine off-page email" },
-  { title:"Backlinks — Outreach", screen:"backlinks", tab:"outreach", icon:"layers", kw:"outreach email campaign link building pitch contact enrichment n8n airtable send follow-up reply won roi tracker" },
-  { title:"Backlinks — Monitor", screen:"backlinks", tab:"monitor", icon:"radar", kw:"backlink monitor new lost toxic referring domains disavow reclamation spam alert" },
-  { title:"Backlinks — Link Profile", screen:"backlinks", tab:"profile", icon:"trend", kw:"backlink profile referring domains anchor text spam score domain rating authority" },
   { title:"AI Visibility (GEO)", screen:"geo", icon:"globe", kw:"ai visibility geo generative share of voice llms.txt ai robots chatgpt claude gemini perplexity citation competitors" },
   { title:"Search Console", screen:"gsc", icon:"search", kw:"search console gsc google clicks impressions ctr position connect google properties first party" },
   { title:"Top Queries", screen:"gsc", tab:"queries", icon:"search", kw:"top queries search terms gsc keywords" },
@@ -1586,20 +1581,41 @@ function OptimizeScreen({ ctx }) {
   const genFacts = ()=>{ if(!pageUrl){ctx.toast("Enter a page URL","gold");return;} setBusy("facts"); setErr(null); API.aiSeoFacts(s.id,pageUrl).then(r=>{ if(r.error){setErr(r.error);return;} setFacts(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const genCss = ()=>{ setBusy("css"); setErr(null); API.generateCss(s.id).then(r=>{ if(r.error){setErr(r.error);return;} setCss(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const scanMedia = ()=>{ setBusy("scan"); setErr(null); API.mediaScan(s.id).then(r=>{ if(r.error){setErr(r.error);return;} setMedia(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
-  const optimizeMedia = (apply)=>{ setBusy(apply?"apply":"preview"); API.mediaOptimize(s.id,{apply,max:8}).then(r=>{
-    if(r.error){ctx.toast("Images: "+r.error,"clay");return;}
-    if(apply){
-      const ok=r.uploaded||0, bad=r.failed||0, rel=r.relinked||0;
-      let msg, tone;
-      if(ok>0){ msg="Uploaded "+ok+" WebP · "+r.savedKB+" KB lighter"+(rel?" · re-linked "+rel+" existing":"")+(bad?" · "+bad+" failed":""); tone="teal"; }
-      else if(rel>0){ msg="All "+rel+" already converted — re-linked their WebP so pages now serve them (needs the optimize plugin)."; tone="teal"; }
-      else { msg="Nothing to optimize"+(bad?" — "+bad+" failed: "+((r.errors||[])[0]||"WP rejected the upload"):" — these images may already be converted & linked."); tone=bad?"clay":"gold"; }
-      ctx.toast(msg, tone);
-    } else {
-      ctx.toast("Preview: "+r.processed+" image(s) · ~"+r.savedKB+" KB potential saving (no write)","teal");
+  const [optProg,setOptProg] = useState(null); // {done,total} while converting all
+  const optimizeMedia = async (apply)=>{
+    if(!apply){ // preview: single call
+      setBusy("preview");
+      try{ const r=await API.mediaOptimize(s.id,{apply:false,max:10}); if(r.error){ctx.toast("Images: "+r.error,"clay");} else { ctx.toast("Preview: "+r.processed+" image(s) · ~"+r.savedKB+" KB potential saving (no write)","teal"); setMedia(m=>({...(m||{}),lastRun:r})); } }
+      catch(e){ ctx.toast(e.message,"clay"); } finally{ setBusy(""); }
+      return;
     }
-    setMedia(m=>({...(m||{}),lastRun:r}));
-  }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
+    // apply: loop batches until the whole backlog is converted
+    setBusy("apply");
+    const total=(media&&media.heavyCount)||0;
+    let done=0, saved=0, relinked=0, failed=0, lastErr=null, iter=0, last=null;
+    setOptProg({done:0,total});
+    try{
+      while(iter<30){
+        iter++;
+        const r=await API.mediaOptimize(s.id,{apply:true,max:10});
+        if(r.error){ lastErr=r.error; break; }
+        last=r;
+        done+=r.uploaded||0; saved+=r.savedKB||0; relinked=Math.max(relinked,r.relinked||0); failed+=r.failed||0;
+        setOptProg({done,total:total||done+(r.remaining||0)});
+        if((r.remaining||0)<=0 || ((r.processed||0)===0 && (r.relinked||0)>=0)) break;
+      }
+      if(lastErr) ctx.toast("Images: "+lastErr,"clay");
+      else if(done>0) ctx.toast("Optimized "+done+" image(s) · "+(saved/1024).toFixed(1)+" MB lighter"+(relinked?" · re-linked "+relinked+" existing":"")+(failed?" · "+failed+" failed":"")+" ✓","teal");
+      else if(relinked>0) ctx.toast(relinked+" already converted — re-linked their WebP so pages serve them (needs the optimize plugin).","teal");
+      else ctx.toast("Nothing to optimize"+(failed?" — "+failed+" failed: "+(((last&&last.errors)||[])[0]||"WP rejected the upload"):" — every heavy image already has WebP."),failed?"clay":"gold");
+      if(last) setMedia(m=>({...(m||{}),lastRun:last}));
+    }catch(e){ ctx.toast(e.message,"clay"); }
+    finally{
+      setOptProg(null); setBusy("");
+      // refresh counts so converted images drop off the list
+      try{ const sc=await API.mediaScan(s.id); if(!sc.error) setMedia(m=>({...(m||{}),...sc})); }catch(e){}
+    }
+  };
   const runSpeed = ()=>{ if(!pageUrl){ctx.toast("Enter a URL","gold");return;} setBusy("speed"); setErr(null); API.speedTest(pageUrl,speedStrat).then(r=>{ if(r.error){setErr(r.error);return;} setSpeed(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
 
   const TABS=[["links","Internal Links","link"],["ext","External Links","globe"],["schema","Schema","layers"],["facts","AI-SEO Facts","sparkles"],["css","CSS Fixes","bolt"],["images","Images","image"],["speed","Speed Test","gauge"]];
@@ -1808,13 +1824,14 @@ function OptimizeScreen({ ctx }) {
               {media && media.images && (
                 <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
                   <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14 }}>
-                    <PatternCard icon="image" tone="gold" value={media.heavyCount} title="Heavy images" sub={"of "+media.totalImages+" total"} />
-                    <PatternCard icon="layers" tone="plum" value={(media.totalHeavyKB/1024).toFixed(1)+" MB"} title="Current weight" sub="raster JPEG/PNG" />
+                    <PatternCard icon="image" tone="gold" value={media.heavyCount} title="Heavy images" sub={"of "+media.totalImages+" total"+(media.alreadyCount?(" · "+media.alreadyCount+" done"):"")} />
+                    <PatternCard icon="layers" tone="plum" value={(media.totalHeavyKB/1024).toFixed(1)+" MB"} title="To convert" sub="raster JPEG/PNG" />
                     <PatternCard icon="bolt" tone="teal" value={"~"+(media.estSavingKB/1024).toFixed(1)+" MB"} title="Est. saving" sub="≈65% smaller as WebP" />
                   </div>
-                  <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                    <NeoButton kind="soft" size="sm" icon={busy==="preview"?undefined:"eye"} disabled={busy==="preview"} onClick={()=>optimizeMedia(false)}>{busy==="preview"&&<Icon name="cog" size={14} className="audit-spin" />}Preview top 8 (no write)</NeoButton>
-                    <NeoButton kind="primary" size="sm" icon={busy==="apply"?undefined:"upload"} disabled={busy==="apply"} onClick={()=>optimizeMedia(true)}>{busy==="apply"&&<Icon name="cog" size={14} className="audit-spin" />}Optimize &amp; upload top 8</NeoButton>
+                  <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+                    <NeoButton kind="soft" size="sm" icon={busy==="preview"?undefined:"eye"} disabled={busy==="preview"||busy==="apply"} onClick={()=>optimizeMedia(false)}>{busy==="preview"&&<Icon name="cog" size={14} className="audit-spin" />}Preview (no write)</NeoButton>
+                    <NeoButton kind="primary" size="sm" icon={busy==="apply"?undefined:"upload"} disabled={busy==="apply"||!media.heavyCount} onClick={()=>optimizeMedia(true)}>{busy==="apply"&&<Icon name="cog" size={14} className="audit-spin" />}{busy==="apply"&&optProg?("Optimizing "+optProg.done+"/"+(optProg.total||"?")+"…"):("Optimize all"+(media.heavyCount?(" ("+media.heavyCount+")"):""))}</NeoButton>
+                    {!media.heavyCount && media.alreadyCount>0 && <span style={{ fontSize:12, color:"var(--t-700)", fontWeight:700 }}>✓ All heavy images converted</span>}
                   </div>
                   {media.lastRun && (
                     <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
@@ -1829,13 +1846,15 @@ function OptimizeScreen({ ctx }) {
                     </div>
                   )}
                   <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
-                    {media.images.slice(0,12).map((im,i)=>(
-                      <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 11px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12 }}>
+                    {media.images.slice(0,60).map((im,i)=>(
+                      <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 11px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12, opacity:im.alreadyWebp?0.55:1 }}>
                         <a href={im.url} target="_blank" style={{ flex:1, fontFamily:"var(--mono)", color:"var(--ink)", textDecoration:"none", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{(im.url||"").split("/").pop()}</a>
                         <span style={{ color:"var(--muted)" }}>{im.w}×{im.h}</span>
                         <Chip tone={im.sizeKB>500?"clay":"gold"} size="sm">{im.sizeKB} KB</Chip>
+                        {im.alreadyWebp && <Chip tone="teal" size="sm" icon="check">WebP</Chip>}
                       </div>
                     ))}
+                    {media.images.length>60 && <div style={{ fontSize:11.5, color:"var(--muted)", padding:"4px 2px" }}>+{media.images.length-60} more — "Optimize all" processes every one, not just these.</div>}
                   </div>
                   <div style={{ fontSize:11, color:"var(--faint)", lineHeight:1.5 }}>Uploads WebP copies to your media library. Swapping references in existing pages (esp. Elementor) is a separate manual step for safety.</div>
                 </div>
@@ -2377,8 +2396,8 @@ function SemrushPanel({ ctx }) {
   const ov=data.overview||{};
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:10 }}>
-        {[["Organic traffic",ov.organicTraffic||"—"],["Keywords",ov.organicKeywords||"—"],["Auth. rank",ov.rank||"—"],["Backlinks",(data.backlinks&&data.backlinks.total)||"—"]].map(([l,v])=>(
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10 }}>
+        {[["Organic traffic",ov.organicTraffic||"—"],["Keywords",ov.organicKeywords||"—"],["Auth. rank",ov.rank||"—"]].map(([l,v])=>(
           <Well key={l} pad={14} style={{ textAlign:"center" }}><div style={{ fontSize:18, fontWeight:800 }}>{typeof v==="string"?v:Number(v).toLocaleString()}</div><div style={{ fontSize:11, color:"var(--muted)", marginTop:2 }}>{l}</div></Well>
         ))}
       </div>
@@ -3038,7 +3057,7 @@ function SemrushScreen({ ctx }) {
           <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:12, padding:"32px 10px", textAlign:"center" }}>
             <div style={{ width:54, height:54, borderRadius:16, background:"var(--gold-bg)", color:"var(--gold)", display:"grid", placeItems:"center" }}><Icon name="bolt" size={26} /></div>
             <div style={{ fontSize:16, fontWeight:700 }}>Load DataForSEO data for {domain}</div>
-            <div style={{ fontSize:13.5, color:"var(--muted)", maxWidth:420 }}>Organic keywords, rankings, traffic, competitors and backlinks — plus a keyword-gap tool that pushes straight to Airtable.</div>
+            <div style={{ fontSize:13.5, color:"var(--muted)", maxWidth:420 }}>Organic keywords, rankings, traffic and competitors — plus a keyword-gap tool that pushes straight to Airtable.</div>
             <NeoButton kind="primary" icon={loading?undefined:"bolt"} disabled={loading} onClick={load}>{loading&&<Icon name="cog" size={17} className="audit-spin" />}{loading?"Loading…":"Load DataForSEO data"}</NeoButton>
           </div>
         </SoftCard>
@@ -3047,11 +3066,10 @@ function SemrushScreen({ ctx }) {
       {data && (
         <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
           {/* KPI strip */}
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:16 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:16 }}>
             <PatternCard icon="trend" tone="teal" value={fmt(ov.organicTraffic)} title="Organic traffic" sub="Est. monthly visits" />
             <PatternCard icon="search" tone="gold" value={fmt(ov.organicKeywords)} title="Organic keywords" sub="Total ranking" />
             <PatternCard icon="flag" tone="plum" value={fmt(ov.rank)} title="Authority rank" sub="Lower is better" />
-            <PatternCard icon="link" tone="gray" value={fmt(data.backlinks&&data.backlinks.total)} title="Backlinks" sub={(data.backlinks&&fmt(data.backlinks.domains)||"—")+" ref. domains"} />
           </div>
 
           {/* tabs */}
@@ -4017,287 +4035,6 @@ function PlaybookScreen({ ctx }) {
   );
 }
 
-/* ---------------- Backlinks (Link Engine) ---------------- */
-function BacklinksScreen({ ctx }) {
-  const s = ctx.site;
-  const API = window.SentinelAPI;
-  const live = API && window.SENTINEL_LIVE;
-  const [tab,setTab] = useState("gap");
-  useEffect(()=>{ if(ctx.navTab && ["gap","outreach","monitor","profile"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
-  const [profile,setProfile] = useState(null);
-  const [gap,setGap] = useState(null);
-  const [busy,setBusy] = useState("");
-  const [err,setErr] = useState(null);
-  const [drafts,setDrafts] = useState({});   // domain -> { busy, subject, body, open }
-  const [sel,setSel] = useState({});          // domain -> bool
-  const [prep,setPrep] = useState(null);      // prepared campaign rows
-  const [prepBusy,setPrepBusy] = useState(false);
-  const [track,setTrack] = useState(null);    // outreach tracker / ROI
-  const [trackBusy,setTrackBusy] = useState(false);
-  const [oset,setOset] = useState(null);      // outreach settings {mode,dailyCap,emailConfigured}
-  const [sendBusy,setSendBusy] = useState(false);
-  const [mon,setMon] = useState(null);        // monitor: new/lost/toxic
-  const [monBusy,setMonBusy] = useState(false);
-  const [monTab,setMonTab] = useState("new");
-  const [disavow,setDisavow] = useState(null);
-  const fmt = (v)=> v==null||v===""?"—":(isNaN(v)?v:Number(v).toLocaleString());
-  useEffect(()=>{ setProfile(null); setGap(null); setErr(null); setDrafts({}); setSel({}); setPrep(null); setTrack(null); setMon(null); setDisavow(null); setOset(null); },[s.id]);
-  useEffect(()=>{ if(live && tab==="outreach" && !oset) API.outreachSettings(s.id).then(r=>{ if(!r.error) setOset(r); }).catch(()=>{}); },[tab,s.id]);
-  const saveOset = (patch)=>{ API.outreachSettings(s.id, patch.mode, patch.dailyCap).then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} setOset(r); }).catch(e=>ctx.toast(e.message,"clay")); };
-  const sendNow = ()=>{ setSendBusy(true); ctx.toast("Sending approved outreach via Resend…","teal"); API.outreachSendNow(s.id).then(r=>{ if(r.error){ ctx.toast(r.needsEmail?"Email not set up — add RESEND_API_KEY + OUTREACH_FROM":r.error, "clay"); return; } ctx.toast(`Sent ${r.sent} email(s)`+(r.followups?` + ${r.followups} follow-up(s)`:"")+(r.skipped?` · ${r.skipped} skipped (no email/draft)`:""), r.sent||r.followups?"teal":"gold"); loadTrack(); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setSendBusy(false)); };
-
-  const loadProfile = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setBusy("profile"); setErr(null); API.backlinksSummary(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits,needsSub:r.needsSub});return;} setProfile(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setBusy("")); };
-  const loadGap = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setBusy("gap"); setErr(null); API.backlinksGap(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits,needsComp:r.needsCompetitors,needsSub:r.needsSub});return;} setGap(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setBusy("")); };
-  const draft = (p)=>{ const d=p.domain; setDrafts(x=>({...x,[d]:{...(x[d]||{}),busy:true,open:true}})); API.backlinksDraftOutreach(s.id,d,"competitor_gap","").then(r=>{ if(r.error){ctx.toast(r.error,"clay"); setDrafts(x=>({...x,[d]:{busy:false}})); return;} setDrafts(x=>({...x,[d]:{busy:false,open:true,subject:r.subject,body:r.body}})); setSel(x=>({...x,[d]:true})); }).catch(e=>{ctx.toast(e.message,"clay"); setDrafts(x=>({...x,[d]:{busy:false}}));}); };
-  const pushSelected = ()=>{
-    const chosen=((gap&&gap.prospects)||[]).filter(p=>sel[p.domain]).map(p=>{ const d=drafts[p.domain]||{}; return {domain:p.domain,rank:p.rank,competitorsLinked:p.competitorsLinked,lvs:p.lvs,tactic:"competitor_gap",subject:d.subject,body:d.body}; });
-    if(!chosen.length){ctx.toast("Select at least one prospect (tick the box or draft an email)","gold");return;}
-    setBusy("push"); ctx.toast("Pushing "+chosen.length+" prospect(s) to Airtable…","teal");
-    API.backlinksPushProspects(s.id,chosen).then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} ctx.toast("Pushed "+r.pushed+" to Airtable → Outreach ✓ — set Status to fire your n8n send"+(r.skipped?" ("+r.skipped+" already there)":""),"teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
-  const lvsTone = (v)=> v>=70?["teal"]:v>=45?["gold"]:["gray"];
-  // Phase 2 — assisted outreach
-  const prepare = ()=>{
-    const top = ((gap&&gap.prospects)||[]).slice(0,12);
-    if(!top.length){ ctx.toast("Run the Competitor Link Gap first, then prepare outreach from it","gold"); setTab("gap"); return; }
-    setPrepBusy(true); ctx.toast("Finding contacts + drafting emails for "+top.length+" prospect(s) — runs in the background…","teal");
-    // Durable background job: survives navigation/redeploy; polls to completion.
-    API.runJob("outreach.prepare", { siteId:s.id, prospects:top, tactic:"competitor_gap", targetPage:"" }, s.id)
-      .then(j=>{
-        if(!j || j.error){ ctx.toast((j&&j.error)||"Prepare failed","clay"); return; }
-        if(j.status==="failed"){ ctx.toast("Prepare failed: "+(j.error||"unknown"),"clay"); return; }
-        if(j.status==="timeout"){ ctx.toast("Still preparing — reopen the Outreach tab shortly","gold"); return; }
-        const res = j.result || j;
-        setPrep((res && res.prospects) || []);
-      }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPrepBusy(false));
-  };
-  const setPrepField = (i,k,v)=> setPrep(p=>p.map((row,j)=>j===i?{...row,[k]:v}:row));
-  const pushPrepared = ()=>{
-    if(!prep||!prep.length) return;
-    setPrepBusy(true); ctx.toast("Pushing campaign to Airtable…","teal");
-    API.backlinksPushProspects(s.id, prep).then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} ctx.toast("Pushed "+r.pushed+" to Airtable → Outreach ✓ — set Status to 'Send Outreach' to fire n8n"+(r.skipped?" ("+r.skipped+" already there)":""),"teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPrepBusy(false));
-  };
-  const loadTrack = ()=>{ setTrackBusy(true); API.backlinksOutreachStatus(s.id).then(r=>{ setTrack(r); if(r.error)ctx.toast(r.error,"clay"); }).catch(e=>{setTrack({error:e.message});ctx.toast(e.message,"clay");}).finally(()=>setTrackBusy(false)); };
-  // Phase 3 — monitoring + disavow
-  const loadMon = ()=>{ if(!live){ctx.toast("Connect a live site first","gold");return;} setMonBusy(true); setErr(null); API.backlinksMonitor(s.id).then(r=>{ if(r.error){setErr({msg:r.error,noUnits:r.noUnits,needsSub:r.needsSub});return;} setMon(r); }).catch(e=>setErr({msg:e.message})).finally(()=>setMonBusy(false)); };
-  const getDisavow = ()=>{ API.backlinksDisavow(s.id).then(r=>{ if(r.error){ctx.toast(r.error,"clay");return;} setDisavow(r); if(!r.count){ctx.toast("No domains above the disavow threshold — nothing to disavow (good).","teal");return;}
-      try{ const blob=new Blob([r.file],{type:"text/plain"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="disavow-"+(s.url||"site").replace(/^https?:\/\//,"").replace(/[^a-z0-9.]/gi,"")+".txt"; a.click(); ctx.toast("Disavow draft downloaded ("+r.count+" domains) — review before submitting","gold"); }catch(e){ ctx.toast("Disavow ready ("+r.count+" domains)","gold"); } }).catch(e=>ctx.toast(e.message,"clay")); };
-
-  return (
-    <div className="rise">
-      <PageHead title="Backlinks" sub={`Authority & link-building for ${s.name}.`}>
-        <Chip tone="plum" size="sm" icon="bolt">Link Engine · Phase 1</Chip>
-      </PageHead>
-      {!live && <SoftCard hover={false}><div style={{ padding:"12px 4px", color:"var(--muted)", fontSize:13.5 }}>Connect a live WordPress site to analyse its backlink profile.</div></SoftCard>}
-      {live && (
-        <SoftCard hover={false}>
-          <div style={{ display:"flex", gap:3, padding:3, background:"var(--bg)", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-in)", width:"fit-content", marginBottom:16 }}>
-            {[["gap","Competitor Link Gap","search"],["outreach","Outreach","layers"],["monitor","Monitor","radar"],["profile","Link Profile","trend"]].map(([v,l,ic])=>(
-              <button key={v} onClick={()=>setTab(v)} style={{ display:"flex", alignItems:"center", gap:6, padding:"8px 15px", fontSize:12.5, fontWeight:700, borderRadius:99, background:tab===v?"var(--surface)":"transparent", color:tab===v?"var(--t-700)":"var(--muted)", boxShadow:tab===v?"var(--neo-sm)":"none" }}><Icon name={ic} size={14} />{l}</button>
-            ))}
-          </div>
-          {err && <div style={{ marginBottom:14 }}><ErrBanner msg={err.msg} noUnits={err.noUnits} onRetry={()=>{ setErr(null); tab==="gap"?loadGap():(tab==="monitor"?loadMon():loadProfile()); }} />{err.needsComp && <div style={{ fontSize:12.5, color:"var(--muted)", marginTop:8 }}>→ Go to <b>DataForSEO → Keyword Gap</b>, add your competitors, then come back.</div>}
-            {err.needsSub && <div style={{ marginTop:10, padding:"11px 14px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", boxShadow:"var(--neo-in)" }}>
-              <div style={{ fontSize:12.5, fontWeight:700, color:"#7E5A14", marginBottom:6 }}>Backlinks API not activated</div>
-              <div style={{ fontSize:12.5, color:"#7E5A14", lineHeight:1.5, marginBottom:9 }}>The Backlinks API is a <b>separate DataForSEO subscription</b> from your keyword data (which is working fine). Activate it once on your DataForSEO account and the whole Link Engine — gap, outreach, monitor — turns on.</div>
-              <a href="https://app.dataforseo.com/backlinks-subscription" target="_blank" rel="noopener"><NeoButton kind="primary" size="sm" icon="bolt">Activate Backlinks API ↗</NeoButton></a>
-            </div>}</div>}
-
-          {tab==="gap" && (
-            <div>
-              <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:14, flexWrap:"wrap" }}>
-                <div style={{ flex:1, minWidth:240 }}>
-                  <div style={{ fontSize:13.5, fontWeight:700 }}>Competitor Link Gap</div>
-                  <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Domains that link to your competitors but <b>not</b> to you — your highest-probability backlink targets. Scored by a Link Value Score (authority × reach, penalised for spam). Draft an outreach email, then push to Airtable so n8n sends it.</div>
-                </div>
-                <NeoButton kind="primary" size="sm" icon={busy==="gap"?undefined:"search"} disabled={busy==="gap"} onClick={loadGap}>{busy==="gap"&&<Icon name="cog" size={15} className="audit-spin" />}{busy==="gap"?"Finding…":"Find link gaps"}</NeoButton>
-              </div>
-              {gap && !gap.error && (
-                <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-                  <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4, flexWrap:"wrap" }}>
-                    <span style={{ fontSize:12.5, fontWeight:700, color:"var(--ink-2)" }}>{gap.qualified} qualified prospect(s) · {gap.rejected} low-quality filtered · vs {(gap.competitors||[]).length} competitor(s)</span>
-                    {(gap.prospects||[]).length>0 && <NeoButton kind="soft" size="sm" icon="layers" style={{ marginLeft:"auto" }} disabled={busy==="push"} onClick={pushSelected}>Push selected → Airtable</NeoButton>}
-                  </div>
-                  {(gap.prospects||[]).map((p,i)=>{ const d=drafts[p.domain]||{}; return (
-                    <div key={i} style={{ padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
-                        <input type="checkbox" checked={!!sel[p.domain]} onChange={e=>setSel(x=>({...x,[p.domain]:e.target.checked}))} style={{ width:15, height:15, accentColor:"var(--t-600)" }} />
-                        <a href={"https://"+p.domain} target="_blank" rel="noopener" style={{ fontFamily:"var(--mono)", fontWeight:700, fontSize:13, color:"var(--ink)", textDecoration:"none" }}>{p.domain}</a>
-                        <Chip tone={lvsTone(p.lvs)[0]} size="sm">LVS {p.lvs}</Chip>
-                        <span style={{ fontSize:11.5, color:"var(--muted)" }}>DR-rank {fmt(p.rank)} · links {p.competitorsLinked}/{(gap.competitors||[]).length} rivals{p.spamScore!=null?" · spam "+p.spamScore:""}</span>
-                        <span style={{ marginLeft:"auto", display:"inline-flex", gap:7 }}>
-                          <NeoButton kind="ghost" size="sm" icon={d.busy?undefined:"sparkles"} disabled={d.busy} onClick={()=>draft(p)}>{d.busy&&<Icon name="cog" size={13} className="audit-spin" />}{d.subject?"Redraft":"Draft email"}</NeoButton>
-                        </span>
-                      </div>
-                      {d.open && d.subject && (
-                        <div style={{ marginTop:9, padding:"10px 12px", background:"var(--surface)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)" }}>
-                          <div style={{ fontSize:12.5, fontWeight:700, marginBottom:5 }}>Subject: {d.subject}</div>
-                          <div style={{ fontSize:12.5, color:"var(--ink-2)", whiteSpace:"pre-wrap", lineHeight:1.5 }}>{d.body}</div>
-                          <div style={{ marginTop:7 }}><NeoButton kind="soft" size="sm" icon="doc" onClick={()=>{ try{navigator.clipboard.writeText("Subject: "+d.subject+"\n\n"+d.body);ctx.toast("Email copied","teal");}catch(e){} }}>Copy</NeoButton></div>
-                        </div>
-                      )}
-                    </div>
-                  );})}
-                  {(gap.prospects||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No qualified link-gap prospects (all were low-authority or spammy). Try adding more competitors.</div>}
-                </div>
-              )}
-              {!gap && busy!=="gap" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Find domains linking to your rivals but not you — the safest, highest-value backlink targets. Acquisition stays human-approved (Google penalises auto-placed links).</div>}
-            </div>
-          )}
-
-          {tab==="outreach" && (
-            <div>
-              <div style={{ padding:"11px 14px", borderRadius:"var(--r-md)", background:"var(--t-50,#eef6f4)", boxShadow:"var(--neo-in)", marginBottom:12, fontSize:12.5, color:"var(--ink-2)", lineHeight:1.5 }}>
-                <b>Assisted outreach.</b> Sentinel finds each prospect's contact email, drafts a personalised pitch, and <b>sends it for you via Resend</b> (no n8n). Replies & won links flow back into the Tracker below.
-              </div>
-              {/* Send mode + controls */}
-              <div style={{ padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", marginBottom:14 }}>
-                <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
-                  <span style={{ fontSize:12.5, fontWeight:700 }}>Send mode</span>
-                  <div style={{ display:"flex", gap:3, padding:3, background:"var(--surface)", borderRadius:99, boxShadow:"var(--neo-in)" }}>
-                    {[["manual","Human-approved"],["auto","Fully automatic"]].map(([v,l])=>(
-                      <button key={v} onClick={()=>saveOset({mode:v})} style={{ padding:"6px 12px", fontSize:12, fontWeight:700, borderRadius:99, background:(oset&&oset.mode)===v?"var(--bg)":"transparent", color:(oset&&oset.mode)===v?"var(--t-700)":"var(--muted)", boxShadow:(oset&&oset.mode)===v?"var(--neo-xs)":"none" }}>{l}</button>
-                    ))}
-                  </div>
-                  <span style={{ display:"inline-flex", alignItems:"center", gap:6, fontSize:12, color:"var(--muted)" }}>cap/day
-                    <input type="number" min="1" max="200" defaultValue={(oset&&oset.dailyCap)||10} key={(oset&&oset.dailyCap)} onBlur={e=>{ const n=parseInt(e.target.value,10); if(n&&n!==(oset&&oset.dailyCap)) saveOset({dailyCap:n}); }} style={{ width:54, padding:"5px 8px", borderRadius:8, border:"none", background:"var(--surface)", boxShadow:"var(--neo-in)", fontSize:12, color:"var(--ink)", outline:"none" }} />
-                  </span>
-                  <NeoButton kind="primary" size="sm" icon={sendBusy?undefined:"bolt"} disabled={sendBusy} style={{ marginLeft:"auto" }} onClick={sendNow}>{sendBusy&&<Icon name="cog" size={14} className="audit-spin" />}{sendBusy?"Sending…":"Send approved now"}</NeoButton>
-                </div>
-                <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:8, lineHeight:1.5 }}>
-                  {(oset&&oset.mode)==="auto"
-                    ? <><b>Auto:</b> top prospects are emailed automatically every 6h (up to the daily cap) once pushed — no manual step.</>
-                    : <><b>Human-approved:</b> nothing sends until you set a row's Status to “Send Outreach” (then “Send approved now” or the 6-hourly job fires it).</>}
-                  {oset && !oset.emailConfigured && <span style={{ color:"var(--clay)", fontWeight:700 }}> · ⚠ Email not configured — set RESEND_API_KEY + OUTREACH_FROM (verified domain) to send.</span>}
-                </div>
-              </div>
-              <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14, flexWrap:"wrap" }}>
-                <div style={{ flex:1, minWidth:220, fontSize:12.5, color:"var(--muted)" }}>Builds a campaign from your <b>top {Math.min(((gap&&gap.prospects)||[]).length,12)||"—"}</b> qualified link-gap prospect(s).</div>
-                <NeoButton kind="primary" size="sm" icon={prepBusy?undefined:"sparkles"} disabled={prepBusy} onClick={prepare}>{prepBusy&&<Icon name="cog" size={15} className="audit-spin" />}{prepBusy?"Preparing…":"Prepare campaign"}</NeoButton>
-                {prep&&prep.length>0 && <NeoButton kind="soft" size="sm" icon="layers" disabled={prepBusy} onClick={pushPrepared}>Push campaign → Airtable</NeoButton>}
-              </div>
-              {prep && prep.length>0 && (
-                <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:18 }}>
-                  {prep.map((row,i)=>(
-                    <div key={i} style={{ padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:8 }}>
-                        <a href={"https://"+row.domain} target="_blank" rel="noopener" style={{ fontFamily:"var(--mono)", fontWeight:700, fontSize:13, color:"var(--ink)", textDecoration:"none" }}>{row.domain}</a>
-                        {row.lvs!=null && <Chip tone={lvsTone(row.lvs)[0]} size="sm">LVS {row.lvs}</Chip>}
-                        {row.contactEmail
-                          ? <Chip tone="teal" size="sm" icon="check">{row.contactEmail}</Chip>
-                          : <a href={row.contactPage} target="_blank" rel="noopener" style={{ fontSize:11.5, color:"var(--gold)", fontWeight:700, textDecoration:"none" }}>no email found → contact page ↗</a>}
-                      </div>
-                      <input value={row.subject||""} onChange={e=>setPrepField(i,"subject",e.target.value)} placeholder="Subject" style={{ width:"100%", padding:"8px 11px", marginBottom:7, borderRadius:"var(--r-md)", border:"none", background:"var(--surface)", boxShadow:"var(--neo-in)", fontSize:12.5, fontWeight:700, color:"var(--ink)", outline:"none" }} />
-                      <textarea value={row.body||""} onChange={e=>setPrepField(i,"body",e.target.value)} rows={6} style={{ width:"100%", padding:"9px 11px", borderRadius:"var(--r-md)", border:"none", background:"var(--surface)", boxShadow:"var(--neo-in)", fontSize:12.5, color:"var(--ink-2)", outline:"none", resize:"vertical", lineHeight:1.5, fontFamily:"inherit" }} />
-                    </div>
-                  ))}
-                </div>
-              )}
-              {prep && prep.length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)", marginBottom:18 }}>No prospects to prepare — run the Competitor Link Gap first.</div>}
-
-              {/* Tracker / ROI */}
-              <div style={{ display:"flex", alignItems:"center", gap:10, paddingTop:14, borderTop:"1px solid var(--line-soft)", marginBottom:12 }}>
-                <span style={{ fontSize:13, fontWeight:700, flex:1 }}>Outreach tracker</span>
-                <NeoButton kind="soft" size="sm" icon={trackBusy?undefined:"trend"} disabled={trackBusy} onClick={loadTrack}>{trackBusy&&<Icon name="cog" size={14} className="audit-spin" />}{trackBusy?"Loading…":"Load tracker"}</NeoButton>
-              </div>
-              {track && !track.error && (
-                <div>
-                  <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))", gap:10, marginBottom:12 }}>
-                    {[["Prospects",track.total],["Sent",track.sent],["Replied",track.replied],["Won",track.won],["Reply rate",track.replyRate+"%"],["Win rate",track.winRate+"%"]].map(([l,v],i)=>(
-                      <div key={i} style={{ padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
-                        <div style={{ fontSize:10.5, color:"var(--faint)", textTransform:"uppercase", letterSpacing:".04em", fontWeight:700 }}>{l}</div>
-                        <div style={{ fontSize:19, fontWeight:800, marginTop:2 }}>{fmt(v)}</div>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
-                    {(track.prospects||[]).map((p,i)=>(
-                      <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", fontSize:12.5 }}>
-                        <span style={{ flex:1, fontFamily:"var(--mono)", fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{p.domain}</span>
-                        {p.won && p.wonUrl ? <a href={p.wonUrl} target="_blank" rel="noopener" style={{ color:"var(--t-700)", fontWeight:700, textDecoration:"none" }}>link won ↗</a> : null}
-                        <Chip tone={p.won?"teal":p.replied?"gold":"gray"} size="sm">{p.status}</Chip>
-                      </div>
-                    ))}
-                    {(track.prospects||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No outreach rows yet — prepare + push a campaign above.</div>}
-                  </div>
-                </div>
-              )}
-              {track && track.error && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"4px 2px" }}>{track.error}</div>}
-            </div>
-          )}
-
-          {tab==="monitor" && (
-            <div>
-              <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:14, flexWrap:"wrap" }}>
-                <div style={{ flex:1, minWidth:240 }}>
-                  <div style={{ fontSize:13.5, fontWeight:700 }}>Link monitor — new / lost / toxic</div>
-                  <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Referring-domain changes in the last 30 days. <b>Lost high-authority</b> links are reclamation prospects; <b>toxic</b> domains are disavow candidates. Also runs automatically each week → Activity alerts.</div>
-                </div>
-                <NeoButton kind="primary" size="sm" icon={monBusy?undefined:"radar"} disabled={monBusy} onClick={loadMon}>{monBusy&&<Icon name="cog" size={15} className="audit-spin" />}{monBusy?"Scanning…":"Scan backlinks"}</NeoButton>
-              </div>
-              {mon && (
-                <div>
-                  <div style={{ display:"flex", gap:8, marginBottom:12, flexWrap:"wrap" }}>
-                    {[["new","New",mon.newCount,"teal"],["lost","Lost",mon.lostCount,"clay"],["toxic","Toxic",mon.toxicCount,"gold"]].map(([k,l,c,tone])=>(
-                      <button key={k} onClick={()=>setMonTab(k)} style={{ flex:1, minWidth:100, padding:"11px 13px", borderRadius:"var(--r-md)", background:monTab===k?"var(--surface)":"var(--bg)", boxShadow:monTab===k?"var(--neo-sm)":"var(--neo-in)", textAlign:"left" }}>
-                        <div style={{ fontSize:10.5, color:"var(--faint)", textTransform:"uppercase", letterSpacing:".04em", fontWeight:700 }}>{l}</div>
-                        <div style={{ fontSize:20, fontWeight:800, color:`var(--${tone})` }}>{fmt(c)}</div>
-                      </button>
-                    ))}
-                  </div>
-                  {monTab==="lost" && mon.lostHighValue>0 && <div style={{ padding:"9px 12px", borderRadius:"var(--r-md)", background:"var(--clay-bg)", color:"#8A4231", fontSize:12.5, marginBottom:10 }}>{mon.lostHighValue} of these were high-authority (rank ≥ 100) — worth a reclamation email (they linked once).</div>}
-                  {monTab==="toxic" && (mon.toxic||[]).length>0 && <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10, flexWrap:"wrap" }}><span style={{ fontSize:12, color:"var(--muted)" }}>Most low-quality links are auto-ignored by Google — only disavow if you see a clear unnatural pattern.</span><NeoButton kind="soft" size="sm" icon="doc" style={{ marginLeft:"auto" }} onClick={getDisavow}>Download disavow draft</NeoButton></div>}
-                  <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
-                    {(mon[monTab]||[]).map((d,i)=>(
-                      <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 12px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", fontSize:12.5 }}>
-                        <a href={"https://"+d.domain} target="_blank" rel="noopener" style={{ flex:1, fontFamily:"var(--mono)", fontWeight:600, color:"var(--ink)", textDecoration:"none", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{d.domain}</a>
-                        <span style={{ fontSize:11.5, color:"var(--muted)" }}>rank {fmt(d.rank)}{monTab==="toxic"?` · spam ${d.spamScore}`:""}{monTab==="new"&&d.firstSeen?` · ${String(d.firstSeen).slice(0,10)}`:""}{monTab==="lost"&&d.lostDate?` · lost ${String(d.lostDate).slice(0,10)}`:""}</span>
-                        {monTab==="lost" && (d.rank||0)>=100 && <Chip tone="gold" size="sm">reclaim</Chip>}
-                      </div>
-                    ))}
-                    {(mon[monTab]||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No {monTab} referring domains in the last 30 days.</div>}
-                  </div>
-                </div>
-              )}
-              {!mon && !monBusy && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Scan for new, lost, and toxic backlinks — catch lost high-authority links to win back, and spot spammy domains. This also runs weekly in the background.</div>}
-            </div>
-          )}
-
-          {tab==="profile" && (
-            <div>
-              <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:14, flexWrap:"wrap" }}>
-                <div style={{ flex:1, minWidth:240 }}>
-                  <div style={{ fontSize:13.5, fontWeight:700 }}>Backlink profile</div>
-                  <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Your authority overview from DataForSEO — referring domains drive Domain Rating/Authority.</div>
-                </div>
-                <NeoButton kind="primary" size="sm" icon={busy==="profile"?undefined:"radar"} disabled={busy==="profile"} onClick={loadProfile}>{busy==="profile"&&<Icon name="cog" size={15} className="audit-spin" />}{busy==="profile"?"Loading…":"Load profile"}</NeoButton>
-              </div>
-              {profile && profile.summary && (
-                <div>
-                  <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))", gap:10, marginBottom:12 }}>
-                    {[["Domain rank",profile.summary.rank,"/1000"],["Referring domains",profile.summary.referringDomains,""],["Backlinks",profile.summary.backlinks,""],["Do-follow",profile.summary.dofollowRatio!=null?profile.summary.dofollowRatio+"%":"—",""],["Spam score",profile.summary.spamScore!=null?profile.summary.spamScore:"—",""]].map(([l,v,suf],i)=>(
-                      <div key={i} style={{ padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
-                        <div style={{ fontSize:11, color:"var(--faint)", textTransform:"uppercase", letterSpacing:".04em", fontWeight:700 }}>{l}</div>
-                        <div style={{ fontSize:20, fontWeight:800, marginTop:3 }}>{fmt(v)}<span style={{ fontSize:12, color:"var(--muted)", fontWeight:600 }}>{suf}</span></div>
-                      </div>
-                    ))}
-                  </div>
-                  {profile.anchorHealth && profile.anchorHealth.overOptimised && <div style={{ padding:"10px 13px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", color:"#7E5A14", fontSize:12.5, marginBottom:12 }}>⚠ Anchor over-optimisation: “{profile.anchorHealth.topAnchor}” is {profile.anchorHealth.topShare}% of your anchors — a spam-risk signal. Diversify anchor text on new links.</div>}
-                  {(profile.anchors||[]).length>0 && (
-                    <div><div style={{ fontSize:12.5, fontWeight:700, marginBottom:6 }}>Top anchors</div><div style={{ display:"flex", flexDirection:"column", gap:5 }}>
-                      {profile.anchors.map((a,i)=>(<div key={i} style={{ display:"flex", alignItems:"center", padding:"8px 11px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", fontSize:12.5 }}><span style={{ flex:1, fontFamily:"var(--mono)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{a.anchor||"(empty)"}</span><span style={{ width:120, textAlign:"right", color:"var(--muted)" }}>{fmt(a.referringDomains)} domains</span></div>))}
-                    </div></div>
-                  )}
-                </div>
-              )}
-              {!profile && busy!=="profile" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Load your live backlink profile — referring domains, do-follow ratio, spam score, and anchor health.</div>}
-            </div>
-          )}
-        </SoftCard>
-      )}
-    </div>
-  );
-}
-
 /* ---------------- App ---------------- */
 function App() {
   const [collapsed, setCollapsed] = useState(()=>{ try{return localStorage.getItem("sentinel-collapsed")==="1";}catch(e){return false;} });
@@ -4314,6 +4051,10 @@ function App() {
   const [runAuditOpen, setRunAuditOpen] = useState(false);
   const [applyOpen, setApplyOpen] = useState(false);
   const [history, setHistory] = useState([]);
+  // Findings are PER-SITE: tagged with the site they belong to so switching sites
+  // (or rerunning) never shows another site's findings. Hydrated from the latest
+  // saved audit on site change; overwritten by runAudit for the active site only.
+  const [findingsState, setFindingsState] = useState({ siteId:null, items:[] });
   const [historyLoading, setHistoryLoading] = useState(false);
   const [intel, setIntel] = useState(null);
   const [intelLoading, setIntelLoading] = useState(false);
@@ -4355,14 +4096,20 @@ function App() {
     API.listAudits(id).then(rows=>{
       const mapped=(rows||[]).slice().reverse().map(r=>({ id:r.id, ts:r.created_at, scope:r.scope, scores:r.scores||{}, cwv:r.cwv||{}, findings:r.findings||[], variance:(r.summary&&r.summary.variance)||null }));
       setHistory(mapped);
-    }).catch(()=>setHistory([])).finally(()=>setHistoryLoading(false));
+      // Hydrate this site's findings from its most-recent saved audit (order-independent).
+      const latest=mapped.reduce((a,b)=>(!a||new Date(b.ts)>new Date(a.ts))?b:a,null);
+      setFindingsState({ siteId:id, items:(latest&&latest.findings)||[] });
+    }).catch(()=>{ setHistory([]); setFindingsState({ siteId:id, items:[] }); }).finally(()=>setHistoryLoading(false));
   },[siteId]);
   useEffect(()=>{ loadHistory(siteId); setIntel(null); setGeo(null); setGeoStatus(""); },[siteId]);
+  // Keep the legacy global mirror in sync with the ACTIVE site's findings (never stale).
+  useEffect(()=>{ try{ window.FINDINGS = (findingsState.siteId===siteId?findingsState.items:[])||[]; }catch(e){} },[findingsState,siteId]);
 
   const ctx = {
     screen, navTab, goto, site, sites, proposals, killSwitch, toast, auditing, addSiteFor,
     notifOpen, setNotifOpen, searchQuery, setSearchQuery,
     history, historyLoading, reloadHistory:()=>loadHistory(siteId),
+    findings: findingsState.siteId===siteId ? (findingsState.items||[]) : [],
     intel, intelLoading,
     geo, geoLoading, geoStatus,
     // GEO / AI-citation tracking: Claude generates buyer-intent prompts, queries
@@ -4413,7 +4160,7 @@ function App() {
     },
     // Export the current site's audit report as a printable PDF (browser print).
     exportReport:()=>{
-      const ok=window.SentinelHelpers.exportAuditPDF(site, window.FINDINGS||[], proposals);
+      const ok=window.SentinelHelpers.exportAuditPDF(site, (findingsState.siteId===siteId?findingsState.items:[])||[], proposals);
       toast(ok?"Opening printable report — choose 'Save as PDF'":"Allow pop-ups to export","teal");
     },
     // Export the activity trail as CSV.
@@ -4446,8 +4193,9 @@ function App() {
               inp:{v:cwv.tbt!=null?Math.round(cwv.tbt)+"ms":"—",state:"good"},
               cls:{v:cwv.cls!=null?cwv.cls.toFixed(2):"—",state:(cwv.cls||0)<0.1?"good":"ni"} };
             setSites(prev=>prev.map(x=>x.id!==siteId?x:{...x,lastAudit:"just now",prev:x.scores,scores:sc,cwv:cwvUi,openFindings:(res.findings||[]).length}));
-            // Findings feed the Audits screen (reads window.FINDINGS).
-            window.FINDINGS = res.findings||[];
+            // Findings feed the Audits screen — tagged to THIS site so a later
+            // site-switch can't show them (and they hydrate from saved audits).
+            setFindingsState({ siteId, items: res.findings||[] });
             // Persist scores + audit + activity.
             try{ await API.updateSite(siteId,{scores:sc,prev_scores:site.scores,last_audit:new Date().toISOString(),open_findings:(res.findings||[]).length}); }catch(e){}
             try{ await API.createAudit({site_id:siteId,owner:site.owner,scope:"single",scores:sc,cwv:res.cwv,findings:res.findings,summary:variance?{variance}:null}); }catch(e){}
@@ -4617,7 +4365,7 @@ function App() {
     },
   };
 
-  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, content:ContentScreen, optimize:OptimizeScreen, backlinks:BacklinksScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen };
+  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen };
   const Screen = SCREENS[screen] || Dashboard;
 
   let content = <Screen ctx={ctx} run />;

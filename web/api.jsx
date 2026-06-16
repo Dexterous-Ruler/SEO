@@ -137,15 +137,6 @@
     execNarrative(metrics) { return engine("/exec-narrative", { metrics }); },
     internalLinks(siteId, opts) { return engine("/internal-links", Object.assign({ siteId }, opts || {})); },
     externalLinks(siteId, targetUrl) { return engine("/external-links", { siteId, targetUrl }); },
-    backlinksSummary(siteId) { return engine("/backlinks/summary", { siteId }); },
-    backlinksGap(siteId) { return engine("/backlinks/gap", { siteId }); },
-    backlinksDraftOutreach(siteId, prospectDomain, tactic, targetPage) { return engine("/backlinks/draft-outreach", { siteId, prospectDomain, tactic, targetPage }); },
-    backlinksPrepareOutreach(siteId, prospects, tactic, targetPage) { return engine("/backlinks/prepare-outreach", { siteId, prospects, tactic, targetPage }); },
-    backlinksOutreachStatus(siteId) { return engine("/backlinks/outreach-status", { siteId }); },
-    backlinksMonitor(siteId) { return engine("/backlinks/monitor", { siteId }); },
-    backlinksDisavow(siteId) { return engine("/backlinks/disavow", { siteId }); },
-    outreachSettings(siteId, mode, dailyCap) { return engine("/outreach/settings", { siteId, mode, dailyCap }); },
-    outreachSendNow(siteId) { return engine("/outreach/send-now", { siteId }); },
     // Durable background jobs
     jobRun(type, payload, siteId) { return engine("/jobs/run", { type, payload, siteId }); },
     jobGet(id) { return engine("/jobs/get", { id }); },
@@ -165,7 +156,6 @@
       }
       return { id, status: "timeout", error: "Still running — check back shortly." };
     },
-    backlinksPushProspects(siteId, prospects) { return engine("/backlinks/push-prospects", { siteId, prospects }); },
     applyLink(siteId, sourcePage, anchor, targetUrl, sourceId, sourceType) { return engine("/apply-link", { siteId, sourcePage, anchor, targetUrl, sourceId, sourceType }); },
     generateSchema(siteId, page, schemaConfig, faqs) { return engine("/generate-schema", { siteId, page, schemaConfig, faqs }); },
     // Live "apply" layer (needs the seo-agent-optimize mu-plugin)

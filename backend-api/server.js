@@ -32,8 +32,6 @@ import * as geo from './geo.js';
 // the module exposes the identical interface + return shapes.
 import * as semrush from './dataforseo.js';
 import * as airtable from './airtable.js';
-import * as linkengine from './backlinks.js';
-import * as email from './email.js';
 import * as chatbot from './chat.js';
 import * as gsc from './gsc.js';
 import * as gscIndex from './gsc-index.js';
@@ -281,7 +279,6 @@ const PROMPT_SAMPLES = {
   'research.facts': { engine: 'perplexity', user: 'Topic: UK spouse visa. List the current UK facts most useful to cite.' },
   'seo.internalLinks': { engine: 'claude', user: 'SOURCE PAGE: Divorce process explained (/divorce-process)\n\nSOURCE TEXT: A guide to the UK divorce process, financial settlements and child arrangements.\n\nCANDIDATE TARGET PAGES:\n1. Financial settlement guide → /financial-settlement\n2. Child arrangements → /child-arrangements\n\nReturn the JSON array.' },
   'seo.externalLinks': { engine: 'claude', user: 'PAGE URL: /uk-spouse-visa\nTITLE: UK Spouse Visa Guide\nNICHE: UK immigration\n\nPAGE TEXT (excerpt):\nThe UK spouse visa lets partners of British citizens live in the UK. Applicants must meet a financial requirement and apply through GOV.UK. Processing times are published by UK Visas and Immigration.\n\nReturn the JSON array of authoritative external-link suggestions.' },
-  'backlinks.outreach': { engine: 'claude', user: 'OUR SITE: Go Visa (https://go-visa.co.uk)\nNICHE: UK immigration\nPROSPECT DOMAIN: ukimmigrationblog.com\nTACTIC: competitor_gap\nOUR RELEVANT PAGE: /uk-skilled-worker-visa\n\nWrite the outreach email. Return ONLY JSON: {"subject":"...","body":"..."}.' },
   'seo.pageFacts': { engine: 'claude', user: 'URL: /uk-spouse-visa\nTITLE: UK Spouse Visa Guide\n\nPAGE TEXT: The UK spouse visa lets partners of British citizens live in the UK. It is valid for 33 months and requires meeting a financial requirement.\n\nReturn the JSON.' },
   'report.narrate': { engine: 'claude', user: 'Site: Go Legal\n\nComputed metrics:\n{"trafficValue":{"totalEstValue":4200,"currency":"GBP","valueAtRisk":900},"audit":{"latestComposite":78,"delta":-3},"search":{"clicks28":1200}}\n\nWrite the weekly executive briefing.' },
   'plan.project': { engine: 'claude', user: 'Site: Go Legal (https://go-legal.ai)\nNiche: UK legal\nGoals: reach 100/100 Lighthouse + improve content.\nCurrent scores: {"performance":62,"seo":85}\n\nWrite the plan.' },
@@ -1191,88 +1188,6 @@ const routes = {
     } catch (e) { return { error: 'External-link analysis failed: ' + e.message }; }
   },
 
-  // ── Link Engine (backlinks) ──────────────────────────────────────────────
-  // Backlink-authority profile for the active site (read-only).
-  'POST /backlinks/summary': async (body) => {
-    if (!body.siteId) return { error: 'No site selected.' };
-    if (!semrush.hasKey()) return { error: 'DataForSEO is not configured (DATAFORSEO_LOGIN / API password).' };
-    try { return await linkengine.profile(body.siteId); }
-    catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted — top up to pull backlinks.' : e.message, noUnits: e.code === 'NO_UNITS', needsSub: e.code === 'NO_BACKLINKS_SUB' }; }
-  },
-  // Competitor Link Gap — scored prospects (read-only).
-  'POST /backlinks/gap': async (body) => {
-    if (!body.siteId) return { error: 'No site selected.' };
-    if (!semrush.hasKey()) return { error: 'DataForSEO is not configured.' };
-    try { return await linkengine.linkGap(body.siteId, { limit: body.limit || 80 }); }
-    catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted — top up to run the link gap.' : e.message, noUnits: e.code === 'NO_UNITS', needsSub: e.code === 'NO_BACKLINKS_SUB' }; }
-  },
-  // Draft a personalised outreach email for one prospect (Claude).
-  'POST /backlinks/draft-outreach': async (body) => {
-    if (!body.siteId) return { error: 'No site selected.' };
-    try { return await linkengine.draftOutreach(body.siteId, { prospectDomain: body.prospectDomain, tactic: body.tactic || 'competitor_gap', targetPage: body.targetPage || '' }); }
-    catch (e) { return { error: e.message }; }
-  },
-  // Phase 2: prepare a campaign — enrich contact + draft email for a batch.
-  'POST /backlinks/prepare-outreach': async (body) => {
-    if (!body.siteId) return { error: 'No site selected.' };
-    try { return await linkengine.prepareOutreach(body.siteId, { prospects: body.prospects || [], tactic: body.tactic || 'competitor_gap', targetPage: body.targetPage || '' }); }
-    catch (e) { return { error: e.message }; }
-  },
-  // Phase 2: read the Outreach table back → pipeline + reply/win ROI.
-  'POST /backlinks/outreach-status': async (body) => {
-    if (!body.siteId) return { error: 'No site selected.' };
-    try { return await linkengine.outreachStatus(body.siteId); }
-    catch (e) { return { error: e.message }; }
-  },
-  // Outreach send settings (per-site mode + daily cap) + email-config status.
-  'POST /outreach/settings': async (body) => {
-    if (!body.siteId) return { error: 'No site selected.' };
-    const patch = {};
-    if (body.mode && ['manual', 'auto'].includes(body.mode)) patch.outreach_mode = body.mode;
-    if (body.dailyCap != null && !isNaN(body.dailyCap)) patch.outreach_daily_cap = Math.max(1, Math.min(200, parseInt(body.dailyCap, 10)));
-    let site;
-    if (Object.keys(patch).length) site = await db.updateSite(body.siteId, patch).catch(() => null);
-    if (!site) site = await db.getSite(body.siteId).catch(() => null);
-    return { mode: (site && site.outreach_mode) || 'manual', dailyCap: (site && site.outreach_daily_cap) || 10, emailConfigured: email.emailConfigured() };
-  },
-  // Send due outreach now (manual trigger; same logic the scheduler runs).
-  'POST /outreach/send-now': async (body) => {
-    if (!body.siteId) return { error: 'No site selected.' };
-    try { return await linkengine.sendOutreach(body.siteId, { trigger: 'manual' }); }
-    catch (e) { return { error: e.message }; }
-  },
-
-  // Phase 3: new / lost / toxic referring domains (read-only monitoring).
-  'POST /backlinks/monitor': async (body) => {
-    if (!body.siteId) return { error: 'No site selected.' };
-    if (!semrush.hasKey()) return { error: 'DataForSEO is not configured.' };
-    try { return await linkengine.monitor(body.siteId, { windowDays: body.windowDays || 30 }); }
-    catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted.' : e.message, noUnits: e.code === 'NO_UNITS', needsSub: e.code === 'NO_BACKLINKS_SUB' }; }
-  },
-  // Phase 3: disavow-file DRAFT (flag-only, human-submitted).
-  'POST /backlinks/disavow': async (body) => {
-    if (!body.siteId) return { error: 'No site selected.' };
-    if (!semrush.hasKey()) return { error: 'DataForSEO is not configured.' };
-    try { return await linkengine.disavowDraft(body.siteId); }
-    catch (e) { return { error: e.message }; }
-  },
-  // Push selected prospects (+ optional drafts) into the site's Airtable as an
-  // "Outreach" table so n8n can send + sequence — same handoff as the article loop.
-  'POST /backlinks/push-prospects': async (body) => {
-    if (!body.siteId) return { error: 'No site selected.' };
-    const pat = await db.getAirtablePat(body.siteId).catch(() => null);
-    if (!pat) return { error: 'Connect Airtable first (Airtable Sync screen).' };
-    const cfg = await db.getAirtableConfig(body.siteId).catch(() => null);
-    if (!cfg || !cfg.base_id) return { error: 'Set the Airtable base for this site first.' };
-    const rows = (body.prospects || []).filter((p) => p && p.domain);
-    if (!rows.length) return { error: 'No prospects to push.' };
-    try {
-      const res = await airtable.pushProspects(pat, cfg.base_id, 'Outreach', rows);
-      await db.logActivity({ site_id: body.siteId, type: 'off-site', actor: 'You', icon: 'link', text: 'Pushed ' + res.pushed + ' link prospect(s) to Airtable (Outreach)', meta: 'n8n outreach' }).catch(() => {});
-      return { done: true, pushed: res.pushed, skipped: res.skipped, table: 'Outreach' };
-    } catch (e) { return { error: 'Airtable push failed: ' + e.message }; }
-  },
-
   // Apply ONE approved link (internal or external) into a live page's content.
   // Safe on Classic/Gutenberg; detects Elementor/page-builder & empty bodies and
   // returns status:'manual' (their content lives outside the standard WP field).
@@ -1483,7 +1398,7 @@ const routes = {
   'POST /media-optimize': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
     // On a real apply, skip images already converted to WebP (no duplicate uploads).
-    try { return await imageOpt.optimizeImages(body.siteId, { ids: body.ids || null, quality: body.quality || 80, max: body.max || 8, apply: !!body.apply, skipExisting: body.skipExisting != null ? !!body.skipExisting : !!body.apply }); }
+    try { return await imageOpt.optimizeImages(body.siteId, { ids: body.ids || null, quality: body.quality || 80, max: body.max || 10, apply: !!body.apply, skipExisting: body.skipExisting != null ? !!body.skipExisting : !!body.apply }); }
     catch (e) { return { error: 'Image optimization failed: ' + e.message }; }
   },
   // Speed test: run PageSpeed (median-of-N) on a URL for mobile + desktop.
@@ -2021,8 +1936,6 @@ const HEAVY_ROUTES = new Set([
   'POST /narrate', 'POST /scorecard', 'POST /weekly-briefing', 'POST /research', 'POST /auditPage',
   'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
   'POST /media-scan', 'POST /media-optimize', 'POST /airtable-sync', 'POST /generate-opportunities',
-  'POST /backlinks/summary', 'POST /backlinks/gap', 'POST /backlinks/monitor', 'POST /backlinks/disavow',
-  'POST /backlinks/draft-outreach', 'POST /backlinks/prepare-outreach',
 ]);
 
 const server = createServer(async (req, res) => {
@@ -2162,9 +2075,6 @@ server.listen(PORT, '0.0.0.0', () => {
   // Register durable background-job handlers + start the worker pool. Long tasks
   // can be enqueued via /jobs/run and survive crashes/redeploys.
   try {
-    jobs.register('outreach.prepare', (p) => linkengine.prepareOutreach(p.siteId, { prospects: p.prospects || [], tactic: p.tactic || 'competitor_gap', targetPage: p.targetPage || '' }));
-    jobs.register('backlinks.gap', (p) => linkengine.linkGap(p.siteId, { limit: p.limit || 80 }));
-    jobs.register('backlinks.monitor', (p) => linkengine.monitor(p.siteId, { windowDays: p.windowDays || 30 }));
     jobs.register('content.intel', (p) => routes['POST /content-intel']({ siteId: p.siteId, siteName: p.siteName, niche: p.niche }));
     jobs.startWorker();
   } catch (e) { console.error('[jobs] failed to start', e && e.message); }
