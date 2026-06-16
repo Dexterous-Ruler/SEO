@@ -1858,7 +1858,7 @@ const routes = {
   // Content intelligence: gaps, suggestions, keyword clusters for a site.
   // Pulls the site's post/page titles via REST, then asks Claude to analyze.
   'POST /content-intel': async (body) => {
-    const { creds } = await resolveCreds(body);
+    const { creds, site } = await resolveCreds(body);
     const wp = clientFrom(creds);
     // Gather a representative sample of titles across posts + pages.
     const titles = [];
@@ -1880,7 +1880,7 @@ const routes = {
     for (let i = 0; i < clean.length && sample.length < 90; i += step) sample.push(clean[i]);
     let intel;
     try {
-      intel = await claude.contentIntelligence({ siteName: body.siteName || creds.baseUrl, niche: body.niche, titles: sample, siteId: body.siteId, market: marketFor(creds.site && creds.site.semrush_db) });
+      intel = await claude.contentIntelligence({ siteName: body.siteName || creds.baseUrl, niche: body.niche, titles: sample, siteId: body.siteId, market: marketFor(site && site.semrush_db) });
     } catch (e) {
       return { error: 'Content analysis failed: ' + e.message };
     }
