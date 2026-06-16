@@ -291,7 +291,9 @@ const RESOLVED_STATUSES = { verified:1, approved:1, applied:1, dismissed:1 };
 function FindingRow({ f, ctx, open, onToggle }) {
   const dm = softDisc[f.disc], [imTone,imLabel]=impactTone[f.impact];
   const fk = seoFindingKey(f);
-  const inQueue = ctx.proposals.find(p=>p.findingId===fk);
+  // Only a genuinely-pending proposal counts as "in queue" — not a dismissed/reopened/
+  // rejected ledger entry (those share the finding's key but aren't review items).
+  const inQueue = ctx.proposals.find(p=>p.findingId===fk && !["dismissed","reopened","rejected"].includes(p.status));
   const ch = { "rest-write":["teal","REST write"], "theme/css":["gold","Theme / CSS"], manual:["gray","Manual"] }[f.channel];
   return (
     <div style={{ borderRadius:"var(--r-md)", overflow:"hidden", background:open?"var(--t-50)":"var(--bg)", boxShadow:open?"var(--neo-xs)":"var(--neo-in)", transition:"all .16s" }}>

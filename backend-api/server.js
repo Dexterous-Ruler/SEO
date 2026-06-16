@@ -1388,6 +1388,16 @@ const routes = {
     try { return await imageOpt.optimizeImages(body.siteId, { ids: body.ids || null, quality: body.quality || 80, max: body.max || 10, apply: !!body.apply, skipExisting: body.skipExisting != null ? !!body.skipExisting : !!body.apply }); }
     catch (e) { return { error: 'Image optimization failed: ' + e.message }; }
   },
+  // Remove duplicate WebP copies (X.webp, X-1.webp … X-N.webp). apply=false = dry run.
+  'POST /cleanup-webp-dupes': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    if (body.apply) {
+      const site = await db.getSite(body.siteId).catch(() => null);
+      if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'This site is read-only — arm writes first.' };
+    }
+    try { return await imageOpt.cleanupDuplicateWebp(body.siteId, { apply: !!body.apply }); }
+    catch (e) { return { error: 'WebP cleanup failed: ' + e.message }; }
+  },
   // Speed test: run PageSpeed (median-of-N) on a URL for mobile + desktop.
   'POST /speed-test': async (body) => {
     const url = body.url;
@@ -1935,7 +1945,7 @@ const HEAVY_ROUTES = new Set([
   'POST /content-decay', 'POST /content-decay-brief', 'POST /content-refresh', 'POST /content-brief', 'POST /project-plan',
   'POST /narrate', 'POST /scorecard', 'POST /weekly-briefing', 'POST /research', 'POST /auditPage',
   'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
-  'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',
+  'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',
 ]);
 
 const server = createServer(async (req, res) => {

@@ -201,4 +201,45 @@ export async function optimizePageImages(siteId, pageUrl, { apply = false, max =
   return optimizeImages(siteId, { ids, apply, max, skipExisting: apply });
 }
 
-export default { scanMedia, optimizeImages, optimizePageImages };
+// Clean up duplicate WebP media items (same image uploaded multiple times as
+// X.webp, X-1.webp … X-18.webp on filename collisions). Keeps ONE per image
+// (the shortest/cleanest name), deletes the rest, then rebuilds the original→WebP
+// map so pages keep serving the surviving copy. apply=false is a DRY RUN.
+export async function cleanupDuplicateWebp(siteId, { apply = false } = {}) {
+  const { baseUrl, username, appPassword } = await credsForSite(siteId);
+  const wp = new WordPressClient({ baseUrl, username, appPassword });
+  const baseOf = (url) => (String(url).split('/').pop() || '').replace(/(-\d+x\d+)?(-\d{1,3})?\.webp$/i, '').toLowerCase();
+  // Gather every WebP media item (paginated).
+  const webps = [];
+  for (let p = 1; p <= 40; p++) {
+    const items = await wp.request(`/media?per_page=100&page=${p}&media_type=image&_fields=id,source_url,mime_type,date`).catch(() => []);
+    if (!Array.isArray(items) || !items.length) break;
+    for (const m of items) if (/image\/webp/i.test(m.mime_type || '')) webps.push({ id: m.id, url: m.source_url, date: m.date || '' });
+    if (items.length < 100) break;
+  }
+  const groups = {};
+  for (const w of webps) { const b = baseOf(w.url); (groups[b] = groups[b] || []).push(w); }
+  const toDelete = []; const keepByBase = {};
+  let groupsWithDupes = 0;
+  for (const [b, arr] of Object.entries(groups)) {
+    arr.sort((a, c) => (a.url.length - c.url.length) || (new Date(a.date) - new Date(c.date))); // cleanest/oldest first
+    keepByBase[b] = arr[0];
+    if (arr.length > 1) { groupsWithDupes++; for (const w of arr.slice(1)) toDelete.push(w); }
+  }
+  if (!apply) return { dryRun: true, totalWebp: webps.length, uniqueImages: Object.keys(groups).length, groupsWithDupes, wouldDelete: toDelete.length, sample: toDelete.slice(0, 6).map((w) => w.url.split('/').pop()) };
+
+  let deleted = 0, failed = 0;
+  for (const w of toDelete) {
+    try { await wp.request(`/media/${w.id}?force=true`, { method: 'DELETE' }); deleted++; } catch (e) { failed++; }
+  }
+  // Rebuild the original→surviving-WebP map so live pages keep serving WebP.
+  const originals = await fetchImages(wp);
+  const map = {};
+  for (const o of originals) { const keep = keepByBase[stemOf(o.url)]; if (keep) map[o.url] = keep.url; }
+  if (Object.keys(map).length) {
+    try { await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/webp-map`, { method: 'POST', body: { map, reset: true } }); } catch (e) {}
+  }
+  return { applied: true, totalWebp: webps.length, groupsWithDupes, deleted, failed, remapped: Object.keys(map).length };
+}
+
+export default { scanMedia, optimizeImages, optimizePageImages, cleanupDuplicateWebp };
