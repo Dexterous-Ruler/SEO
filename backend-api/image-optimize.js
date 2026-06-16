@@ -100,11 +100,14 @@ export async function scanMedia(siteId, { minKB = 80, limit = 200 } = {}) {
 // Optimize: compress to WebP. apply=false → preview savings (no write);
 // apply=true → upload WebP to the media library (force-bypasses DRY_RUN since
 // the click is the explicit approval). Capped + sequential for safety.
-export async function optimizeImages(siteId, { ids = null, quality = 80, max = 10, apply = false, skipExisting = false } = {}) {
+export async function optimizeImages(siteId, { ids = null, quality = 80, max = 10, apply = false, skipExisting = false, minKB = 80 } = {}) {
   const { baseUrl, username, appPassword } = await credsForSite(siteId);
   const wp = new WordPressClient({ baseUrl, username, appPassword });
   let targets = await fetchImages(wp);
   if (ids && ids.length) targets = targets.filter((i) => ids.includes(i.id));
+  // Only HEAVY images (>= minKB) — same threshold scanMedia counts, so the UI's
+  // "Optimize all (N)" processes exactly N (no overshoot past the heavy count).
+  else targets = targets.filter((i) => i.sizeKB >= minKB);
   // Heaviest first across the WHOLE library.
   targets.sort((a, b) => b.sizeKB - a.sizeKB);
   // CRITICAL: filter out already-converted FIRST, then take the heaviest `max`
