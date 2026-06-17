@@ -1347,11 +1347,14 @@ function OpportunitiesScreen({ ctx }) {
   const [trendBusy,setTrendBusy] = useState(false);
   const [briefs,setBriefs] = useState({});   // clusterIndex → {brief, sources}
   const [briefBusy,setBriefBusy] = useState(-1);
+  const [paaSeed,setPaaSeed] = useState("");
+  const [paa,setPaa] = useState(null);
+  const [paaBusy,setPaaBusy] = useState(false);
   // Target country — same per-site market as the keyword data (semrush_db). Switching it
   // here re-points opportunities, trends & briefs at that country (mirrors Content Intel).
   const [dbVal,setDbVal] = useState(s.semrush_db||"uk");
   const [dbList,setDbList] = useState(null);
-  useEffect(()=>{ setData(null); setErr(null); setTrend(null); setBriefs({}); setDbVal(s.semrush_db||"uk"); },[s.id]);
+  useEffect(()=>{ setData(null); setErr(null); setTrend(null); setBriefs({}); setDbVal(s.semrush_db||"uk"); setPaa(null); setPaaSeed(""); },[s.id]);
   useEffect(()=>{ if(live&&!dbList) API.siteDatabase(s.id).then(r=>{ if(r&&r.countries) setDbList(r.countries); }).catch(()=>{}); },[live]);
   const changeCountry = (db)=>{
     if(!db||db===dbVal) return;
@@ -1372,6 +1375,21 @@ function OpportunitiesScreen({ ctx }) {
     setPushing("trend"); ctx.toast("Pushing "+kws.length+" trending topic(s) to Airtable…","teal");
     API.airtablePushKeywords(s.id, kws).then(r=>{ if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
       ctx.toast(r.pushed>0?("Pushed "+r.pushed+" trending topic(s) → Airtable ✓"+(r.skipped?" ("+r.skipped+" already there)":"")):"All trending topics already in Airtable", r.pushed>0?"teal":"gold");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(""));
+  };
+  // ITEM 1: People Also Ask — pull real Google PAA questions for a seed keyword (in the
+  // site's market via DataForSEO SERP), then push them to Airtable as content briefs.
+  const findPaa = ()=>{
+    const seed=(paaSeed||"").trim(); if(!seed){ ctx.toast("Enter a seed keyword","gold"); return; }
+    setPaaBusy(true); setPaa(null);
+    API.peopleAlsoAsk(s.id, seed).then(r=>{ if(r.error){ ctx.toast("People Also Ask: "+r.error,"clay"); setPaa({error:r.error}); return; } setPaa(r); }).catch(e=>{ ctx.toast(e.message,"clay"); setPaa({error:e.message}); }).finally(()=>setPaaBusy(false));
+  };
+  const pushPaa = ()=>{
+    const kws=[...new Set([...(((paa&&paa.questions)||[]).map(q=>q.question)), ...((paa&&paa.related)||[])].map(k=>(k||"").trim()).filter(Boolean))];
+    if(!kws.length){ ctx.toast("No questions to push — find questions first","gold"); return; }
+    setPushing("paa"); ctx.toast("Pushing "+kws.length+" question(s) to Airtable…","teal");
+    API.airtablePushKeywords(s.id, kws).then(r=>{ if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
+      ctx.toast(r.pushed>0?("Pushed "+r.pushed+" question(s) → Airtable ✓"+(r.skipped?" ("+r.skipped+" already there)":"")):"All questions already in Airtable", r.pushed>0?"teal":"gold");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(""));
   };
   const genBrief = (c,i)=>{
@@ -1432,6 +1450,33 @@ function OpportunitiesScreen({ ctx }) {
             </div>
           )}
           {!trend && !trendBusy && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"2px" }}>{`Surface this week's trending topics in ${cName} in your niche, with sources — fresh content ideas grounded in the live web.`}</div>}
+        </SoftCard>
+      )}
+
+      {/* ITEM 1: People Also Ask — real Google questions for a seed keyword → push to Airtable */}
+      {live && (
+        <SoftCard hover={false} style={{ marginBottom:18 }}>
+          <SectionHead sub={`Real Google "People Also Ask" questions in ${cName} for any seed keyword — push them as content briefs (one article answers each).`} right={
+            (paa && !paa.error && (paa.questions||[]).length>0) ? <NeoButton kind="soft" size="sm" icon={pushing==="paa"?undefined:"upload"} disabled={pushing==="paa"} onClick={pushPaa}>{pushing==="paa"&&<Icon name="cog" size={14} className="audit-spin" />}Push questions → Airtable</NeoButton> : null
+          }>People Also Ask</SectionHead>
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:(paa&&!paa.error&&(paa.questions||[]).length)?14:0 }}>
+            <input value={paaSeed} onChange={e=>setPaaSeed(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")findPaa();}} placeholder="Seed keyword (e.g. uk skilled worker visa)" style={{ flex:1, minWidth:220, padding:"10px 14px", borderRadius:"var(--r-pill)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none" }} />
+            <NeoButton kind="primary" size="sm" icon={paaBusy?undefined:"search"} disabled={paaBusy} onClick={findPaa}>{paaBusy&&<Icon name="cog" size={14} className="audit-spin" />}{paaBusy?"Finding…":"Find questions"}</NeoButton>
+          </div>
+          {paa && paa.error && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"4px 2px" }}>{paa.error}</div>}
+          {paa && !paa.error && (paa.questions||[]).length>0 && (
+            <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
+              {(paa.questions||[]).map((q,i)=>(
+                <div key={i} style={{ padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+                  <div style={{ fontSize:13, fontWeight:700, color:"var(--ink)", display:"flex", gap:8 }}><Icon name="search" size={14} style={{ color:"var(--t-600)", flexShrink:0, marginTop:2 }} /><span>{q.question}</span></div>
+                  {q.answer && <div style={{ fontSize:12, color:"var(--muted)", marginTop:4, lineHeight:1.5 }}>{q.answer}{q.domain && <a href={q.url} target="_blank" style={{ color:"var(--t-600)", marginLeft:6 }}>— {q.domain}</a>}</div>}
+                </div>
+              ))}
+              {(paa.related||[]).length>0 && <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:2 }}>Related searches: {(paa.related||[]).slice(0,10).join(" · ")}</div>}
+            </div>
+          )}
+          {paa && !paa.error && (paa.questions||[]).length===0 && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"4px 2px" }}>No People Also Ask box for that keyword — try a broader seed.</div>}
+          {!paa && !paaBusy && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"2px" }}>{`Enter a seed keyword to pull the live Google "People Also Ask" questions for ${cName}.`}</div>}
         </SoftCard>
       )}
       {live && err && <div style={{ marginBottom:16 }}><ErrBanner msg={err} onRetry={load} /></div>}

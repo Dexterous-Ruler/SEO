@@ -168,6 +168,35 @@ export async function competitors(domain, { db = 'uk', limit = 10 } = {}) {
   });
 }
 
+// People Also Ask: real Google PAA *questions* (+ related searches) for a seed
+// keyword, in the site's market. This is the ONLY source that returns true PAA
+// questions — Labs endpoints return related keywords, not questions. Uses the
+// existing DataForSEO account (SERP organic live/advanced, ~$0.002/seed). The UI
+// pushes these questions to Airtable so the writer answers one per article.
+export async function peopleAlsoAsk(keyword, { db = 'uk', depth = 2 } = {}) {
+  const items = await call('/serp/google/organic/live/advanced', {
+    keyword: String(keyword || '').trim(),
+    ...locale(db),
+    device: 'desktop',
+    people_also_ask_click_depth: Math.min(Math.max(Number(depth) || 2, 1), 4),
+  });
+  const questions = [], related = [];
+  for (const el of (items || [])) {
+    if (el && el.type === 'people_also_ask') {
+      for (const pa of (el.items || [])) {
+        const q = (pa && pa.title) || '';
+        const ex = (pa && pa.expanded_element && pa.expanded_element[0]) || {};
+        if (q) questions.push({ question: q, answer: String(ex.description || '').slice(0, 400), url: ex.url || '', domain: ex.domain || '', seed: pa.seed_question || keyword });
+      }
+    } else if (el && el.type === 'related_searches') {
+      for (const r of (el.items || [])) { const t = typeof r === 'string' ? r : (r && r.title); if (t) related.push(t); }
+    }
+  }
+  const seen = new Set();
+  const uniqQ = questions.filter((x) => { const k = x.question.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+  return { keyword: String(keyword || '').trim(), questions: uniqQ, related: [...new Set(related)] };
+}
+
 // Backlink profile summary (optional — separate API; cheap, catchable).
 export async function backlinks(domain) {
   try {
