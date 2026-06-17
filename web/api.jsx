@@ -55,12 +55,27 @@
 
   // ---- engine API helper ----------------------------------------------------
   async function engine(path, body) {
-    const res = await fetch(ENGINE + path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body || {}),
-    });
-    const data = await res.json();
+    let res;
+    try {
+      res = await fetch(ENGINE + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      });
+    } catch (e) {
+      throw new Error("Can't reach the server — check your connection and try again.");
+    }
+    // Read as text first so a non-JSON body (a gateway/proxy HTML error page returned
+    // while the service is busy/restarting/timing out) doesn't blow up as a raw
+    // "Unexpected token '<'" JSON-parse error — show a clean, actionable message instead.
+    const text = await res.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : {}; } catch (e) { data = null; }
+    if (data === null) {
+      if (res.status === 504 || res.status === 524) throw new Error("That request took too long and timed out — please try again in a moment.");
+      if (res.status === 502 || res.status === 503) throw new Error("The service is busy or restarting — please try again in a moment.");
+      throw new Error("Unexpected response from the server (" + res.status + ") — please try again.");
+    }
     if (!res.ok) throw new Error(data.error || ("engine " + path + " → " + res.status));
     return data;
   }
