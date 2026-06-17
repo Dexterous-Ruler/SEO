@@ -24,6 +24,12 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # KOYEB_TOKEN was stored as an ENVIRONMENT secret (environment "KOYEB_TOKEN"),
+    # not a repository secret — a job can only read environment-scoped secrets when
+    # it declares that environment here. (To simplify later: move KOYEB_TOKEN to
+    # Settings → Secrets and variables → Actions → Repository secrets, then delete
+    # this line.)
+    environment: KOYEB_TOKEN
     steps:
       - uses: actions/checkout@v4
 
