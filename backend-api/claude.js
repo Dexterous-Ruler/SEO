@@ -148,7 +148,7 @@ export async function contentIntelligence({ siteName, niche, titles, sampleHeadi
   const scope = (market && market.scope) ? market.scope + '\n\n' : '';
   const txt = await complete({
     system: SYSTEM(siteId), promptKey: 'content.rules',
-    maxTokens: 4096,
+    maxTokens: 6000,
     messages: [{
       role: 'user',
       content: `${scope}You are an SEO content strategist. TARGET MARKET: ${country}. Analyze the site's existing content and return a JSON object.
@@ -162,8 +162,11 @@ Return ONLY valid JSON (no markdown fences) with this exact shape:
   "clusters": [
     { "name": "topic cluster name", "theme": "what unifies it", "pageCount": <int est. from titles>, "keywords": ["kw1","kw2","kw3","kw4"], "strength": "strong|moderate|thin" }
   ],
+  "keywordClusters": [
+    { "primaryKeyword": "head keyword for a NEW content cluster to create", "intent": "informational|commercial|transactional", "keywords": ["8-10 related search queries — each a UNIQUE angle/sub-topic of the primary, not a synonym"], "angles": ["2-3 distinct article titles attacking this cluster from different viewpoints"] }
+  ],
   "gaps": [
-    { "topic": "missing topic", "why": "why it matters for the ${country} market", "intent": "informational|commercial|transactional", "priority": "high|medium|low" }
+    { "topic": "missing topic", "keyword": "the primary search query a ${country} user types for this gap", "why": "why it matters for the ${country} market", "intent": "informational|commercial|transactional", "priority": "high|medium|low" }
   ],
   "suggestions": [
     { "title": "proposed new article title (<=60 chars)", "cluster": "which cluster it strengthens", "targetKeyword": "primary kw", "rationale": "1 sentence", "format": "guide|comparison|faq|listicle|how-to" }
@@ -174,6 +177,8 @@ Return ONLY valid JSON (no markdown fences) with this exact shape:
 }
 Rules:
 - clusters: group the EXISTING titles (reflect what's there).
+- keywordClusters: 5-8 NEW content clusters to create. Each = ONE primaryKeyword + 8-10 related keywords that share the primary's search intent but each target a UNIQUE angle/sub-topic (genuinely different facets a searcher wants — NOT synonyms) + 2-3 "angles" (distinct article titles attacking the cluster from different viewpoints). EVERY keyword must be how a ${country} user actually searches. THESE keywordClusters (primary + related keywords) are exactly what gets pushed to Airtable for the article writer — every keyword must be a real, writable content target.
+- gaps: each gap MUST include a "keyword" — the primary ${country} search query for it (not just a topic name).
 - gaps + suggestions: you are planning content to win ${country} searchers. EVERY gap "topic" and suggestion "title" MUST carry an explicit ${country} angle, and EVERY targetKeyword MUST be how a ${country} user actually searches. A generic title/topic with NO ${country} relevance is INVALID — rewrite it. The site's service can be foreign (e.g. UK visas); then plan for ${country} users of that service.
   Example for India: topic "UK Skilled Worker Visa — guide for Indian applicants"; title "UK Skilled Worker Visa from India: Eligibility & Documents"; targetKeyword "uk skilled worker visa for indians". Mirror this ${country} framing every time.
 - 4-7 clusters, 5-8 gaps, 6-10 suggestions, 3-5 internalLinks. Specific to the niche AND ${country}. YMYL: factual.`,
@@ -186,7 +191,7 @@ Rules:
   const start = json.indexOf('{'); const end = json.lastIndexOf('}');
   if (start >= 0 && end > start) json = json.slice(start, end + 1);
   try { const o = JSON.parse(json); o._targetMarket = country; return o; }
-  catch (e) { return { clusters: [], gaps: [], suggestions: [], internalLinks: [], _targetMarket: country, _parseError: true, _raw: txt.slice(0, 500) }; }
+  catch (e) { return { clusters: [], keywordClusters: [], gaps: [], suggestions: [], internalLinks: [], _targetMarket: country, _parseError: true, _raw: txt.slice(0, 500) }; }
 }
 
 // Generic: ask Claude to draft the "after" value for any proposal, given the finding.
