@@ -1374,8 +1374,10 @@ const routes = {
     const wp = clientFrom(creds);
     const baseUrl = (site.url || '').replace(/\/+$/, '');
     if (!baseUrl) return { error: 'Site has no URL.' };
-    const niche = ((site.stack && site.stack.type) || site.niche || '').toLowerCase();
-    const isLegal = body.isLegal != null ? body.isLegal : /legal|law|solicit|attorney|immigration|visa|barrister/.test(niche);
+    // Detect legal/YMYL across niche AND the site's name/URL — the niche field is often empty,
+    // but go-VISA / go-LEGAL / SETTLEMENT-agreement self-identify in their name/domain.
+    const hay = (((site.stack && site.stack.type) || '') + ' ' + (site.niche || '') + ' ' + (site.name || '') + ' ' + (site.url || '')).toLowerCase();
+    const isLegal = body.isLegal != null ? body.isLegal : /legal|lawyer|solicit|attorney|immigration|visa|barrister|settlement|tribunal|conveyanc|\blaw\b/.test(hay);
     // Deterministic entity @graph for the homepage (Organization [+ LegalService] + WebPage).
     const schema = generatePageSchema(
       { url: baseUrl + '/', title: site.name || baseUrl, type: 'page' },
