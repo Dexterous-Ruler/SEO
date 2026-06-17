@@ -95,7 +95,7 @@
     contentBrief(siteId, keyword, intent) { return engine("/content-brief", { siteId, keyword, intent }); },
     trendingIntel(siteId, niche, db) { return engine("/trending-intel", { siteId, niche, db }); },
     researchStatus() { return engine("/research-status", {}); },
-    adminStatus() { return engine("/admin-status", {}); },
+    adminStatus(siteId) { return engine("/admin-status", { siteId }); },
     promptsList(siteId) { return engine("/prompts-list", { siteId }); },
     promptSave(key, content, model, temperature, siteId) { return engine("/prompt-save", { key, content, model, temperature, siteId }); },
     promptReset(key, siteId) { return engine("/prompt-reset", { key, siteId }); },

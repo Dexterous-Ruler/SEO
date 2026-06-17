@@ -264,7 +264,7 @@ Object.assign(window, {
       channel: r.channel, title: r.title, page: r.page, impact: r.impact,
       target: r.target || "staging", field: r.field,
       before: r.before_val, after: r.after_val, status: r.status || "proposed",
-      _objectType: r.object_type, _postId: r.post_id, _oldValue: r.old_value,
+      _objectType: r.object_type, _postId: r.post_id, _oldValue: r.old_value, _siteId: r.site_id,
     };
   }
   window.mapProposalRow = mapProposal;
