@@ -171,9 +171,13 @@ export class WordPressClient {
     });
   }
 
-  // Confirm the mu-plugin + Rank Math are present and wired.
+  // Confirm the mu-plugin is present and wired. NOTE: the route is
+  // /optimize-selftest (the only selftest the mu-plugin registers) — must-use
+  // plugins never appear in the /wp/v2/plugins REST list, so this endpoint is the
+  // ONLY reliable presence probe. (Calling the non-existent /selftest 404'd, which
+  // made every site falsely report "mu-plugin missing".)
   async selftest() {
-    return this.request(`${this.baseUrl}/wp-json/seoagent/v1/selftest`, { method: 'GET' });
+    return this.request(`${this.baseUrl}/wp-json/seoagent/v1/optimize-selftest`, { method: 'GET' });
   }
 
   // Purge page/minify/object caches (WP Rocket etc.) so re-verify reads fresh

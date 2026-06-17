@@ -142,8 +142,8 @@ export async function detectStack(wp, baseUrl) {
   let muPlugin = false, selftest = 'missing', rankMathHeadless = false;
   try {
     const st = await wp.selftest();
-    muPlugin = true;
-    selftest = st?.rank_math_active ? 'ready' : 'partial';
+    muPlugin = !!(st && st.ok);
+    selftest = (st && st.ok) ? 'ready' : 'partial';
   } catch { /* not installed */ }
   try {
     const rm = await fetch(`${api}/rankmath/v1/getHead?url=${encodeURIComponent(base + '/')}`, { headers: UA });
