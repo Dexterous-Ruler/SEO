@@ -39,6 +39,26 @@ export function insertableIn(anchor, normUnits) {
   return normUnits.some((u) => re.test(u));
 }
 
+// Visible text of every <a> on a rendered page (normalized). The inserter refuses to
+// re-link text that's ALREADY a link (returns not_found) — even when /page-text
+// surfaced the plain field text (e.g. a phrase that Elementor renders as a linked
+// nav item / widget-link). Surfacing those = "Add in editor", so we drop them.
+export function linkedAnchorTexts(html) {
+  const out = [];
+  const re = /<a\b[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html || ''))) {
+    const t = normText(stripHtml(m[1]));
+    if (t && t.length >= 2) out.push(t);
+  }
+  return out;
+}
+// Is `anchor` already inside one of these link texts? Boundary match (faithful to the
+// inserter) so "Privacy Policy" inside a link "Privacy Policy | How we protect data" counts.
+export function alreadyLinked(anchor, linkedTexts) {
+  return (linkedTexts || []).some((lt) => insertableIn(anchor, [lt]));
+}
+
 // Get a page's EDITABLE content as { text, units, authoritative } via the optimize
 // plugin's /page-text (exactly what the inserter can edit) — NOT the rendered page
 // (which includes global nav/footer/CTA blocks we can't touch). Falls back to the
@@ -133,11 +153,17 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
     const links = await claude.internalLinkSuggestions({
       sourceUrl: src.url, sourceTitle: src.title, sourceText: fullText.slice(0, 4000), candidates, siteId,
     }).catch(() => []);
+    // Fetch the rendered page ONCE to find text that's already a link — the inserter
+    // can't re-link it, so dropping it here is what stops "Add in editor".
+    let linkedTexts = [];
+    if (links.length) { try { const rh = await fetch(src.url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } }).then((r) => r.text()); linkedTexts = linkedAnchorTexts(rh); } catch (e) {} }
     for (const l of links) {
       // CRITICAL: keep an anchor only if the inserter would actually place it —
       // a boundary match inside a SINGLE editable unit. This is what eliminates
       // "Add in editor": we never surface an anchor we can't insert.
       if (!l.anchor || !insertableIn(l.anchor, normUnits)) { dropped++; continue; }
+      // …and not already a link on the live page (inserter skips existing links).
+      if (alreadyLinked(l.anchor, linkedTexts)) { dropped++; continue; }
       const target = corpus.find((c) => c.url === l.targetUrl);
       out.push({ sourcePage: src.url, sourceId: src.id, sourceType: src.type, sourceTitle: src.title, anchor: l.anchor, targetUrl: l.targetUrl, targetTitle: target ? target.title : '', reason: l.reason });
     }
