@@ -2383,11 +2383,25 @@ function GeoScreen({ ctx }) {
   const d = ctx.geo;
   const loading = ctx.geoLoading;
   const [comps, setComps] = useState("");
+  const [boosting, setBoosting] = useState(false);
+  const API = window.SentinelAPI;
+  // AI-visibility auto-push: publish Organization/LegalService entity signals to the homepage
+  // (deterministic — no Anthropic credits). These are the structured-data signals ChatGPT /
+  // Perplexity / Google use to identify and cite the brand.
+  const applyEntity = ()=>{
+    setBoosting(true); ctx.toast("Publishing AI entity signals…","teal");
+    API.applyEntitySignals(s.id).then(r=>{
+      if(r.error){ ctx.toast("Entity signals: "+r.error,"clay"); return; }
+      if(r.status==="blocked"){ ctx.toast("Site is read-only — arm writes in Settings first","gold"); return; }
+      ctx.toast("Published entity signals ("+((r.types||[]).join(", ")||"Organization")+") to homepage ✓","teal");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBoosting(false));
+  };
 
   return (
     <div className="rise">
       <PageHead title="AI Visibility (GEO)" sub={`Does AI cite ${s.name}? Measure share-of-AI-voice across buyer-intent prompts.`}>
-        <div style={{ display:"flex", gap:10 }}>
+        <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+          <NeoButton kind="soft" icon={boosting?undefined:"sparkles"} disabled={boosting} onClick={applyEntity}>{boosting&&<Icon name="cog" size={15} className="audit-spin" />}Publish entity signals</NeoButton>
           <NeoButton kind="soft" icon="sparkles" onClick={ctx.runGeoEnable}>Generate llms.txt + AI robots</NeoButton>
           <NeoButton kind="primary" icon={loading?undefined:"globe"} disabled={loading} onClick={()=>ctx.runGeoTrack(comps)}>
             {loading && <Icon name="cog" size={17} className="audit-spin" />}{loading?"Scanning…":d?"Re-scan":"Measure AI visibility"}
