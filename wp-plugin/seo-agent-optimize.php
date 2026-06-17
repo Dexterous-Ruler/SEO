@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.6.1
+ * Version:     1.6.2
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -166,8 +166,8 @@ class SEO_Agent_Optimize {
                 if (!empty($data)) {
                     $arr = is_string($data) ? json_decode($data, true) : $data;
                     if (is_array($arr)) {
-                        $done = false;
-                        seoagent_walk_elementor($arr, $anchor, $href, $done);
+                        $done = false; $exists = false;
+                        seoagent_walk_elementor($arr, $anchor, $href, $done, $exists);
                         if ($done) {
                             update_post_meta($id, '_elementor_data', wp_slash(wp_json_encode($arr)));
                             delete_post_meta($id, '_elementor_css');
@@ -175,6 +175,8 @@ class SEO_Agent_Optimize {
                             $this->purge();
                             return ['ok' => true, 'mode' => 'elementor', 'post_id' => $id];
                         }
+                        // Anchor present but already inside a link → idempotent success (not a failure).
+                        if ($exists) return ['ok' => true, 'mode' => 'exists', 'post_id' => $id];
                     }
                     return ['ok' => false, 'mode' => 'not_found', 'reason' => 'Anchor text not found in this page’s Elementor widgets (it may be in a button/linked element, or a global header/footer).'];
                 }
@@ -262,7 +264,7 @@ class SEO_Agent_Optimize {
             'methods'  => 'GET',
             'permission_callback' => $perm,
             'callback' => function () {
-                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets'], 'version' => '1.6.1'];
+                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets', 'entity_tolerant_insert', 'multi_anchor_targets'], 'version' => '1.6.2'];
             },
         ]);
     }
@@ -294,7 +296,10 @@ function seoagent_refresh_section($html) {
 
 function seoagent_anchor_regex($anchor) {
     $q = preg_quote($anchor, '/');
-    $q = str_replace(' ', '(?:\\s|&nbsp;|&#0*160;)+', $q);
+    // Whitespace token tolerates ASCII space, &nbsp; (raw entity or decoded U+00A0),
+    // and typographic spaces (en/em/narrow/ideographic) — PHP \s under /u is ASCII-only,
+    // so list them explicitly. Keeps the inserter matching what page-text decoded.
+    $q = str_replace(' ', '(?:[\\s\\x{00a0}\\x{2000}-\\x{200a}\\x{202f}\\x{205f}\\x{3000}]|&nbsp;|&#0*160;)+', $q);
     $q = str_replace('&', '(?:&|&amp;)', $q);            // must run BEFORE the entity tokens below
     $q = str_replace('"', '(?:"|&quot;|&#0*34;)', $q);
     $q = str_replace("'", "(?:'|&#0*39;|&apos;|&#x27;)", $q);
@@ -304,34 +309,66 @@ function seoagent_anchor_regex($anchor) {
 function seoagent_insert_into_html($html, $anchor, $href) {
     if ($html === null || $html === '') return [$html, false, 'empty'];
     $eh = esc_url($href);
-    foreach (array_unique([$href, $eh]) as $h) {        // idempotency: raw OR esc_url'd form already linked
-        if ($h !== '' && (strpos($html, 'href="' . $h . '"') !== false || strpos($html, "href='" . $h . "'") !== false)) return [$html, false, 'exists'];
-    }
     $parts = preg_split('/(<a\b[^>]*>.*?<\/a>|<[^>]+>)/is', $html, -1, PREG_SPLIT_DELIM_CAPTURE);
     if (!$parts) return [$html, false, 'not_found'];
     $re = seoagent_anchor_regex($anchor);
+    $enc = function ($s) { return str_replace(['&', '<', '>'], ['&amp;', '&lt;', '&gt;'], $s); };
+    // Entity-tolerant "does this run contain the anchor?" (matches what page-text decodes).
+    $matches = function ($s) use ($re) {
+        if (preg_match($re, $s)) return true;
+        $d = html_entity_decode($s, ENT_QUOTES | ENT_HTML5);
+        return ($d !== $s && preg_match($re, $d)) ? 1 : 0;
+    };
+    // Insert at the first PLAIN-TEXT occurrence of the anchor. We intentionally do NOT
+    // bail just because the TARGET url is already linked elsewhere in this field —
+    // linking a DIFFERENT anchor to an already-linked page is valid and common (it's
+    // why "peer-reviewed scientific research" and "trusted public health sources" can
+    // BOTH point to /definitions/). We only report 'exists' (idempotent no-op) when the
+    // ANCHOR ITSELF is already inside a link, so re-applying a done suggestion stays a
+    // clean success instead of a misleading "not found" / "Add in editor".
     $depth = 0;                                          // never insert inside an (even unclosed) <a>
+    $seenLinked = false;                                 // the anchor occurs, but already inside an <a>
     foreach ($parts as $i => $seg) {
         if ($seg === '') continue;
         if ($seg[0] === '<') {
-            if (preg_match('/^<a\b/i', $seg) && stripos($seg, '</a') === false) $depth++;
-            elseif (preg_match('/^<\/a\b/i', $seg) && $depth > 0) $depth--;
+            if (preg_match('/^<a\b/i', $seg)) {
+                if (stripos($seg, '</a') === false) $depth++;          // unclosed <a> → following runs are linked
+                elseif ($matches($seg)) $seenLinked = true;            // self-contained <a>…anchor…</a>
+            } elseif (preg_match('/^<\/a\b/i', $seg) && $depth > 0) $depth--;
             continue;
         }
-        if ($depth > 0) continue;
+        if ($depth > 0) { if ($matches($seg)) $seenLinked = true; continue; }
+        // FAST PATH: match the raw segment (preserves the original encoding exactly).
         if (preg_match($re, $seg)) {
             $parts[$i] = preg_replace_callback($re, function ($m) use ($eh) {
                 return $m[1] . '<a href="' . $eh . '">' . $m[2] . '</a>';
             }, $seg, 1);
             return [implode('', $parts), true, ''];
         }
+        // FALLBACK: the raw didn't match, but its DECODED form might — the SAME transform
+        // seoagent_text_units() applies, so the inserter places EXACTLY what page-text
+        // validated (typographic entities from AI/pasted content: en-dash &#8211;, smart
+        // quote &#8217;, &hellip;…). Rebuild the run from the decoded form (HTML-significant
+        // &<> re-encoded), which renders identically.
+        $dec = html_entity_decode($seg, ENT_QUOTES | ENT_HTML5);
+        $dec = str_replace("\xC2\xA0", ' ', $dec);
+        if ($dec !== $seg && preg_match($re, $dec, $mm, PREG_OFFSET_CAPTURE)) {
+            $aStart = $mm[2][1];           // byte offset of the anchor (boundary char stays in $before)
+            $aText  = $mm[2][0];
+            $before = substr($dec, 0, $aStart);
+            $after  = substr($dec, $aStart + strlen($aText));
+            $parts[$i] = $enc($before) . '<a href="' . $eh . '">' . $enc($aText) . '</a>' . $enc($after);
+            return [implode('', $parts), true, ''];
+        }
     }
-    return [$html, false, 'not_found'];
+    return [$html, false, $seenLinked ? 'exists' : 'not_found'];
 }
 
 // Split one HTML string into the decoded, linkable text units (mirrors the
 // inserter exactly: per non-anchor text run, skipping content inside <a>), so
-// page-text validation agrees byte-for-byte with what /insert-link can do.
+// page-text validation agrees with what /insert-link can do. NOTE: this decodes
+// entities; the inserter (seoagent_insert_into_html) has a matching decoded
+// fallback so a unit surfaced here is ALWAYS insertable — no validate/insert gap.
 function seoagent_text_units($html, &$units) {
     if (!is_string($html) || $html === '') return;
     $parts = preg_split('/(<a\b[^>]*>.*?<\/a>|<[^>]+>)/is', $html, -1, PREG_SPLIT_DELIM_CAPTURE);
@@ -375,17 +412,18 @@ function seoagent_widget_is_linked($el) {
    accordion, price-list…) and insert the link into the first text field (from
    seoagent_text_fields) that contains the anchor. Skips any sub-item that is
    itself a link (link.url set) to avoid nesting <a>. v1.6.1. */
-function seoagent_walk_settings(&$settings, $anchor, $href, &$done) {
+function seoagent_walk_settings(&$settings, $anchor, $href, &$done, &$exists) {
     if ($done || !is_array($settings)) return;
     $fields = seoagent_text_fields();
     foreach ($settings as $k => &$v) {
         if ($done) return;
         if (is_string($v) && $v !== '' && in_array($k, $fields, true)) {
-            list($nh, $changed) = seoagent_insert_into_html($v, $anchor, $href);
+            list($nh, $changed, $why) = seoagent_insert_into_html($v, $anchor, $href);
             if ($changed) { $v = $nh; $done = true; return; }
+            if ($why === 'exists') $exists = true;   // anchor already linked here → remember (idempotent)
         } elseif (is_array($v)) {
             if (isset($v['link']['url']) && $v['link']['url'] !== '') continue;   // linked repeater item → skip
-            seoagent_walk_settings($v, $anchor, $href, $done);
+            seoagent_walk_settings($v, $anchor, $href, $done, $exists);
         }
     }
     unset($v);
@@ -405,15 +443,15 @@ function seoagent_collect_settings_units($settings, &$units) {
 
 /* Recursively walk Elementor's element tree; insert the link into the first
    text-bearing widget setting (incl. repeater items) that contains the anchor. */
-function seoagent_walk_elementor(&$els, $anchor, $href, &$done) {
+function seoagent_walk_elementor(&$els, $anchor, $href, &$done, &$exists) {
     if ($done || !is_array($els)) return;
     foreach ($els as &$el) {
         if ($done) return;
         if (!empty($el['settings']) && is_array($el['settings']) && !seoagent_widget_is_linked($el)) {
-            seoagent_walk_settings($el['settings'], $anchor, $href, $done);
+            seoagent_walk_settings($el['settings'], $anchor, $href, $done, $exists);
         }
         if (!$done && !empty($el['elements']) && is_array($el['elements'])) {
-            seoagent_walk_elementor($el['elements'], $anchor, $href, $done);
+            seoagent_walk_elementor($el['elements'], $anchor, $href, $done, $exists);
         }
     }
 }
