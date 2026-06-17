@@ -1816,7 +1816,18 @@ const routes = {
     }
 
     try {
-      const res = await airtable.pushKeywords(pat, cfg.base_id, table, field, keywords, { extras });
+      let res;
+      try {
+        res = await airtable.pushKeywords(pat, cfg.base_id, table, field, keywords, { extras });
+      } catch (e) {
+        // The optional "Internal Links" enrichment column may not exist/be writable on this
+        // table (no schema-write scope). NEVER let that block the core keyword push — retry
+        // with just the keyword column so the writer still gets every keyword.
+        if (extras && /unknown field|422|invalid|cannot|field/i.test(e.message || '')) {
+          res = await airtable.pushKeywords(pat, cfg.base_id, table, field, keywords, {});
+          linkField = null;
+        } else throw e;
+      }
       await db.logAirtableSync({ site_id: siteId, kind: 'keywords', records_pushed: res.pushed, status: 'ok' }).catch(() => {});
       await db.upsertAirtableConfig(siteId, { last_sync: new Date().toISOString() }).catch(() => {});
       return { ok: true, ...res, candidates: keywords.length, derived, field, linkField };
