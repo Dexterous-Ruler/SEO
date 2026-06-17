@@ -12,7 +12,10 @@ import { UK } from './uk.js';
 // db code → Perplexity/Tavily user_location ISO-3166 country code.
 const GEO = {
   uk: 'GB', us: 'US', ca: 'CA', au: 'AU', ie: 'IE', nz: 'NZ', in: 'IN',
-  ae: 'AE', za: 'ZA', sg: 'SG', de: 'DE', fr: 'FR', es: 'ES', it: 'IT',
+  ae: 'AE', za: 'ZA', sg: 'SG', de: 'DE', fr: 'FR', es: 'ES', it: 'IT', nl: 'NL',
+  se: 'SE', no: 'NO', dk: 'DK', fi: 'FI', pl: 'PL', pt: 'PT', ch: 'CH', at: 'AT',
+  tr: 'TR', br: 'BR', mx: 'MX', co: 'CO', ar: 'AR', jp: 'JP', hk: 'HK', my: 'MY',
+  ph: 'PH', pk: 'PK', sa: 'SA', ng: 'NG',
 };
 
 export function marketFor(db) {

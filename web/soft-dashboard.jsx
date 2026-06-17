@@ -11,26 +11,26 @@ const SNAV_GROUPS = [
     { k:"exec",     label:"Executive Scorecard", icon:"flag" },
     { k:"activity", label:"Activity",  icon:"clock" },
   ]},
-  { group:"Audit & Fix", items:[
+  { group:"Find & Fix Issues", items:[
     { k:"audits",   label:"Audits",    icon:"radar" },
-    { k:"optimize", label:"On-Page Fixes", icon:"bolt" },
-    { k:"review",   label:"Review Queue", icon:"list", badge:true },
+    { k:"optimize", label:"Page Fixes", icon:"bolt" },
+    { k:"review",   label:"Approve Changes", icon:"list", badge:true },
     { k:"history",  label:"Audit History", icon:"trend" },
   ]},
-  { group:"Content & Growth", items:[
+  { group:"Plan & Create Content", items:[
     { k:"plan",     label:"Content Plan", icon:"sparkles" },
-    { k:"content",  label:"Content Intel", icon:"sparkles" },
-    { k:"geo",      label:"AI Visibility", icon:"globe" },
+    { k:"content",  label:"Content Analysis", icon:"sparkles" },
+    { k:"geo",      label:"AI Search Visibility", icon:"globe" },
   ]},
-  { group:"Data Sources", items:[
+  { group:"Connect Data", items:[
     { k:"gsc",      label:"Search Console", icon:"search" },
-    { k:"semrush",  label:"DataForSEO", icon:"bolt" },
-    { k:"airtable", label:"Airtable Sync", icon:"layers" },
+    { k:"semrush",  label:"Keyword Research", icon:"bolt" },
+    { k:"airtable", label:"Push to Airtable", icon:"layers" },
   ]},
   { group:"Assistant", items:[
-    { k:"chat",     label:"AI Chat", icon:"sparkles" },
+    { k:"chat",     label:"Ask AI", icon:"sparkles" },
   ]},
-  { group:"Manage", items:[
+  { group:"Account & Settings", items:[
     { k:"sites",    label:"Sites",     icon:"globe" },
     { k:"admin",    label:"Admin Panel", icon:"gauge" },
     { k:"settings", label:"Settings",  icon:"cog" },
@@ -1124,8 +1124,8 @@ function AdminScreen({ ctx }) {
   const [statBusy,setStatBusy] = useState(false);
   const load = ()=>{ setBusy(true); setErr(null); API.promptsList(scope==="site"?s.id:undefined).then(r=>{ if(r.error){setErr(r.error);return;} setData(r); setEdits({}); }).catch(e=>setErr(e.message)).finally(()=>setBusy(false)); };
   useEffect(()=>{ if(live && tab==="prompts") load(); },[scope, s.id]);
-  const loadStat = ()=>{ setStatBusy(true); API.adminStatus().then(setStat).catch(e=>setStat({error:e.message})).finally(()=>setStatBusy(false)); };
-  useEffect(()=>{ if(live){ loadStat(); if(!data) load(); } },[]);
+  const loadStat = ()=>{ setStatBusy(true); API.adminStatus(s.id).then(setStat).catch(e=>setStat({error:e.message})).finally(()=>setStatBusy(false)); };
+  useEffect(()=>{ if(live){ loadStat(); if(!data) load(); } },[s.id]);
 
   const toggleHist = (p)=>{
     if(histOpen===p.key){ setHistOpen(""); return; }
@@ -1190,7 +1190,7 @@ function AdminScreen({ ctx }) {
               <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:16 }}>
                 <PatternCard icon="check" tone="teal" value={okCount+"/"+ints.length} title="Integrations live" sub="API connections configured" />
                 <PatternCard icon="doc" tone="plum" value={(stat.prompts&&stat.prompts.count)||0} title="AI prompts" sub={((stat.prompts&&stat.prompts.overridden)||0)+" customised"} />
-                <PatternCard icon="globe" tone="gold" value="UK only" title="Audience scope" sub="all data geo-locked" />
+                <PatternCard icon="globe" tone="gold" value={stat.country||"UK"} title="Target market" sub="active site's research scope" />
                 <PatternCard icon="shield" tone={stat.server&&stat.server.dryRun?"gray":"clay"} value={stat.server&&stat.server.dryRun?"DRY-RUN":"LIVE writes"} title="Write mode" sub={stat.server&&stat.server.dryRun?"safe — no live writes":"approved writes go live"} />
               </div>
               <SoftCard hover={false}>
@@ -4224,7 +4224,7 @@ function App() {
       const ok=window.SentinelHelpers.exportCSV("sentinel-activity.csv", rows);
       toast(ok?"Activity trail exported (CSV)":"Nothing to export yet","teal");
     },
-    switchSite:(id)=>{ const x=sites.find(s=>s.id===id); if(x.status!=="connected"){ setAddSiteFor(x); setAddSiteOpen(true); return; } setSiteId(id); toast("Switched to "+x.name,"teal"); },
+    switchSite:(id)=>{ const x=sites.find(s=>s.id===id); if(x.status!=="connected"){ setAddSiteFor(x); setAddSiteOpen(true); return; } setSiteId(id); setProposals([]); if(isLive()){ API.listProposals(id).then(rows=>{ window.PROPOSALS=(rows||[]).map(window.mapProposalRow||(y=>y)); setProposals(window.PROPOSALS); }).catch(()=>{}); } toast("Switched to "+x.name,"teal"); },
     runAudit:()=>{
       if(auditing) return;
       setAuditing(true);

@@ -1088,10 +1088,14 @@ const routes = {
   },
   'POST /prompts-status': async () => prompts.status(),
   // Admin control-centre status: integrations, balances, server + prompt health.
-  'POST /admin-status': async () => {
+  'POST /admin-status': async (body) => {
     const r = research.status();
     let dfsBalance = null;
     try { if (semrush.hasKey()) dfsBalance = await semrush.apiUnits(); } catch (e) {}
+    // Per-active-site target market (semrush_db) drives the displayed scope — no longer
+    // a hardcoded "UK only". Falls back to UK when no site is passed (back-compat).
+    const scopeSite = body && body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    const scopeMarket = marketFor(scopeSite && scopeSite.semrush_db);
     return {
       integrations: {
         claude: { configured: !!process.env.ANTHROPIC_API_KEY, label: 'Anthropic Claude', detail: process.env.CLAUDE_MODEL || 'claude-sonnet-4-5' },
@@ -1103,7 +1107,8 @@ const routes = {
       },
       prompts: prompts.status(),
       server: { version: '2.0', uptimeSec: Math.round(process.uptime()), node: process.version, model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929', dryRun: process.env.DRY_RUN !== 'false' },
-      scope: 'United Kingdom (UK-only)',
+      country: scopeMarket.country,
+      scope: `${scopeMarket.country}${scopeMarket.db === 'uk' ? ' (UK-only)' : ''}`,
     };
   },
   // Recent saved versions of a prompt (for one-click revert).
