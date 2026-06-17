@@ -272,12 +272,12 @@ export async function narrate({ siteName, metrics, siteId }) {
 // candidate target pages (so Claude cannot invent URLs), propose contextual
 // internal links. Returns [{ anchor, targetUrl, reason }].
 export async function internalLinkSuggestions({ sourceUrl, sourceTitle, sourceText, candidates, siteId }) {
-  const list = (candidates || []).slice(0, 60).map((c, i) => `${i + 1}. ${c.title} → ${c.url}`).join('\n');
+  const list = (candidates || []).slice(0, 150).map((c, i) => `${i + 1}. ${c.title} → ${c.url}`).join('\n');
   const txt = await complete({
     system: sys('seo.internalLinks'),
     promptKey: 'seo.internalLinks',
-    maxTokens: 700,
-    messages: [{ role: 'user', content: `SOURCE PAGE: ${sourceTitle || ''} (${sourceUrl})\n\nSOURCE TEXT (excerpt):\n${(sourceText || '').slice(0, 3500)}\n\nCANDIDATE TARGET PAGES (link only to these):\n${list}\n\nReturn the JSON array of internal-link suggestions.` }],
+    maxTokens: 1200,
+    messages: [{ role: 'user', content: `SOURCE PAGE: ${sourceTitle || ''} (${sourceUrl})\n\nSOURCE TEXT (excerpt):\n${(sourceText || '').slice(0, 4500)}\n\nCANDIDATE TARGET PAGES (link only to these):\n${list}\n\nBe generous but precise: propose EVERY genuinely-relevant, helpful in-content link (aim for the 4-8 most useful) — only skip a candidate if linking would be forced or off-topic. The anchor MUST be a phrase that appears verbatim in the SOURCE TEXT above (so it can be inserted), 2-6 words, descriptive. Return the JSON array of internal-link suggestions.` }],
   });
   try {
     const arr = JSON.parse(txt.slice(txt.indexOf('['), txt.lastIndexOf(']') + 1));

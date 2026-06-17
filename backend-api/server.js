@@ -1187,7 +1187,10 @@ const routes = {
         return { sourcePage: url, count: 0, suggestions: [], note: 'No editable body text on this page — its visible text lives in the nav/header/footer or non-editable widgets, which can’t take an in-content link.' };
       }
       const niche = (site && site.niche) || (site && site.stack && site.stack.type) || '';
-      const arr = await claude.externalLinkSuggestions({ url, title: src.title || '', text: (text || '').slice(0, 5000), niche, siteId: body.siteId });
+      // Surface Claude failures (e.g. credit exhaustion) instead of a silent empty list.
+      let arr = [], aiError = null;
+      try { arr = await claude.externalLinkSuggestions({ url, title: src.title || '', text: (text || '').slice(0, 5000), niche, siteId: body.siteId }); }
+      catch (e) { aiError = String((e && e.message) || e); }
       // Drop anchors already linked on the rendered page (the inserter skips existing links).
       let linkedTexts = [];
       if ((arr || []).length) { try { const rh = await fetch(url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } }).then((r) => r.text()); linkedTexts = linkedAnchorTexts(rh); } catch (e) {} }
@@ -1197,7 +1200,7 @@ const routes = {
       const applicable = (arr || [])
         .filter((l) => l.anchor && insertableIn(l.anchor, normUnits) && !alreadyLinked(l.anchor, linkedTexts))
         .map((l) => ({ ...l, sourceId: src.id, sourceType: src.type }));
-      return { sourcePage: url, count: applicable.length, suggestions: applicable, droppedNotApplicable: (arr || []).length - applicable.length };
+      return { sourcePage: url, count: applicable.length, suggestions: applicable, droppedNotApplicable: (arr || []).length - applicable.length, aiError };
     } catch (e) { return { error: 'External-link analysis failed: ' + e.message }; }
   },
 
