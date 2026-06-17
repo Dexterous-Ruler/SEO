@@ -164,6 +164,7 @@
     siteHealth(siteId, url) { return engine("/site-health", { siteId, url }); },
     installWebpPlugin(siteId) { return engine("/install-webp-plugin", { siteId }); },
     applySchema(siteId, opts) { return engine("/apply-schema", Object.assign({ siteId }, opts || {})); },
+    applyEntitySignals(siteId, opts) { return engine("/apply-entity-signals", Object.assign({ siteId }, opts || {})); },
     applyCss(siteId, css) { return engine("/apply-css", { siteId, css }); },
     aiSeoFacts(siteId, url, title) { return engine("/ai-seo-facts", { siteId, url, title }); },
     generateCss(siteId, findings) { return engine("/generate-css", { siteId, findings }); },

@@ -1363,6 +1363,40 @@ const routes = {
       return { ok: true, postId, ...r };
     } catch (e) { return { error: 'Apply failed — is the seo-agent-optimize mu-plugin installed? ' + e.message }; }
   },
+  // AI-VISIBILITY AUTO-PUSH: generate the site's ENTITY SIGNALS (Organization + LegalService
+  // for legal niches) and apply them to the homepage in one click. Deterministic (no LLM /
+  // no Anthropic credits) and uses the existing mu-plugin /schema endpoint — these are the
+  // structured-data signals ChatGPT/Perplexity/Google use to identify and cite the brand.
+  'POST /apply-entity-signals': async (body) => {
+    const { creds, site } = await resolveCreds(body);
+    if (!site) return { error: 'Site not found.' };
+    if (site.write_armed === false && !body.force) return { status: 'blocked', reason: 'site is read-only (write not armed)' };
+    const wp = clientFrom(creds);
+    const baseUrl = (site.url || '').replace(/\/+$/, '');
+    if (!baseUrl) return { error: 'Site has no URL.' };
+    const niche = ((site.stack && site.stack.type) || site.niche || '').toLowerCase();
+    const isLegal = body.isLegal != null ? body.isLegal : /legal|law|solicit|attorney|immigration|visa|barrister/.test(niche);
+    // Deterministic entity @graph for the homepage (Organization [+ LegalService] + WebPage).
+    const schema = generatePageSchema(
+      { url: baseUrl + '/', title: site.name || baseUrl, type: 'page' },
+      { org: { name: site.name || baseUrl, url: baseUrl, logo: site.logo }, baseUrl, siteName: site.name || baseUrl, isLegal, areaServed: body.areaServed }
+    );
+    // Resolve the homepage post (front-page setting, then a page whose link is the site root).
+    let postId = null;
+    try {
+      const settings = await wp.request('/settings').catch(() => null);
+      const fid = settings && settings.page_on_front;
+      if (fid) { const row = await wp.request(`/pages/${fid}?_fields=id`).catch(() => null); if (row && row.id) postId = row.id; }
+    } catch (e) {}
+    if (!postId) { const pgs = await wp.request('/pages?per_page=100&_fields=id,link').catch(() => []); const root = baseUrl.replace(/\/+$/, ''); const hit = (pgs || []).find((p) => String(p.link || '').replace(/\/+$/, '') === root); if (hit) postId = hit.id; }
+    if (!postId) return { error: 'Could not resolve the homepage on WordPress to attach entity schema. Set a static front page, or apply schema per-page from the Schema tab.' };
+    try {
+      const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/schema`, { method: 'POST', body: { post_id: postId, jsonld: JSON.stringify(schema) } });
+      const types = (schema['@graph'] || []).map((n) => n['@type']);
+      await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'sparkles', text: 'Published AI entity signals (Organization' + (isLegal ? ' + LegalService' : '') + ') to homepage', meta: 'AI visibility · JSON-LD' }).catch(() => {});
+      return { ok: true, postId, isLegal, types, ...r };
+    } catch (e) { return { error: 'Apply failed — is the seo-agent-optimize plugin installed on this site? ' + e.message }; }
+  },
   // Apply site-wide custom CSS to the live site via the mu-plugin.
   'POST /apply-css': async (body) => {
     const { creds, site } = await resolveCreds(body);
