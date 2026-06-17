@@ -1586,6 +1586,7 @@ function OptimizeScreen({ ctx }) {
   const [links,setLinks] = useState(null);
   const [ext,setExt] = useState(null);
   const [applied,setApplied] = useState({});   // linkKey -> { busy, status, reason }
+  const [batchBusy,setBatchBusy] = useState(false);  // true while "Approve & push all" is mid-run (prevents double-fire bursts)
   const [schema,setSchema] = useState(null);
   const [facts,setFacts] = useState(null);
   const [css,setCss] = useState(null);
@@ -1632,9 +1633,11 @@ function OptimizeScreen({ ctx }) {
   });
   const applyAll = (sugs)=>{
     if(!sugs||!sugs.length) return;
+    if(batchBusy) return;  // already pushing a batch — ignore a second click / replayed event so we don't fire 2× the calls
+    setBatchBusy(true);
     ctx.toast("Pushing "+sugs.length+" link(s) to the live site…","teal");
     (async()=>{ let ok=0,manual=0,blocked=0,notlive=0; for(const l of sugs){ const r=await applyOne(l); if(r.status==="verified"){ if(r.notOnLive)notlive++; else ok++; } else if(r.status==="manual")manual++; else if(r.status==="blocked")blocked++; }
-      ctx.toast(blocked? "Site is read-only — arm writes on the Admin screen first." : notlive? ("Saved to WordPress, but your live site isn’t WordPress — "+notlive+" link(s) won’t show on it.") : (ok+" link(s) applied"+(manual?" · "+manual+" need the page-builder editor":"")), (blocked||notlive)?"clay":(ok?"teal":"gold")); })();
+      ctx.toast(blocked? "Site is read-only — arm writes on the Admin screen first." : notlive? ("Saved to WordPress, but your live site isn’t WordPress — "+notlive+" link(s) won’t show on it.") : (ok+" link(s) applied"+(manual?" · "+manual+" need the page-builder editor":"")), (blocked||notlive)?"clay":(ok?"teal":"gold")); })().finally(()=>setBatchBusy(false));
   };
   const linkStatus = (l)=>{
     const st=applied[linkKey(l)]; if(!st) return null;
@@ -1753,7 +1756,7 @@ function OptimizeScreen({ ctx }) {
                 <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
                   <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4, flexWrap:"wrap" }}>
                     <span style={{ fontSize:12.5, fontWeight:700, color:"var(--ink-2)" }}>{links.count} suggestion(s) across {links.analyzed} page(s) · {links.corpusSize} pages in corpus</span>
-                    {(links.suggestions||[]).length>0 && <NeoButton kind="soft" size="sm" icon="check" style={{ marginLeft:"auto" }} onClick={()=>applyAll(links.suggestions)}>Approve &amp; push all</NeoButton>}
+                    {(links.suggestions||[]).length>0 && <NeoButton kind="soft" size="sm" icon="check" style={{ marginLeft:"auto" }} disabled={batchBusy} onClick={()=>applyAll(links.suggestions)}>{batchBusy?"Pushing…":"Approve & push all"}</NeoButton>}
                   </div>
                   {(links.suggestions||[]).map((l,i)=>(
                     <div key={i} style={{ padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
@@ -1792,7 +1795,7 @@ function OptimizeScreen({ ctx }) {
                 <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
                   <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4, flexWrap:"wrap" }}>
                     <span style={{ fontSize:12.5, fontWeight:700, color:"var(--ink-2)" }}>{ext.count} authoritative link(s) suggested</span>
-                    {(ext.suggestions||[]).length>0 && <NeoButton kind="soft" size="sm" icon="check" style={{ marginLeft:"auto" }} onClick={()=>applyAll((ext.suggestions||[]).map(l=>({sourcePage:ext.sourcePage,anchor:l.anchor,targetUrl:l.targetUrl,sourceId:l.sourceId,sourceType:l.sourceType})))}>Approve &amp; push all</NeoButton>}
+                    {(ext.suggestions||[]).length>0 && <NeoButton kind="soft" size="sm" icon="check" style={{ marginLeft:"auto" }} disabled={batchBusy} onClick={()=>applyAll((ext.suggestions||[]).map(l=>({sourcePage:ext.sourcePage,anchor:l.anchor,targetUrl:l.targetUrl,sourceId:l.sourceId,sourceType:l.sourceType})))}>{batchBusy?"Pushing…":"Approve & push all"}</NeoButton>}
                   </div>
                   {(ext.suggestions||[]).map((l,i)=>{ const row={sourcePage:ext.sourcePage,anchor:l.anchor,targetUrl:l.targetUrl,sourceId:l.sourceId,sourceType:l.sourceType}; return (
                     <div key={i} style={{ padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>

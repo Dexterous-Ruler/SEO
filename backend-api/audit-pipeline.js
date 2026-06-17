@@ -81,8 +81,23 @@ function impactFor(score, savingsMs) {
   return 'low';
 }
 
+// Map a logical SEO field → the post-meta key that the site's DETECTED SEO plugin
+// actually reads & renders. Writing the wrong key "verifies" (the meta sticks) but
+// never appears in <head> — the silent #5 trap on no-SEO-plugin sites.
+//  • Rank Math → its own keys (registered + rendered by the meta bridge plugin).
+//  • Everything else (Yoast/SEOPress/AIOSEO/none/unknown) → Sentinel-owned keys,
+//    which the seo-agent-optimize mu-plugin renders into <head> ONLY when the tag
+//    isn't already present — so it fills gaps without ever duplicating a tag.
+function metaFieldMap(seoPlugin) {
+  const p = String(seoPlugin || '').toLowerCase();
+  if (/rank.?math/.test(p)) {
+    return { title: 'rank_math_title', meta_description: 'rank_math_description', canonical: 'rank_math_canonical_url' };
+  }
+  return { title: '_seoagent_meta_title', meta_description: '_seoagent_meta_description', canonical: '_seoagent_canonical' };
+}
+
 // Build findings + draft proposals for one URL.
-export async function auditPage(url, { creds, withContent = false, siteId = null } = {}) {
+export async function auditPage(url, { creds, withContent = false, siteId = null, seoPlugin = null } = {}) {
   // 1) Detailed PSI across all four categories
   const psi = await runPsiDetailed(url, {
     strategy: 'mobile',
@@ -161,8 +176,8 @@ export async function auditPage(url, { creds, withContent = false, siteId = null
   //    When opts.withContent, ask Claude to draft the real "after" value now
   //    (meta description / tightened title) so the proposal is approve-ready.
   const headings = [...(html6(html) || [])];
+  const fieldMap = metaFieldMap(seoPlugin);
   for (const p of seoProposals) {
-    const fieldMap = { title: 'rank_math_title', meta_description: 'rank_math_description', canonical: 'rank_math_canonical_url' };
     const rmField = fieldMap[p.field];
     if (!rmField) continue;
     let after = p.value || '(generated on approval)';

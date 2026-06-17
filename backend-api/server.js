@@ -413,7 +413,14 @@ const routes = {
   // Full audit of one page → scores + findings + draft proposals (UI shapes).
   // withContent=true → Claude drafts real meta/title values into proposals.
   'POST /audit-full': async (body) => {
-    return auditPage(body.url, { creds: body.creds, withContent: !!body.withContent, siteId: body.siteId });
+    // Pick the meta storage that matches the site's DETECTED SEO plugin so writes
+    // actually render (Rank Math keys are inert on a site with no SEO plugin).
+    let seoPlugin = body.seoPlugin || null;
+    if (!seoPlugin && body.siteId) {
+      const site = await db.getSite(body.siteId).catch(() => null);
+      seoPlugin = (site && site.stack && site.stack.seo) || null;
+    }
+    return auditPage(body.url, { creds: body.creds, withContent: !!body.withContent, siteId: body.siteId, seoPlugin });
   },
 
   // Single finding → one draft proposal (the "Propose fix" button)

@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.6.2
+ * Version:     1.7.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,11 +19,88 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
+    /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
+       (so they MUST be registered with show_in_rest), rendered into <head> by us
+       ONLY on sites where no SEO plugin owns <head> — see render_meta(). */
+    const META_KEYS = ['_seoagent_meta_title', '_seoagent_meta_description', '_seoagent_canonical'];
+
+    private $meta_buf = false;  // true while our <head> buffer is open (keeps ob_start/ob_end balanced)
+
     public function __construct() {
+        add_action('init', [$this, 'register_meta_keys']);
         add_action('template_redirect', [$this, 'start_webp_buffer'], 1);
+        // Wrap wp_head in a buffer (priority 0 → 999) so we can inject a missing
+        // <title>/description/canonical from our meta without ever duplicating one
+        // the theme or an SEO plugin already printed.
+        add_action('wp_head', [$this, 'meta_buffer_start'], 0);
         add_action('wp_head', [$this, 'output_jsonld'], 99);
         add_action('wp_head', [$this, 'output_css'], 100);
+        add_action('wp_head', [$this, 'meta_buffer_end'], 999);
         add_action('rest_api_init', [$this, 'routes']);
+    }
+
+    /* ── Sentinel-owned SEO meta: register for REST so writes actually stick ───
+       A POST to /wp/v2/{type}/{id} with an UNREGISTERED meta key returns 200 OK
+       but silently DISCARDS the value (the silent-failure trap). Registering the
+       keys makes the agent's apply-meta writes (verify-after-write) succeed. */
+    public function register_meta_keys() {
+        $auth = function () { return current_user_can('edit_posts'); };
+        foreach (self::META_KEYS as $key) {
+            foreach (['post', 'page'] as $obj) {
+                register_post_meta($obj, $key, [
+                    'type' => 'string', 'single' => true, 'show_in_rest' => true,
+                    'auth_callback' => $auth,
+                ]);
+            }
+        }
+    }
+
+    /* True when a real SEO plugin owns <head>. On those sites we stay dormant —
+       the plugin (and the agent's rank_math_* writes) handle meta, so we must not
+       add a second tag. On "none" sites this is false and we fill the gaps. */
+    private function seo_plugin_owns_head() {
+        return defined('RANK_MATH_VERSION') || class_exists('RankMath')
+            || defined('WPSEO_VERSION')
+            || defined('AIOSEO_VERSION') || function_exists('aioseo')
+            || defined('SEOPRESS_VERSION');
+    }
+
+    public function meta_buffer_start() {
+        if (is_admin() || is_feed() || !is_singular()) return;
+        if ($this->seo_plugin_owns_head()) return;
+        $this->meta_buf = true;
+        ob_start([$this, 'render_meta']);
+    }
+    public function meta_buffer_end() {
+        if ($this->meta_buf) { $this->meta_buf = false; @ob_end_flush(); }
+    }
+
+    /* Buffer callback: inject our meta into the captured wp_head HTML, but only a
+       tag that isn't already present (no duplicates). Title replaces the theme's
+       <title> inner text; description/canonical are appended if missing. */
+    public function render_meta($head) {
+        $id = get_queried_object_id();
+        if (!$id) return $head;
+        $desc  = trim((string) get_post_meta($id, '_seoagent_meta_description', true));
+        $canon = trim((string) get_post_meta($id, '_seoagent_canonical', true));
+        $title = trim((string) get_post_meta($id, '_seoagent_meta_title', true));
+        $add = '';
+        if ($desc !== '' && !preg_match('/<meta[^>]+name=["\']description["\']/i', $head)) {
+            $add .= "\n<meta name=\"description\" content=\"" . esc_attr($desc) . "\" data-seoagent=\"1\">";
+        }
+        if ($canon !== '' && !preg_match('/<link[^>]+rel=["\']canonical["\']/i', $head)) {
+            $add .= "\n<link rel=\"canonical\" href=\"" . esc_url($canon) . "\" data-seoagent=\"1\">";
+        }
+        if ($add !== '') $head .= $add . "\n";
+        if ($title !== '') {
+            // Callback (not a replacement string) so a title containing $1/\1 can't
+            // be misread as a regex backreference.
+            $safe = esc_html($title);
+            $head = preg_replace_callback('/<title\b([^>]*)>.*?<\/title>/is', function ($m) use ($safe) {
+                return '<title' . $m[1] . '>' . $safe . '</title>';
+            }, $head, 1);
+        }
+        return $head;
     }
 
     /* ── WebP on-the-fly ─────────────────────────────────────────────────────
@@ -264,7 +341,7 @@ class SEO_Agent_Optimize {
             'methods'  => 'GET',
             'permission_callback' => $perm,
             'callback' => function () {
-                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets', 'entity_tolerant_insert', 'multi_anchor_targets'], 'version' => '1.6.2'];
+                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets', 'entity_tolerant_insert', 'multi_anchor_targets', 'meta_render'], 'version' => '1.7.0', 'seo_plugin_owns_head' => $this->seo_plugin_owns_head()];
             },
         ]);
     }

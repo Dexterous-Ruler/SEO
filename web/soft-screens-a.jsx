@@ -28,6 +28,20 @@ function StackChip({ k, v, accent }) {
 function SiteCard({ s, active, ctx }) {
   const sm = softStatus[s.status];
   const fail = s.status!=="connected";
+  const [redet,setRedet] = useState(false);
+  // Re-run stack + mu-plugin detection on demand (e.g. after installing/updating
+  // the mu-plugin) so the card refreshes without a manual reconnect.
+  const reDetect = ()=>{
+    const API = window.SentinelAPI;
+    if(!API || !window.SENTINEL_LIVE || !s._rawUrl){ ctx.toast("Re-detect needs a connected live site","gold"); return; }
+    setRedet(true);
+    API.siteRedetect(s.id).then(r=>{
+      if(r && r.error){ ctx.toast(r.error,"clay"); return; }
+      const ready = r && (r.selftest==="ready");
+      ctx.toast(ready ? "Re-detected ✓ mu-plugin ready" : ("Re-detected — mu-plugin "+((r&&r.selftest)||"missing")), ready?"teal":"gold");
+      if(window.SentinelHydrate) window.SentinelHydrate();
+    }).catch(e=>ctx.toast(e.message||"Re-detect failed","clay")).finally(()=>setRedet(false));
+  };
   return (
     <SoftCard hover={false} pad={0} style={{ overflow:"hidden",
       boxShadow: active?"0 0 0 2px var(--t-400), var(--neo)":"var(--neo)" }}>
@@ -89,6 +103,7 @@ function SiteCard({ s, active, ctx }) {
               <span style={{ fontSize:11, color:"var(--muted)" }}>Role: {s.role}</span>
             </div>
             <div style={{ marginLeft:"auto", display:"flex", gap:9 }}>
+              <NeoButton kind="soft" size="sm" icon="refresh" disabled={redet} onClick={reDetect}>{redet?"Detecting…":"Re-detect"}</NeoButton>
               {!active && <NeoButton kind="soft" size="sm" onClick={()=>ctx.switchSite(s.id)}>Set active</NeoButton>}
               {active && <NeoButton kind="primary" size="sm" icon="radar" onClick={ctx.openRunAudit}>Run audit</NeoButton>}
               <button className="neo-btn" style={{ width:36, height:36, borderRadius:11, background:"var(--surface)", boxShadow:"var(--neo-sm)", display:"grid", placeItems:"center", color:"var(--muted)" }} onClick={()=>ctx.goto("settings")}><Icon name="cog" size={16} /></button>

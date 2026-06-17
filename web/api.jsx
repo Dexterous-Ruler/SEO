@@ -100,6 +100,8 @@
     async listSites() { return sbSelect("sites", "select=*&order=created_at.asc"); },
     async createSite(row) { return (await sbInsert("sites", row))[0]; },
     async updateSite(id, patch) { return (await sbUpdate("sites", id, patch))[0]; },
+    // Re-run stack + mu-plugin detection for a site and persist the fresh result.
+    siteRedetect(siteId) { return engine("/site-redetect", { siteId }); },
 
     // ---- engine operations ----
     // Secure connect: validate + detect + encrypt-store in one server call.
