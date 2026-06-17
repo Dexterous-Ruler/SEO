@@ -505,9 +505,31 @@ const routes = {
   // ── GEO / AI-citation tracking ────────────────────────────────────────
   // Suggest a buyer-intent prompt set for a site (Claude).
   'POST /geo-prompts': async (body) => {
-    const titles = body.sampleTitles || [];
-    const prompts = await geo.suggestPrompts({ siteName: body.siteName, niche: body.niche, sampleTitles: titles });
-    return { prompts };
+    let titles = Array.isArray(body.sampleTitles) ? body.sampleTitles.filter(Boolean) : [];
+    let niche = body.niche;
+    // Ground on the site's REAL page/post titles. Without them (the UI used to pass
+    // an empty list + the tech-stack type as "niche"), Claude guessed the product
+    // category from the brand name alone — e.g. "GoodFor" → employee-recognition
+    // prompts for a food/skincare scanner. Fetch the actual titles like /content-intel.
+    if (body.siteId && titles.length < 5) {
+      try {
+        const { creds, site } = await resolveCreds(body);
+        const wp = clientFrom(creds);
+        const got = [];
+        try { const pages = await wp.list('pages', { perPage: 100, fields: 'title' }); for (const p of (pages || [])) got.push((p.title?.rendered || '').replace(/&[a-z]+;/g, ' ').trim()); } catch (e) {}
+        try { const posts = await wp.list('posts', { perPage: 100, fields: 'title' }); for (const p of (posts || [])) got.push((p.title?.rendered || '').replace(/&[a-z]+;/g, ' ').trim()); } catch (e) {}
+        const clean = got.filter(Boolean);
+        if (clean.length) {
+          const sample = [];
+          const step = Math.max(1, Math.floor(clean.length / 30));
+          for (let i = 0; i < clean.length && sample.length < 30; i += step) sample.push(clean[i]);
+          titles = sample;
+        }
+        if (!niche && site && site.niche) niche = site.niche;
+      } catch (e) { /* fall back to whatever the caller passed */ }
+    }
+    const prompts = await geo.suggestPrompts({ siteName: body.siteName, niche, sampleTitles: titles });
+    return { prompts, groundedOn: titles.length };
   },
 
   // Run a citation-tracking pass: query prompts via Claude+web-search, detect

@@ -4275,7 +4275,7 @@ function App() {
       toast("Measuring AI citation visibility…","teal");
       const domain=(site._rawUrl||"").replace(/^https?:\/\//,"").replace(/\/$/,"");
       const comps=(competitors||"").split(",").map(c=>c.trim()).filter(Boolean);
-      API.geoPrompts(site.name, (site.stack&&site.stack.type)||undefined, []).then(pr=>{
+      API.geoPrompts(siteId, site.name, undefined, []).then(pr=>{  // backend grounds on the site's real page titles (stack.type was NOT the niche)
         const prompts=(pr.prompts||[]).slice(0,12); // cap for cost/time
         if(!prompts.length) throw new Error("Couldn't generate buyer-intent prompts — check the Claude API key.");
         setGeoStatus("Querying "+prompts.length+" prompts through AI (web search)… ~1-2 min");
