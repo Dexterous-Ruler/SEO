@@ -737,7 +737,7 @@ function FixQueueCard({ ctx }) {
       <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
         {items.map(p=>{
           const isDone = p.status==="verified"||p.status==="approved";
-          const [rl,rbg,rfg] = riskChip[p.risk];
+          const [rl,rbg,rfg] = riskChip[p.risk]||riskChip.low;
           return (
             <div key={p.id} className="nav-item" style={{ display:"flex", alignItems:"center", gap:13, padding:"11px 12px", borderRadius:13, background:"rgba(243,239,228,.05)" }}>
               <button onClick={()=>ctx.toggleProposal(p.id)} className="qcheck" aria-label={isDone?"Mark as pending":"Approve fix"} style={{ width:26, height:26, borderRadius:8, flexShrink:0, display:"grid", placeItems:"center",
