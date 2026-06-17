@@ -20,6 +20,7 @@ const SNAV_GROUPS = [
   { group:"Plan & Create Content", items:[
     { k:"plan",     label:"Content Plan", icon:"sparkles" },
     { k:"content",  label:"Content Analysis", icon:"sparkles" },
+    { k:"gsc",      label:"Content Decay", icon:"trend", tab:"decay" },
     { k:"geo",      label:"AI Search Visibility", icon:"globe" },
   ]},
   { group:"Connect Data", items:[
@@ -104,10 +105,10 @@ function Sidebar({ ctx, collapsed, setCollapsed }) {
   const isOpen=(g)=> openGroups[g]!==false;
   const toggleGroup=(g)=>setOpenGroups(o=>{ const n=Object.assign({},o,{[g]: o[g]===false}); try{localStorage.setItem("sentinel-navgroups",JSON.stringify(n));}catch(e){} return n; });
   const NavItem=(it)=>{
-    const active = ctx.screen===it.k;
+    const active = ctx.screen===it.k && (!it.tab || ctx.navTab===it.tab);
     const badge = it.badge ? ctx.proposals.filter(p=>p.status==="proposed").length : 0;
     return (
-      <button key={it.k} onClick={()=>ctx.goto(it.k)} className={"nav-item "+(collapsed?"tip":"")} data-tip={it.label}
+      <button key={it.k+(it.tab||"")} onClick={()=>ctx.goto(it.k, it.tab)} className={"nav-item "+(collapsed?"tip":"")} data-tip={it.label}
         style={{ display:"flex", alignItems:"center", gap:13, justifyContent: collapsed?"center":"flex-start",
           padding: collapsed?"12px":"11px 13px", borderRadius:14, position:"relative",
           background: active?"var(--surface)":"transparent",
@@ -1363,6 +1364,16 @@ function OpportunitiesScreen({ ctx }) {
 
   const load = ()=>{ setBusy(true); setErr(null); API.contentOpportunities(s.id,{db:dbVal}).then(r=>{ if(r.error){setErr(r.error);return;} setData(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy(false)); };
   const loadTrending = ()=>{ setTrendBusy(true); API.trendingIntel(s.id, undefined, dbVal).then(r=>setTrend(r)).catch(e=>setTrend({error:e.message})).finally(()=>setTrendBusy(false)); };
+  // ITEM 4: one-click — push the trending topics straight into the Airtable keyword
+  // column so the n8n writer turns each into an article. No cluster step needed.
+  const pushTrending = ()=>{
+    const kws=[...new Set(((trend&&trend.topics)||[]).map(t=>(t.keyword||t.title||"").trim()).filter(Boolean))];
+    if(!kws.length){ ctx.toast("No trending topics to push — scan trends first","gold"); return; }
+    setPushing("trend"); ctx.toast("Pushing "+kws.length+" trending topic(s) to Airtable…","teal");
+    API.airtablePushKeywords(s.id, kws).then(r=>{ if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
+      ctx.toast(r.pushed>0?("Pushed "+r.pushed+" trending topic(s) → Airtable ✓"+(r.skipped?" ("+r.skipped+" already there)":"")):"All trending topics already in Airtable", r.pushed>0?"teal":"gold");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(""));
+  };
   const genBrief = (c,i)=>{
     setBriefBusy(i);
     API.contentBrief(s.id, c.primaryKeyword||c.suggestedTitle, c.intent).then(r=>{
@@ -1407,7 +1418,10 @@ function OpportunitiesScreen({ ctx }) {
       {live && (
         <SoftCard hover={false} style={{ marginBottom:18 }}>
           <SectionHead sub={`What's trending in your niche in ${cName} right now — grounded & sourced`} right={
-            <NeoButton kind="soft" size="sm" icon={trendBusy?undefined:"trend"} disabled={trendBusy} onClick={loadTrending}>{trendBusy&&<Icon name="cog" size={14} className="audit-spin" />}{trendBusy?"Scanning…":trend?"Refresh":"What's trending?"}</NeoButton>
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+              {trend && !trend.error && ((trend.topics)||[]).length>0 && <NeoButton kind="soft" size="sm" icon={pushing==="trend"?undefined:"upload"} disabled={pushing==="trend"} onClick={pushTrending}>{pushing==="trend"&&<Icon name="cog" size={14} className="audit-spin" />}Push topics → Airtable</NeoButton>}
+              <NeoButton kind="soft" size="sm" icon={trendBusy?undefined:"trend"} disabled={trendBusy} onClick={loadTrending}>{trendBusy&&<Icon name="cog" size={14} className="audit-spin" />}{trendBusy?"Scanning…":trend?"Refresh":"What's trending?"}</NeoButton>
+            </div>
           }>{`Trending now (${cName})`}</SectionHead>
           {trend && trend.error && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"4px 2px" }}>{trend.error}</div>}
           {trend && !trend.error && (
@@ -2153,9 +2167,13 @@ function ContentScreen({ ctx }) {
   // Push the analysed keywords (suggestions + gaps) into the site's Airtable
   // keyword column → feeds the n8n article writer.
   const pushToAirtable = ()=>{
+    // ONE click → push the full, correct keyword set the article-writer needs: every
+    // keywordCluster (primary + its related keywords) + gap keywords + suggestion target
+    // keywords, de-duped. No second trip to the Airtable screen, and the RIGHT keywords.
     const kws=[...new Set([
+      ...((d&&d.keywordClusters)||[]).flatMap(c=>[c.primaryKeyword, ...((c.keywords)||[])]),
+      ...((d&&d.gaps)||[]).map(g=>typeof g==="string"?g:(g.keyword||g.topic)),
       ...((d&&d.suggestions)||[]).map(x=>x.targetKeyword||x.keyword||x.title),
-      ...((d&&d.gaps)||[]).map(g=>typeof g==="string"?g:(g.keyword||g.title)),
     ].map(k=>(k||"").trim()).filter(Boolean))];
     if(!kws.length){ ctx.toast("No keywords to push — analyze content first","gold"); return; }
     setPushing(true); ctx.toast("Pushing "+kws.length+" keyword(s) to Airtable…","teal");
@@ -2209,9 +2227,31 @@ function ContentScreen({ ctx }) {
             <PatternCard icon="doc" tone="plum" value={(d.suggestions||[]).length+" ideas"} title="Article suggestions" sub="Ready to brief & write" />
           </div>
 
-          {/* Keyword clusters */}
+          {/* NEW content keyword clusters — the actionable plan; THIS is what "Push to Airtable" sends. */}
+          {(d.keywordClusters||[]).length>0 && (
+            <SoftCard hover={false}>
+              <SectionHead sub="1 primary keyword → ~10 related keywords (each a unique angle) + article angles. These keywords are exactly what “Push to Airtable” sends to your article writer.">Content Keyword Clusters → Airtable</SectionHead>
+              <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                {(d.keywordClusters||[]).map((c,i)=>(
+                  <div key={i} style={{ padding:"14px 16px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:9, flexWrap:"wrap", marginBottom:8 }}>
+                      <Chip tone="teal" size="sm" icon="search">{c.primaryKeyword}</Chip>
+                      <Chip tone="gray" size="sm">{c.intent}</Chip>
+                      <span style={{ fontSize:11.5, color:"var(--muted)" }}>{(c.keywords||[]).length} keywords</span>
+                    </div>
+                    <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginBottom:(c.angles||[]).length?9:0 }}>
+                      {(c.keywords||[]).map((k,ki)=><span key={ki} style={{ fontSize:11.5, fontWeight:600, color:"var(--t-700)", background:"var(--t-50)", padding:"3px 9px", borderRadius:99, fontFamily:"var(--mono)" }}>{k}</span>)}
+                    </div>
+                    {(c.angles||[]).length>0 && <div style={{ display:"flex", flexDirection:"column", gap:4 }}>{(c.angles||[]).map((a,ai)=>(<div key={ai} style={{ fontSize:12, color:"var(--muted)", display:"flex", gap:7 }}><Icon name="doc" size={13} style={{ color:"var(--t-600)", flexShrink:0, marginTop:1 }} /><span>{a}</span></div>))}</div>}
+                  </div>
+                ))}
+              </div>
+            </SoftCard>
+          )}
+
+          {/* Existing content clusters (descriptive — what the site already covers) */}
           <SoftCard hover={false}>
-            <SectionHead sub="Your content mapped into topic clusters">Keyword Clusters</SectionHead>
+            <SectionHead sub="What your current pages already cover (existing content — not pushed)">Your Existing Topic Clusters</SectionHead>
             <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
               {(d.clusters||[]).map((c,i)=>(
                 <div key={i} style={{ padding:"14px 16px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
