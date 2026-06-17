@@ -22,21 +22,34 @@ function key() {
 
 // Ask Claude one buyer-intent question WITH web search enabled, then inspect
 // whether the answer cites the target domain. Returns structured result.
-async function askWithSearch(promptText) {
-  const res = await fetch(API, {
-    method: 'POST',
-    headers: {
-      'x-api-key': key(),
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 1024,
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 4 }],
-      messages: [{ role: 'user', content: promptText }],
-    }),
-  });
+// Bounded by a per-call timeout so a single slow/hung web search can't stall the
+// whole tracking pass (which must complete inside the gateway request timeout).
+async function askWithSearch(promptText, timeoutMs = 26000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(API, {
+      method: 'POST',
+      headers: {
+        'x-api-key': key(),
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 1024,
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 4 }],
+        messages: [{ role: 'user', content: promptText }],
+      }),
+      signal: ctrl.signal,
+    });
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error('web search timed out');
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
   const data = await res.json();
   if (!res.ok) throw new Error(`Claude GEO ${res.status}: ${data.error?.message || JSON.stringify(data).slice(0, 200)}`);
 
@@ -64,17 +77,39 @@ function domainOf(url) {
   catch { return (url || '').replace(/^www\./, '').toLowerCase(); }
 }
 
+// Bounded-concurrency map: run `fn` over `items`, at most `limit` at a time.
+// Preserves input order in the returned array. Used so the citation pass runs
+// the (slow, web-searching) prompts in parallel waves instead of serially.
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length || 1) }, worker));
+  return out;
+}
+
 // Run a full citation-tracking pass for a site across a prompt set.
 // targetDomain: the site we're measuring. competitors: optional [domain,...].
+// Each prompt is a Claude web-search call (~10-25s); we run them in parallel
+// waves with a hard cap so the whole pass completes inside the gateway request
+// timeout (a serial loop over ~18 prompts blew past it → 504 "gateway time-out").
+const GEO_MAX_PROMPTS = 16;   // bound total work — keeps the pass under the gateway timeout
+const GEO_CONCURRENCY = 8;    // parallel web-search calls (gentle on Anthropic rate limits)
 export async function runCitationTracking({ targetDomain, prompts, competitors = [], onResult }) {
   const target = domainOf(targetDomain);
   const compDomains = competitors.map(domainOf);
-  const results = [];
-  let cited = 0;
-  const compCites = {};
 
-  for (let i = 0; i < prompts.length; i++) {
-    const p = prompts[i];
+  const list = (prompts || []).slice(0, GEO_MAX_PROMPTS);
+  if ((prompts || []).length > GEO_MAX_PROMPTS) {
+    console.log(`[geo] capping citation pass to ${GEO_MAX_PROMPTS} of ${prompts.length} prompts (gateway-timeout budget)`);
+  }
+
+  const results = await mapLimit(list, GEO_CONCURRENCY, async (p, i) => {
     const promptText = typeof p === 'string' ? p : p.prompt;
     try {
       const { answer, citedUrls } = await askWithSearch(promptText);
@@ -82,10 +117,6 @@ export async function runCitationTracking({ targetDomain, prompts, competitors =
       const targetCited = citedDomains.includes(target);
       // brand mention in prose even if not formally cited
       const brandMentioned = new RegExp(target.split('.')[0].replace(/[^a-z0-9]/gi, ''), 'i').test(answer.replace(/[^a-z0-9]/gi, ''));
-      if (targetCited) cited++;
-      for (const cd of citedDomains) {
-        if (compDomains.includes(cd)) compCites[cd] = (compCites[cd] || 0) + 1;
-      }
       const row = {
         prompt: promptText,
         intent: typeof p === 'object' ? p.intent : 'informational',
@@ -94,15 +125,27 @@ export async function runCitationTracking({ targetDomain, prompts, competitors =
         citedDomains,
         snippet: answer.slice(0, 280),
       };
-      results.push(row);
-      if (onResult) onResult(row, i, prompts.length);
+      if (onResult) onResult(row, i, list.length);
+      return row;
     } catch (e) {
-      results.push({ prompt: promptText, error: e.message });
-      if (onResult) onResult({ prompt: promptText, error: e.message }, i, prompts.length);
+      const row = { prompt: promptText, error: e.message };
+      if (onResult) onResult(row, i, list.length);
+      return row;
+    }
+  });
+
+  // Aggregate after the parallel pass (order preserved by mapLimit).
+  let cited = 0;
+  const compCites = {};
+  for (const row of results) {
+    if (!row || row.error) continue;
+    if (row.targetCited) cited++;
+    for (const cd of row.citedDomains || []) {
+      if (compDomains.includes(cd)) compCites[cd] = (compCites[cd] || 0) + 1;
     }
   }
 
-  const total = prompts.length;
+  const total = list.length;
   const shareOfVoice = total ? Math.round((cited / total) * 100) : 0;
   const competitorScores = compDomains.map((d) => ({ domain: d, cited: compCites[d] || 0, share: total ? Math.round(((compCites[d] || 0) / total) * 100) : 0 }));
   return { targetDomain: target, shareOfVoice, promptsTotal: total, promptsCited: cited, competitors: competitorScores, results };

@@ -1349,10 +1349,23 @@ const routes = {
     const wp = clientFrom(creds);
     let postId = body.postId;
     if (!postId && body.url) {
-      const slug = decodeURIComponent((body.url.replace(/\/$/, '').split('/').pop() || '')).toLowerCase();
-      for (const type of ['pages', 'posts']) {
-        const rows = await wp.request(`/${type}?slug=${encodeURIComponent(slug)}&_fields=id`).catch(() => []);
-        if (Array.isArray(rows) && rows[0]) { postId = rows[0].id; break; }
+      // Resolve the page id. Handle the HOMEPAGE (empty path) via the front-page
+      // setting — its "slug" is the domain, which never matches a page slug — so
+      // homepage-level schema (e.g. the FAQPage facts block) can be attached.
+      let path = '';
+      try { path = new URL(body.url).pathname.replace(/\/+$/, ''); } catch (e) { path = String(body.url).replace(/^https?:\/\/[^/]+/, '').replace(/[?#].*$/, '').replace(/\/+$/, ''); }
+      if (path === '' || path === '/') {
+        const settings = await wp.request('/settings').catch(() => null);
+        const fid = settings && settings.page_on_front;
+        if (fid) { const row = await wp.request(`/pages/${fid}?_fields=id`).catch(() => null); if (row && row.id) postId = row.id; }
+        if (!postId) { const pgs = await wp.request('/pages?per_page=100&_fields=id,link').catch(() => []); const root = (wp.baseUrl || '').replace(/\/+$/, ''); const hit = (pgs || []).find((p) => String(p.link || '').replace(/\/+$/, '') === root); if (hit) postId = hit.id; }
+      }
+      if (!postId) {
+        const slug = decodeURIComponent((path.split('/').pop() || '')).toLowerCase();
+        if (slug) for (const type of ['pages', 'posts']) {
+          const rows = await wp.request(`/${type}?slug=${encodeURIComponent(slug)}&_fields=id`).catch(() => []);
+          if (Array.isArray(rows) && rows[0]) { postId = rows[0].id; break; }
+        }
       }
     }
     if (!postId) return { error: 'Could not resolve the page — pass postId or a valid page URL.' };
