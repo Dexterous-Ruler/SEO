@@ -289,7 +289,7 @@ function seoFindingKey(f){
 const RESOLVED_STATUSES = { verified:1, approved:1, applied:1, dismissed:1 };
 
 function FindingRow({ f, ctx, open, onToggle }) {
-  const dm = softDisc[f.disc], [imTone,imLabel]=impactTone[f.impact];
+  const dm = softDisc[f.disc]||softDisc.seo, [imTone,imLabel]=impactTone[f.impact]||impactTone.medium;
   const fk = seoFindingKey(f);
   // Only a genuinely-pending proposal counts as "in queue" — not a dismissed/reopened/
   // rejected ledger entry (those share the finding's key but aren't review items).

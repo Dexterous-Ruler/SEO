@@ -7,11 +7,14 @@ const softPropStatus = {
   applied:{ tone:"gold", label:"Applying", icon:"upload" },
   verified:{ tone:"teal", label:"Verified", icon:"check" },
   "rolled-back":{ tone:"gold", label:"Rolled back", icon:"undo" },
+  dismissed:{ tone:"gray", label:"Done", icon:"check" },
+  reopened:{ tone:"gold", label:"Reopened", icon:"undo" },
+  rejected:{ tone:"clay", label:"Rejected", icon:"flag" },
 };
 
 /* ================= REVIEW QUEUE ================= */
 function ProposalCard({ p, ctx, open, onToggle }) {
-  const dm = softDisc[p.disc], st = softPropStatus[p.status];
+  const dm = softDisc[p.disc] || softDisc.seo, st = softPropStatus[p.status] || softPropStatus.proposed;
   const isProd = p.target==="production", canAct = p.status==="proposed";
   return (
     <SoftCard hover={false} pad={0} style={{ overflow:"hidden", boxShadow:open?"var(--neo)":"var(--neo-sm)" }}>
@@ -133,7 +136,7 @@ function ReviewScreen({ ctx }) {
       )}
 
       {Object.entries(groups).map(([disc,items])=>{
-        const dm = softDisc[disc];
+        const dm = softDisc[disc] || softDisc.seo;
         return (
           <div key={disc} style={{ marginBottom:22 }}>
             <div style={{ display:"flex", alignItems:"center", gap:9, margin:"2px 2px 12px" }}>
