@@ -142,6 +142,7 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
 
   const out = [];
   let dropped = 0;
+  let aiError = null;         // surfaced so the UI shows "AI unavailable" (e.g. Claude credits) not a silent 0
   let skippedNoUnits = 0;     // pages the plugin reports as having no editable text
   for (const src of sources) {
     const { text: fullText, units, authoritative } = await editablePageContent(wp, src);
@@ -151,8 +152,8 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
     // Candidates = everything except the source itself.
     const candidates = corpus.filter((c) => c.url !== src.url);
     const links = await claude.internalLinkSuggestions({
-      sourceUrl: src.url, sourceTitle: src.title, sourceText: fullText.slice(0, 4000), candidates, siteId,
-    }).catch(() => []);
+      sourceUrl: src.url, sourceTitle: src.title, sourceText: fullText.slice(0, 4500), candidates, siteId,
+    }).catch((e) => { if (!aiError) aiError = String((e && e.message) || e); return []; });
     // Fetch the rendered page ONCE to find text that's already a link — the inserter
     // can't re-link it, so dropping it here is what stops "Add in editor".
     let linkedTexts = [];
@@ -168,7 +169,7 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
       out.push({ sourcePage: src.url, sourceId: src.id, sourceType: src.type, sourceTitle: src.title, anchor: l.anchor, targetUrl: l.targetUrl, targetTitle: target ? target.title : '', reason: l.reason });
     }
   }
-  return { corpusSize: corpus.length, analyzed: sources.length, count: out.length, droppedNotOnPage: dropped, skippedNoUnits, liveCms: cms.cms, cmsMismatch, suggestions: out };
+  return { corpusSize: corpus.length, analyzed: sources.length, count: out.length, droppedNotOnPage: dropped, skippedNoUnits, liveCms: cms.cms, cmsMismatch, suggestions: out, aiError };
 }
 
 export default { suggestForSite };

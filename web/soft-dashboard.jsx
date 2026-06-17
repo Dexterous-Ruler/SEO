@@ -1772,7 +1772,7 @@ function OptimizeScreen({ ctx }) {
                       {manualHint(l)}
                     </div>
                   ))}
-                  {(links.suggestions||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No strong internal-link opportunities found — pages are already well interlinked.</div>}
+                  {(links.suggestions||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color: links.aiError?"#7E5A14":"var(--muted)", background: links.aiError?"var(--gold-bg)":"transparent", borderRadius:"var(--r-md)" }}>{links.aiError ? (/credit|too low|balance/i.test(links.aiError) ? "⚠️ AI link suggestions are paused — your Anthropic API credit balance is too low. Top up your Anthropic credits to restore link generation." : ("⚠️ AI temporarily unavailable — "+links.aiError)) : "No strong internal-link opportunities found — pages are already well interlinked."}</div>}
                 </div>
               )}
               {(!links || links._siteId!==s.id) && busy!=="links" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Analyze your pages to surface contextual internal-link opportunities (anchor → target). <b>Approve</b> pushes the link straight into the live page (Classic/Gutenberg); page-builder pages (Elementor) are flagged to add in the editor. Links open in a new tab so this stays open.</div>}
@@ -1810,7 +1810,7 @@ function OptimizeScreen({ ctx }) {
                       {manualHint(row)}
                     </div>
                   );})}
-                  {(ext.suggestions||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>{ext.note || "No strong authoritative outbound links found for this page."}</div>}
+                  {(ext.suggestions||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color: ext.aiError?"#7E5A14":"var(--muted)", background: ext.aiError?"var(--gold-bg)":"transparent", borderRadius:"var(--r-md)" }}>{ext.aiError ? (/credit|too low|balance/i.test(ext.aiError) ? "⚠️ AI link suggestions are paused — your Anthropic API credit balance is too low. Top up your Anthropic credits to restore this." : ("⚠️ AI temporarily unavailable — "+ext.aiError)) : (ext.note || "No strong authoritative outbound links found for this page.")}</div>}
                 </div>
               )}
               {(!ext || ext._siteId!==s.id) && busy!=="ext" && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Enter a page URL to find authoritative outbound links. <b>Approve</b> pushes the link into the live page (Classic/Gutenberg); page-builder pages are flagged for the editor. Links open in a new tab.</div>}
