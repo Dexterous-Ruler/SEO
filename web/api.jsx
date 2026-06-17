@@ -94,6 +94,7 @@
     contentOpportunities(siteId, opts) { return engine("/content-opportunities", Object.assign({ siteId }, opts || {})); },
     contentBrief(siteId, keyword, intent) { return engine("/content-brief", { siteId, keyword, intent }); },
     trendingIntel(siteId, niche, db) { return engine("/trending-intel", { siteId, niche, db }); },
+    peopleAlsoAsk(siteId, keyword, depth) { return engine("/people-also-ask", { siteId, keyword, depth }); },
     researchStatus() { return engine("/research-status", {}); },
     adminStatus(siteId) { return engine("/admin-status", { siteId }); },
     promptsList(siteId) { return engine("/prompts-list", { siteId }); },

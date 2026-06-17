@@ -1144,6 +1144,20 @@ const routes = {
     } catch (e) { return { error: 'Content-opportunity analysis failed: ' + e.message }; }
   },
 
+  // People Also Ask: real Google PAA questions for a seed keyword, in the active
+  // site's market (semrush_db). Read-only research; the UI pushes the questions to
+  // the Airtable keyword column so the writer answers one per article. Uses the
+  // existing DataForSEO account (SERP advanced) — no new vendor/key.
+  'POST /people-also-ask': async (body) => {
+    if (!semrush.hasKey()) return { error: 'DataForSEO not configured — add DATAFORSEO_LOGIN + API password.' };
+    const seed = String(body.keyword || '').trim();
+    if (!seed) return { error: 'A seed keyword is required.' };
+    const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    try {
+      return await semrush.peopleAlsoAsk(seed, { db: (site && site.semrush_db) || body.db || 'uk', depth: body.depth || 2 });
+    } catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted — top up at app.dataforseo.com' : ('People Also Ask lookup failed: ' + e.message) }; }
+  },
+
   // Internal-links engine: propose contextual in-content links across the site's
   // real pages (targets constrained to the actual corpus — no invented URLs).
   'POST /internal-links': async (body) => {
