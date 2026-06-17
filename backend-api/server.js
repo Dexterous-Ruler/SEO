@@ -387,6 +387,21 @@ const routes = {
     return detectStack(wp, body.creds.baseUrl);
   },
 
+  // Re-detect a STORED site's stack by siteId (no app password needed) and update
+  // the saved mu_plugin / selftest / stack / scale. The mu_plugin flag is captured
+  // at connect time, so it goes stale after the plugin is installed/updated — this
+  // lets the Sites screen refresh detection without reconnecting.
+  'POST /site-redetect': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    const { creds } = await resolveCreds(body);
+    const wp = clientFrom(creds);
+    const det = await detectStack(wp, creds.baseUrl).catch((e) => ({ error: String((e && e.message) || e) }));
+    if (det.error) return { error: 'Detection failed: ' + det.error };
+    const patch = { mu_plugin: !!det.muPlugin, selftest: det.selftest || 'missing', stack: det.stack || null, scale: det.scale || null, caps: det.caps || null };
+    await db.updateSite(body.siteId, patch).catch(() => {});
+    return { ok: true, siteId: body.siteId, muPlugin: !!det.muPlugin, selftest: det.selftest || 'missing', stack: det.stack || null };
+  },
+
   // Crawl the sitemap → URL list (+ optional orphans)
   'POST /crawl': async (body) => {
     const { urls, indexUrl } = await discoverUrls({ baseUrl: body.creds.baseUrl });
