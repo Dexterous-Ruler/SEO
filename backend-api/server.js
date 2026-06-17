@@ -40,7 +40,7 @@ import { startScheduler } from './scheduler.js';
 import { detectGscDaily, detectAuditHistory } from './anomaly.js';
 import * as tv from './traffic-value.js';
 import { correlationMatrix } from './correlation.js';
-import { suggestForSite as suggestInternalLinks, editablePageContent, insertableIn, normText, resolveSourceByUrl } from './internal-links.js';
+import { suggestForSite as suggestInternalLinks, editablePageContent, insertableIn, normText, resolveSourceByUrl, linkedAnchorTexts, alreadyLinked } from './internal-links.js';
 import { generatePageSchema } from './schema-gen.js';
 import { generateCssFixes } from './css-fixes.js';
 import { findOpportunities } from './content-opportunities.js';
@@ -1188,11 +1188,14 @@ const routes = {
       }
       const niche = (site && site.niche) || (site && site.stack && site.stack.type) || '';
       const arr = await claude.externalLinkSuggestions({ url, title: src.title || '', text: (text || '').slice(0, 5000), niche, siteId: body.siteId });
+      // Drop anchors already linked on the rendered page (the inserter skips existing links).
+      let linkedTexts = [];
+      if ((arr || []).length) { try { const rh = await fetch(url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } }).then((r) => r.text()); linkedTexts = linkedAnchorTexts(rh); } catch (e) {} }
       // Keep only anchors the inserter would actually place: a boundary match inside a
-      // SINGLE editable unit (faithful to the plugin) — not a loose substring of the page.
+      // SINGLE editable unit (faithful to the plugin), and not already a link on the page.
       const normUnits = units.map(normText);
       const applicable = (arr || [])
-        .filter((l) => l.anchor && insertableIn(l.anchor, normUnits))
+        .filter((l) => l.anchor && insertableIn(l.anchor, normUnits) && !alreadyLinked(l.anchor, linkedTexts))
         .map((l) => ({ ...l, sourceId: src.id, sourceType: src.type }));
       return { sourcePage: url, count: applicable.length, suggestions: applicable, droppedNotApplicable: (arr || []).length - applicable.length };
     } catch (e) { return { error: 'External-link analysis failed: ' + e.message }; }
