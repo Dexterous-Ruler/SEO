@@ -626,7 +626,10 @@ const routes = {
       pages = pages.map((p) => ({ ...p, note: p.note || (enr.notes && enr.notes[p.title]) || '' }));
     }
     const llms = geo.buildLlmsTxt({ siteName, baseUrl: base, summary, pages });
-    const robots = geo.buildAiRobots({ allow: body.allow !== false, sitemapUrl: base + '/sitemap_index.xml' });
+    // No Sitemap line — the mu-plugin MERGES this into the site's existing robots.txt
+    // which already declares the correct sitemap (hardcoding sitemap_index.xml was
+    // wrong for WP-core/wp-sitemap.xml sites and produced a duplicate/404 entry).
+    const robots = geo.buildAiRobots({ allow: body.allow !== false });
     if (!body.apply) {
       return { llmsTxt: llms, aiRobots: robots, note: 'Review, then publish llms.txt at site root and merge the robots rules.' };
     }

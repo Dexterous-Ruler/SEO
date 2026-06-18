@@ -186,7 +186,9 @@ export async function suggestPrompts({ siteName, niche, sampleTitles = [], exclu
 const AI_BOTS = ['GPTBot', 'OAI-SearchBot', 'ChatGPT-User', 'PerplexityBot', 'Perplexity-User', 'ClaudeBot', 'Claude-User', 'Claude-SearchBot', 'Google-Extended', 'Bingbot', 'Applebot-Extended'];
 
 export function buildAiRobots({ allow = true, sitemapUrl } = {}) {
-  const lines = ['# AI crawler directives (managed by Sentinel)'];
+  // No "managed by Sentinel" header here — the mu-plugin's robots_txt filter adds
+  // that header itself when it merges this block, so including it here double-prints.
+  const lines = [];
   for (const bot of AI_BOTS) {
     lines.push(`User-agent: ${bot}`);
     lines.push(allow ? 'Allow: /' : 'Disallow: /');
