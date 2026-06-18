@@ -119,7 +119,7 @@
     promptReset(key, siteId) { return engine("/prompt-reset", { key, siteId }); },
     promptHistory(key) { return engine("/prompt-history", { key }); },
     promptTest(key, content, model, temperature) { return engine("/prompt-test", { key, content, model, temperature }); },
-    geoPrompts(siteId, siteName, niche, sampleTitles) { return engine("/geo-prompts", { siteId, siteName, niche, sampleTitles }); },
+    geoPrompts(siteId, siteName, niche, sampleTitles, exclude) { return engine("/geo-prompts", { siteId, siteName, niche, sampleTitles, exclude }); },
     geoTrack(siteId, targetDomain, prompts, competitors) { return engine("/geo-track", { siteId, targetDomain, prompts, competitors }); },
     geoEnable(siteId, opts) { return engine("/geo-enable", Object.assign({ siteId }, opts || {})); },
     semrushSnapshot(siteId, domain, db) { return engine("/semrush-snapshot", { siteId, domain, db }); },

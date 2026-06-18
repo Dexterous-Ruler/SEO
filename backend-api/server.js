@@ -550,8 +550,20 @@ const routes = {
         if (!niche && site && site.niche) niche = site.niche;
       } catch (e) { /* fall back to whatever the caller passed */ }
     }
-    const prompts = await geo.suggestPrompts({ siteName: body.siteName, niche, sampleTitles: titles });
-    return { prompts, groundedOn: titles.length };
+    // Collect prompts already used in recent scans so each scan surfaces NEW
+    // buyer-intent queries ("the ones we want to show up for") instead of repeats.
+    let exclude = Array.isArray(body.exclude) ? body.exclude.filter(Boolean) : [];
+    if (body.siteId) {
+      try {
+        const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/geo_runs?site_id=eq.${body.siteId}&select=results&order=created_at.desc&limit=6`, {
+          headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE },
+        });
+        if (r.ok) { const rows = await r.json(); for (const row of (rows || [])) for (const res of (row.results || [])) if (res && res.prompt) exclude.push(res.prompt); }
+      } catch (e) { /* best-effort — fall back to no exclusions */ }
+    }
+    exclude = [...new Set(exclude)];
+    const prompts = await geo.suggestPrompts({ siteName: body.siteName, niche, sampleTitles: titles, exclude });
+    return { prompts, groundedOn: titles.length, excluded: exclude.length };
   },
 
   // Run a citation-tracking pass: query prompts via Claude+web-search, detect
@@ -575,13 +587,33 @@ const routes = {
     return out;
   },
 
-  // GEO enablement: generate llms.txt + AI-bot robots + (optional) write them.
+  // GEO enablement: generate llms.txt + AI-bot robots, and (when apply:true) PUBLISH
+  // them to the live site via the mu-plugin (serves /llms.txt + merges robots.txt).
   'POST /geo-enable': async (body) => {
     const { creds, site } = await resolveCreds(body);
     const base = creds.baseUrl.replace(/\/$/, '');
     const llms = geo.buildLlmsTxt({ siteName: body.siteName || (site && site.name), baseUrl: base, summary: body.summary, pages: body.pages || [] });
     const robots = geo.buildAiRobots({ allow: body.allow !== false, sitemapUrl: base + '/sitemap_index.xml' });
-    return { llmsTxt: llms, aiRobots: robots, note: 'Review, then publish llms.txt at site root and merge the robots rules.' };
+    if (!body.apply) {
+      return { llmsTxt: llms, aiRobots: robots, note: 'Review, then publish llms.txt at site root and merge the robots rules.' };
+    }
+    // Publish to the live site (requires the mu-plugin v1.8.0+ + write-armed).
+    if (site && site.write_armed === false && !body.force) {
+      return { llmsTxt: llms, aiRobots: robots, status: 'blocked', reason: 'site is read-only (write not armed)' };
+    }
+    const wp = clientFrom(creds);
+    const published = {};
+    try { published.llms = await wp.publishLlmsTxt(llms); } catch (e) { published.llmsError = e.message; }
+    try { published.robots = await wp.publishAiRobots(robots); } catch (e) { published.robotsError = e.message; }
+    const ok = !!(published.llms && published.llms.ok && published.robots && published.robots.ok);
+    const physicalRobots = !!(published.robots && published.robots.physicalRobots);
+    if (site) {
+      await db.logActivity({
+        site_id: site.id, type: ok ? 'verified' : 'error', actor: 'Agent', icon: 'globe',
+        text: 'Published llms.txt + AI-robots', meta: ok ? (base + '/llms.txt') : (published.llmsError || published.robotsError || 'publish failed'),
+      }).catch(() => {});
+    }
+    return { llmsTxt: llms, aiRobots: robots, applied: true, ok, published, llmsUrl: base + '/llms.txt', physicalRobots };
   },
 
   // ── DataForSEO ────────────────────────────────────────────────────────────
@@ -1975,9 +2007,21 @@ const routes = {
     if (kinds.includes('content')) {
       await push('content', cfg.table_content, airtable.mapContent(body.suggestions || [], now), airtable.SCHEMAS.content);
     }
-    // 3) GEO citation results (passed from the UI's last GEO run)
+    // 3) GEO citation results (passed from the UI's last GEO run).
+    //    De-dupe against prompts already in the table so re-scans don't pile up
+    //    duplicate rows (the table accumulates one row per prompt over time).
     if (kinds.includes('geo')) {
-      await push('geo', cfg.table_geo, airtable.mapGeo(body.geoResults || [], now), airtable.SCHEMAS.geo);
+      let geoRows = airtable.mapGeo(body.geoResults || [], now);
+      if (geoRows.length) {
+        try {
+          const t = cfg.table_geo || defaultName('geo');
+          const seen = await airtable.listFieldValues(pat, baseId, t, 'Prompt');
+          const before = geoRows.length;
+          geoRows = geoRows.filter((r) => !seen.has(String(r.Prompt || '').trim().toLowerCase()));
+          out.geoSkipped = before - geoRows.length;
+        } catch (e) { /* table may not exist yet → push all (ensureTable creates it) */ }
+      }
+      await push('geo', cfg.table_geo, geoRows, airtable.SCHEMAS.geo);
     }
     // 4) Content opportunities (keyword clusters from the Content screen).
     if (kinds.includes('opportunities')) {

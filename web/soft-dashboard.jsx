@@ -2387,7 +2387,31 @@ function GeoScreen({ ctx }) {
   const loading = ctx.geoLoading;
   const [comps, setComps] = useState("");
   const [boosting, setBoosting] = useState(false);
+  const [pushing, setPushing] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   const API = window.SentinelAPI;
+  // Push the current scan's prompt/citation results to Airtable (de-duped server-side).
+  const pushAirtable = ()=>{
+    if(!d || d.error || !((d.results||[]).length)){ ctx.toast("Run a scan first","gold"); return; }
+    setPushing(true); ctx.toast("Pushing prompt results to Airtable…","teal");
+    API.airtableSync(s.id,{kinds:["geo"],geoResults:d.results}).then(r=>{
+      if(r.error){ ctx.toast(r.needsConnect?"Connect Airtable first (Integrations screen)":r.needsConfig?"Pick an Airtable base first (Integrations screen)":r.error,"clay"); return; }
+      const g=(r.synced&&r.synced.geo)||{}; const pushed=g.pushed||0; const skipped=(r.synced&&r.synced.geoSkipped)||0;
+      ctx.toast(pushed?("Pushed "+pushed+" result(s) to Airtable"+(skipped?" · "+skipped+" already there":"")):"All results already in Airtable ✓","teal");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(false));
+  };
+  // Publish llms.txt + AI-bot robots to the LIVE site (needs mu-plugin v1.8.0 + write-armed).
+  const publishGeo = ()=>{
+    if(!window.SENTINEL_LIVE || !s._rawUrl){ ctx.toast("Connect a live site first","gold"); return; }
+    setPublishing(true); ctx.toast("Publishing llms.txt + AI robots to the site…","teal");
+    API.geoEnable(s.id,{apply:true,siteName:s.name}).then(r=>{
+      if(r.error){ ctx.toast(r.error,"clay"); return; }
+      if(r.status==="blocked"){ ctx.toast("Site is read-only — arm writes in Settings first","gold"); return; }
+      if(!r.ok){ ctx.toast("Publish failed: "+((r.published&&(r.published.llmsError||r.published.robotsError))||"update the mu-plugin to v1.8.0"),"clay"); return; }
+      ctx.toast("Published ✓ — live at "+r.llmsUrl,"teal");
+      if(r.physicalRobots) ctx.toast("Heads-up: a physical robots.txt exists and may override the AI-bot rules — remove it to let them apply.","gold");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPublishing(false));
+  };
   // AI-visibility auto-push: publish Organization/LegalService entity signals to the homepage
   // (deterministic — no Anthropic credits). These are the structured-data signals ChatGPT /
   // Perplexity / Google use to identify and cite the brand.
@@ -2400,12 +2424,21 @@ function GeoScreen({ ctx }) {
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBoosting(false));
   };
 
+  // "Show up for these" — fresh queries where AI isn't citing us yet, ordered by
+  // commercial > comparison > informational intent (highest-value gaps first).
+  const intentRank = { commercial:0, comparison:1, informational:2 };
+  const irank = (x)=> intentRank[x]===undefined ? 3 : intentRank[x];
+  const opportunities = (d && !d.error && Array.isArray(d.results))
+    ? d.results.filter(r=>!r.error && !r.targetCited).slice().sort((a,b)=>irank(a.intent)-irank(b.intent))
+    : [];
+
   return (
     <div className="rise">
       <PageHead title="AI Visibility (GEO)" sub={`Does AI cite ${s.name}? Measure share-of-AI-voice across buyer-intent prompts.`}>
         <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
           <NeoButton kind="soft" icon={boosting?undefined:"sparkles"} disabled={boosting} onClick={applyEntity}>{boosting&&<Icon name="cog" size={15} className="audit-spin" />}Publish entity signals</NeoButton>
-          <NeoButton kind="soft" icon="sparkles" onClick={ctx.runGeoEnable}>Generate llms.txt + AI robots</NeoButton>
+          <NeoButton kind="soft" icon="sparkles" onClick={ctx.runGeoEnable}>Preview llms.txt</NeoButton>
+          <NeoButton kind="soft" icon={publishing?undefined:"globe"} disabled={publishing} onClick={publishGeo}>{publishing&&<Icon name="cog" size={15} className="audit-spin" />}Publish to site</NeoButton>
           <NeoButton kind="primary" icon={loading?undefined:"globe"} disabled={loading} onClick={()=>ctx.runGeoTrack(comps)}>
             {loading && <Icon name="cog" size={17} className="audit-spin" />}{loading?"Scanning…":d?"Re-scan":"Measure AI visibility"}
           </NeoButton>
@@ -2478,9 +2511,27 @@ function GeoScreen({ ctx }) {
             </SoftCard>
           </div>
 
+          {/* opportunities — the new queries we want to show up for */}
+          {opportunities.length>0 && (
+            <SoftCard hover={false}>
+              <SectionHead sub="Fresh queries where AI isn’t citing you yet — target these next (each scan surfaces new ones)">Opportunities — show up for these</SectionHead>
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {opportunities.map((r,i)=>(
+                  <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:11, padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", boxShadow:"var(--neo-in)" }}>
+                    <Chip tone={r.intent==="commercial"?"gold":r.intent==="comparison"?"plum":"gray"} size="sm">{r.intent}</Chip>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:13.5, fontWeight:600 }}>{r.prompt}</div>
+                      {r.citedDomains && r.citedDomains.length>0 && <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:2 }}>AI currently cites: {r.citedDomains.slice(0,4).join(", ")}</div>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </SoftCard>
+          )}
+
           {/* per-prompt results */}
           <SoftCard hover={false}>
-            <SectionHead sub="Each buyer-intent query and whether AI cited you">Prompt Results</SectionHead>
+            <SectionHead sub="Each buyer-intent query and whether AI cited you" right={<NeoButton kind="soft" size="sm" icon={pushing?undefined:"grid"} disabled={pushing} onClick={pushAirtable}>{pushing&&<Icon name="cog" size={13} className="audit-spin" />}Push to Airtable</NeoButton>}>Prompt Results</SectionHead>
             <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
               {(d.results||[]).map((r,i)=>(
                 <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:12, padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
@@ -4278,7 +4329,10 @@ function App() {
       toast("Measuring AI citation visibility…","teal");
       const domain=(site._rawUrl||"").replace(/^https?:\/\//,"").replace(/\/$/,"");
       const comps=(competitors||"").split(",").map(c=>c.trim()).filter(Boolean);
-      API.geoPrompts(siteId, site.name, undefined, []).then(pr=>{  // backend grounds on the site's real page titles (stack.type was NOT the niche)
+      // Pass prompts from the prior run as exclusions so each scan surfaces NEW
+      // buyer-intent queries to target (backend also pulls prior prompts from geo_runs).
+      const priorPrompts=((geo&&geo.results)||[]).map(r=>r&&r.prompt).filter(Boolean);
+      API.geoPrompts(siteId, site.name, undefined, [], priorPrompts).then(pr=>{  // backend grounds on the site's real page titles (stack.type was NOT the niche)
         const prompts=(pr.prompts||[]).slice(0,12); // cap for cost/time
         if(!prompts.length) throw new Error("Couldn't generate buyer-intent prompts — check the Claude API key.");
         setGeoStatus("Querying "+prompts.length+" prompts through AI (web search)… ~1-2 min");
@@ -4288,6 +4342,8 @@ function App() {
         setGeo(r);
         try{ API.logActivity({site_id:siteId,owner:site.owner,type:"audit",actor:"Agent",icon:"globe",text:"AI visibility scan — "+r.shareOfVoice+"% share of voice",meta:r.promptsCited+"/"+r.promptsTotal+" prompts cited"}); }catch(e){}
         toast("AI visibility: "+r.shareOfVoice+"% share of voice","teal");
+        // Auto-push the scan to Airtable (best-effort; de-duped; silent if Airtable isn't set up).
+        try{ API.airtableSync(siteId,{kinds:["geo"],geoResults:r.results||[]}).then(res=>{ const g=res&&res.synced&&res.synced.geo; if(g&&g.pushed) toast("Pushed "+g.pushed+" prompt result(s) to Airtable","teal"); }).catch(()=>{}); }catch(e){}
       }).catch(e=>setGeo({ error:e.message })).finally(()=>{ setGeoLoading(false); setGeoStatus(""); });
     },
     // Generate llms.txt + AI-bot robots allowlist (review-then-publish).

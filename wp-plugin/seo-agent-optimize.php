@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.7.0
+ * Version:     1.8.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -37,6 +37,9 @@ class SEO_Agent_Optimize {
         add_action('wp_head', [$this, 'output_css'], 100);
         add_action('wp_head', [$this, 'meta_buffer_end'], 999);
         add_action('rest_api_init', [$this, 'routes']);
+        add_action('init', [$this, 'register_geo_settings']);
+        add_action('parse_request', [$this, 'serve_llms_txt'], 1);
+        add_filter('robots_txt', [$this, 'append_ai_robots'], 20, 2);
     }
 
     /* ── Sentinel-owned SEO meta: register for REST so writes actually stick ───
@@ -53,6 +56,38 @@ class SEO_Agent_Optimize {
                 ]);
             }
         }
+    }
+
+    /* ── GEO: llms.txt + AI-bot robots rules (managed by Sentinel) ────────────
+       The agent stores llms.txt content and AI-crawler robots directives as
+       options; we serve /llms.txt directly and merge the robots rules into the
+       virtual robots.txt. Reversible — clear the option to stop serving. */
+    public function register_geo_settings() {
+        register_setting('general', 'seoagent_llms_txt', ['type' => 'string', 'show_in_rest' => false]);
+        register_setting('general', 'seoagent_ai_robots', ['type' => 'string', 'show_in_rest' => false]);
+    }
+
+    /* Serve /llms.txt from the stored option (parse_request hands us the WP obj). */
+    public function serve_llms_txt($wp) {
+        if (isset($wp->request) && $wp->request === 'llms.txt') {
+            $c = get_option('seoagent_llms_txt', '');
+            if ($c !== '') {
+                header('Content-Type: text/plain; charset=utf-8');
+                header('X-Robots-Tag: noindex');
+                echo $c;
+                exit;
+            }
+        }
+    }
+
+    /* Merge stored AI-bot directives into the virtual robots.txt output. */
+    public function append_ai_robots($output, $public) {
+        if (!$public) return $output;
+        $r = get_option('seoagent_ai_robots', '');
+        if ($r !== '') {
+            $output = rtrim($output) . "\n\n# AI crawler directives (managed by Sentinel)\n" . $r . "\n";
+        }
+        return $output;
     }
 
     /* True when a real SEO plugin owns <head>. On those sites we stay dormant —
@@ -337,11 +372,33 @@ class SEO_Agent_Optimize {
             },
         ]);
 
+        // GEO: publish llms.txt content (served at /llms.txt by serve_llms_txt).
+        register_rest_route('seoagent/v1', '/publish-llms-txt', [
+            'methods' => 'POST', 'permission_callback' => $perm,
+            'callback' => function ($req) {
+                $content = (string) ($req->get_json_params()['content'] ?? '');
+                update_option('seoagent_llms_txt', $content);
+                $this->purge();
+                return ['ok' => true, 'bytes' => strlen($content)];
+            },
+        ]);
+
+        // GEO: publish AI-bot robots directives (merged into robots.txt by append_ai_robots).
+        register_rest_route('seoagent/v1', '/publish-ai-robots', [
+            'methods' => 'POST', 'permission_callback' => $perm,
+            'callback' => function ($req) {
+                $content = (string) ($req->get_json_params()['content'] ?? '');
+                update_option('seoagent_ai_robots', $content);
+                $this->purge();
+                return ['ok' => true, 'bytes' => strlen($content), 'physicalRobots' => file_exists(ABSPATH . 'robots.txt')];
+            },
+        ]);
+
         register_rest_route('seoagent/v1', '/optimize-selftest', [
             'methods'  => 'GET',
             'permission_callback' => $perm,
             'callback' => function () {
-                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets', 'entity_tolerant_insert', 'multi_anchor_targets', 'meta_render'], 'version' => '1.7.0', 'seo_plugin_owns_head' => $this->seo_plugin_owns_head()];
+                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets', 'entity_tolerant_insert', 'multi_anchor_targets', 'meta_render', 'geo_publish'], 'version' => '1.8.0', 'seo_plugin_owns_head' => $this->seo_plugin_owns_head()];
             },
         ]);
     }

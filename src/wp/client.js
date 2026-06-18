@@ -180,6 +180,16 @@ export class WordPressClient {
     return this.request(`${this.baseUrl}/wp-json/seoagent/v1/optimize-selftest`, { method: 'GET' });
   }
 
+  // Publish llms.txt content to the site (served at /llms.txt by the mu-plugin).
+  async publishLlmsTxt(content) {
+    return this.request(`${this.baseUrl}/wp-json/seoagent/v1/publish-llms-txt`, { method: 'POST', body: { content } });
+  }
+
+  // Publish AI-bot robots rules (merged into robots.txt by the mu-plugin).
+  async publishAiRobots(content) {
+    return this.request(`${this.baseUrl}/wp-json/seoagent/v1/publish-ai-robots`, { method: 'POST', body: { content } });
+  }
+
   // Purge page/minify/object caches (WP Rocket etc.) so re-verify reads fresh
   // HTML. Best-effort: never throws — a cache miss must not fail an apply.
   async purgeCache({ force = false } = {}) {
