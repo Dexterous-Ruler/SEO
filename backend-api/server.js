@@ -592,7 +592,40 @@ const routes = {
   'POST /geo-enable': async (body) => {
     const { creds, site } = await resolveCreds(body);
     const base = creds.baseUrl.replace(/\/$/, '');
-    const llms = geo.buildLlmsTxt({ siteName: body.siteName || (site && site.name), baseUrl: base, summary: body.summary, pages: body.pages || [] });
+    const wp = clientFrom(creds);
+    // Ground llms.txt in REAL site data so it isn't a generic stub: the WP site
+    // title + tagline, the actual key pages, and a Claude-written factual summary
+    // + per-page notes. All best-effort — never blocks generation/publish.
+    const clean = (t) => String(t || '').replace(/&#0*38;|&amp;/g, '&').replace(/&[a-z#0-9]+;/g, ' ').replace(/\s+/g, ' ').trim();
+    let siteName = body.siteName || (site && site.name) || base;
+    let tagline = '';
+    try {
+      const root = await (await fetch(base + '/wp-json', { headers: { 'User-Agent': 'wp-seo-agent/2.0' } })).json();
+      if (root && root.name) siteName = clean(root.name);
+      if (root && root.description) tagline = clean(root.description);
+    } catch (e) { /* not reachable — keep stored name */ }
+    let pages = Array.isArray(body.pages) ? body.pages : [];
+    if (!pages.length) {
+      try {
+        const got = await wp.list('pages', { perPage: 100, fields: 'title,link' });
+        pages = (got || []).map((p) => ({ title: clean(p.title && p.title.rendered), url: p.link })).filter((p) => p.title && p.url);
+      } catch (e) {}
+      if (pages.length < 3) {
+        try {
+          const posts = await wp.list('posts', { perPage: 20, fields: 'title,link' });
+          for (const p of (posts || [])) { const t = clean(p.title && p.title.rendered); if (t && p.link) pages.push({ title: t, url: p.link }); }
+        } catch (e) {}
+      }
+      pages = pages.slice(0, 15);
+    }
+    // Claude: concise factual summary + per-page notes (best-effort; falls back to tagline).
+    let summary = body.summary || '';
+    if (!summary || !pages.some((p) => p.note)) {
+      const enr = await geo.summarizeForLlms({ siteName, tagline, pages });
+      if (!summary) summary = enr.summary;
+      pages = pages.map((p) => ({ ...p, note: p.note || (enr.notes && enr.notes[p.title]) || '' }));
+    }
+    const llms = geo.buildLlmsTxt({ siteName, baseUrl: base, summary, pages });
     const robots = geo.buildAiRobots({ allow: body.allow !== false, sitemapUrl: base + '/sitemap_index.xml' });
     if (!body.apply) {
       return { llmsTxt: llms, aiRobots: robots, note: 'Review, then publish llms.txt at site root and merge the robots rules.' };
@@ -601,7 +634,6 @@ const routes = {
     if (site && site.write_armed === false && !body.force) {
       return { llmsTxt: llms, aiRobots: robots, status: 'blocked', reason: 'site is read-only (write not armed)' };
     }
-    const wp = clientFrom(creds);
     const published = {};
     try { published.llms = await wp.publishLlmsTxt(llms); } catch (e) { published.llmsError = e.message; }
     try { published.robots = await wp.publishAiRobots(robots); } catch (e) { published.robotsError = e.message; }

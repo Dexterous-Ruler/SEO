@@ -197,12 +197,54 @@ export function buildAiRobots({ allow = true, sitemapUrl } = {}) {
 }
 
 export function buildLlmsTxt({ siteName, baseUrl, summary, pages = [] }) {
-  const lines = [`# ${siteName || baseUrl}`, ''];
-  if (summary) { lines.push(`> ${summary}`); lines.push(''); }
-  lines.push('## Key pages', '');
-  for (const p of pages) lines.push(`- [${p.title || p.path}](${baseUrl}${p.path})${p.note ? ': ' + p.note : ''}`);
-  lines.push('', '## About', '', 'This file helps AI assistants understand and cite this site accurately.');
+  const name = siteName || baseUrl;
+  const lines = [`# ${name}`, ''];
+  if (summary) { lines.push(`> ${summary}`, ''); }
+  if (baseUrl) { lines.push(`Website: ${baseUrl}`, ''); }
+  const keyPages = (pages || []).filter((p) => p && (p.title || p.path || p.url));
+  if (keyPages.length) {
+    lines.push('## Key pages', '');
+    for (const p of keyPages) {
+      const href = p.url || (baseUrl ? baseUrl + (p.path || '') : (p.path || ''));
+      lines.push(`- [${p.title || p.path || href}](${href})${p.note ? ' — ' + p.note : ''}`);
+    }
+    lines.push('');
+  }
+  lines.push('## About', '');
+  if (summary) lines.push(summary, '');
+  lines.push(`This file (llms.txt) helps AI assistants understand and accurately cite ${name}.`);
   return lines.join('\n');
+}
+
+// Write llms.txt CONTENT grounded ONLY on the site's real titles: a concise,
+// factual summary of what the site does + a short note per key page. Best-effort —
+// returns { summary: tagline||'', notes: {} } on any failure so publishing never blocks.
+export async function summarizeForLlms({ siteName, tagline, pages = [] }) {
+  const titles = (pages || []).map((p) => p.title).filter(Boolean).slice(0, 30);
+  if (!titles.length) return { summary: tagline || '', notes: {} };
+  try {
+    const res = await fetch(API, {
+      method: 'POST',
+      headers: { 'x-api-key': key(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: MODEL, max_tokens: 900,
+        messages: [{
+          role: 'user',
+          content: `Write content for an llms.txt file (a file that helps AI assistants understand and cite a website).\nSite name: "${siteName}"${tagline ? `\nTagline: "${tagline}"` : ''}\nReal page titles from the site:\n${titles.map((t) => '- ' + t).join('\n')}\n\nBased STRICTLY on the above (do not invent facts or features), return ONLY JSON:\n{"summary":"1-2 plain factual sentences: what this site/product actually does and who it's for — no marketing fluff","pages":[{"title":"<exact title from the list>","note":"<a concise description of that page, max 10 words>"}]}\nInclude one entry for each page title listed. No markdown, JSON only.`,
+        }],
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) return { summary: tagline || '', notes: {} };
+    let txt = (data.content || []).map((b) => b.text || '').join('').trim();
+    const fence = txt.match(/```(?:json)?\s*([\s\S]*?)```/); if (fence) txt = fence[1];
+    const s = txt.indexOf('{'); const e = txt.lastIndexOf('}');
+    if (s >= 0 && e > s) txt = txt.slice(s, e + 1);
+    const parsed = JSON.parse(txt);
+    const notes = {};
+    for (const p of (parsed.pages || [])) if (p && p.title) notes[String(p.title).trim()] = p.note || '';
+    return { summary: parsed.summary || tagline || '', notes };
+  } catch (e) { return { summary: tagline || '', notes: {} }; }
 }
 
 export default { runCitationTracking, suggestPrompts, buildAiRobots, buildLlmsTxt };
