@@ -14,3 +14,6 @@ tmp/
 config/sites.json
 *.local.json
 web/dist/
+
+# Handoff/context log — may hold sensitive notes; NEVER commit (public repo)
+LOGS.md
