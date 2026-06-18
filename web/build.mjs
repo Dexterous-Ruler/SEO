@@ -22,7 +22,7 @@ const WEB = dirname(fileURLToPath(import.meta.url));
 const DIST = join(WEB, 'dist');
 
 // Load order matters — these run as global-scope scripts that reference each other.
-const FILES = ['config.jsx', 'api.jsx', 'helpers.jsx', 'data.jsx', 'soft-ui.jsx', 'soft-screens-a.jsx', 'soft-screens-b.jsx', 'soft-dashboard.jsx'];
+const FILES = ['config.jsx', 'api.jsx', 'helpers.jsx', 'data.jsx', 'soft-ui.jsx', 'soft-screens-a.jsx', 'soft-screens-b.jsx', 'soft-experience.jsx', 'soft-dashboard.jsx'];
 
 await rm(DIST, { recursive: true, force: true });
 await mkdir(DIST, { recursive: true });
@@ -63,5 +63,14 @@ await writeFile(join(DIST, 'index.html.gz'), gzipSync(Buffer.from(html, 'utf8'),
 
 // Copy runtime-referenced static assets (screenshots etc.) if present.
 if (existsSync(join(WEB, 'screenshots'))) await cp(join(WEB, 'screenshots'), join(DIST, 'screenshots'), { recursive: true });
+
+// Standalone first-party RUM beacon (NOT part of the dashboard bundle) — served
+// at /ux-beacon.js to WP sites by the mu-plugin loader, only when a site is armed.
+// Copied verbatim (vanilla JS, no JSX transform) + gzipped so serveStatic finds it.
+if (existsSync(join(WEB, 'ux-beacon.js'))) {
+  const beacon = await readFile(join(WEB, 'ux-beacon.js'));
+  await writeFile(join(DIST, 'ux-beacon.js'), beacon);
+  await writeFile(join(DIST, 'ux-beacon.js.gz'), gzipSync(beacon, { level: 9 }));
+}
 
 console.log(`build ✓  ${(totalIn / 1024).toFixed(0)}KB JSX → ${(totalOut / 1024).toFixed(0)}KB minified JS (gzipped on disk). Babel removed; React production.`);

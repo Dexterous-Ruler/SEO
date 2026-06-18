@@ -16,6 +16,9 @@ const SNAV_GROUPS = [
     { k:"optimize", label:"Page Fixes", icon:"bolt" },
     { k:"review",   label:"Approve Changes", icon:"list", badge:true },
     { k:"history",  label:"Audit History", icon:"trend" },
+    // Experience Monitor — hidden until the operator turns the feature on
+    // (window.SENTINEL_RUM); inert-by-default so the nav is unchanged otherwise.
+    { k:"experience", label:"Experience Monitor", icon:"gauge", gated:"rum" },
   ]},
   { group:"Plan & Create Content", items:[
     { k:"plan",     label:"Content Plan", icon:"sparkles" },
@@ -161,7 +164,7 @@ function Sidebar({ ctx, collapsed, setCollapsed }) {
                     <Icon name={open?"chevD":"chevR"} size={13} style={{ color:"var(--faint)" }} />
                   </button>
                 )}
-              {open && grp.items.map(it=>NavItem(it))}
+              {open && grp.items.filter(it=>!it.gated || (it.gated==="rum" && window.SENTINEL_RUM)).map(it=>NavItem(it))}
             </div>
           );
         })}
@@ -4609,7 +4612,7 @@ function App() {
     },
   };
 
-  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen };
+  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen, experience:ExperienceScreen };
   const Screen = SCREENS[screen] || Dashboard;
 
   let content = <Screen ctx={ctx} run />;

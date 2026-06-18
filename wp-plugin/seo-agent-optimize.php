@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.8.0
+ * Version:     1.9.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -40,6 +40,10 @@ class SEO_Agent_Optimize {
         add_action('init', [$this, 'register_geo_settings']);
         add_action('parse_request', [$this, 'serve_llms_txt'], 1);
         add_filter('robots_txt', [$this, 'append_ai_robots'], 20, 2);
+        // UX beacon (RUM) — INERT by default: prints nothing unless the
+        // seoagent_ux_beacon option is present AND armed===true (see output_ux_beacon).
+        add_action('wp_footer', [$this, 'output_ux_beacon'], 20);
+        add_action('wp_head', [$this, 'output_404_marker'], 1);
     }
 
     /* ── Sentinel-owned SEO meta: register for REST so writes actually stick ───
@@ -197,6 +201,39 @@ class SEO_Agent_Optimize {
         }
     }
 
+    /* ── UX beacon (RUM) loader — INERT BY DEFAULT ───────────────────────────
+       Consent-gated real-user-monitoring loader. Config lives in the
+       'seoagent_ux_beacon' option as a JSON string:
+         {"armed":false,"key":"","endpoint":"","sample":0.05,"consent":{"mode":"required"}}
+       INERT GUARANTEE: with the option absent or armed!==true (the default),
+       this prints NOTHING — behaviour is identical to v1.8.0. Only when the
+       agent explicitly arms it do we emit a tiny cross-origin async loader; the
+       beacon script itself self-gates on the visitor's consent. */
+    public function output_ux_beacon() {
+        if (is_admin() || is_feed()) return;
+        $raw = get_option('seoagent_ux_beacon', '');
+        if ($raw === '' || $raw === false) return;
+        $cfg = json_decode((string) $raw, true);
+        if (!is_array($cfg) || ($cfg['armed'] ?? null) !== true) return;   // INERT unless explicitly armed
+        $endpoint = isset($cfg['endpoint']) ? (string) $cfg['endpoint'] : '';
+        if ($endpoint === '') return;
+        $rum = [
+            'key'      => isset($cfg['key']) ? (string) $cfg['key'] : '',
+            'endpoint' => $endpoint,
+            'sample'   => isset($cfg['sample']) ? $cfg['sample'] : 0.05,
+            'consent'  => $cfg['consent'] ?? ['mode' => 'required'],
+            'page'     => isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '',
+        ];
+        $src = esc_url(rtrim($endpoint, '/') . '/ux-beacon.js');
+        echo "\n<script data-seoagent=\"ux-beacon\">window.__SENTINEL_RUM = " . wp_json_encode($rum) . ";</script>\n";
+        echo "<script async src=\"" . $src . "\"></script>\n";
+    }
+
+    /* Mark 404 responses so the beacon (and crawlers) can detect soft/hard 404s. */
+    public function output_404_marker() {
+        if (is_404()) echo "\n<meta name=\"sentinel-404\" content=\"1\">\n";
+    }
+
     /* Clear page caches so applied changes show immediately (not on cache expiry). */
     private function purge() {
         if (function_exists('rocket_clean_domain')) rocket_clean_domain();
@@ -237,6 +274,20 @@ class SEO_Agent_Optimize {
                 update_option('seoagent_custom_css', (string) ($p['css'] ?? ''));
                 $this->purge();
                 return ['ok' => true, 'bytes' => strlen((string) ($p['css'] ?? ''))];
+            },
+        ]);
+
+        // UX beacon (RUM) config — stores the JSON config that arms/disarms the
+        // consent-gated loader (output_ux_beacon). Default absent = INERT.
+        register_rest_route('seoagent/v1', '/set-ux-beacon', [
+            'methods'  => 'POST',
+            'permission_callback' => $perm,
+            'callback' => function ($req) {
+                $cfg = $req->get_json_params()['config'] ?? null;
+                if ($cfg === null) return new WP_Error('bad', 'config required', ['status' => 400]);
+                update_option('seoagent_ux_beacon', wp_json_encode($cfg));
+                $this->purge();
+                return ['ok' => true, 'armed' => !empty($cfg['armed'])];
             },
         ]);
 
@@ -398,7 +449,10 @@ class SEO_Agent_Optimize {
             'methods'  => 'GET',
             'permission_callback' => $perm,
             'callback' => function () {
-                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets', 'entity_tolerant_insert', 'multi_anchor_targets', 'meta_render', 'geo_publish'], 'version' => '1.8.0', 'seo_plugin_owns_head' => $this->seo_plugin_owns_head()];
+                $uxRaw = get_option('seoagent_ux_beacon', '');
+                $uxCfg = ($uxRaw !== '' && $uxRaw !== false) ? json_decode((string) $uxRaw, true) : null;
+                $uxArmed = is_array($uxCfg) && (($uxCfg['armed'] ?? null) === true);
+                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets', 'entity_tolerant_insert', 'multi_anchor_targets', 'meta_render', 'geo_publish', 'ux_beacon'], 'version' => '1.9.0', 'seo_plugin_owns_head' => $this->seo_plugin_owns_head(), 'ux_beacon_armed' => $uxArmed];
             },
         ]);
     }

@@ -48,7 +48,7 @@ import * as research from './research.js';
 import * as imageOpt from './image-optimize.js';
 import * as prompts from './prompts.js';
 import * as perplexity from './perplexity.js';
-import { limiters, infraStats, withTimeout, HEAVY_MAX_QUEUE } from './infra.js';
+import { limiters, infraStats, withTimeout, HEAVY_MAX_QUEUE, Limiter, TTLCache } from './infra.js';
 import * as jobs from './jobs.js';
 
 // Resolve credentials for an operation: prefer a stored siteId (secure — secret
@@ -649,6 +649,69 @@ const routes = {
       }).catch(() => {});
     }
     return { llmsTxt: llms, aiRobots: robots, applied: true, ok, published, llmsUrl: base + '/llms.txt', physicalRobots };
+  },
+
+  // ── Experience Monitor (UX & conversion-defect monitoring) ─────────────────
+  // ADDITIVE + INERT. Read/admin routes; the high-volume ingest is special-cased
+  // before the dispatcher (see createServer). All of this returns empty/false until
+  // RUM_ENABLED=true AND the site is armed (sites.rum_armed) — see EXPERIENCE-MONITOR-PLAN.md §12.
+  'POST /beacon-status': async (body) => {
+    const enabled = process.env.RUM_ENABLED === 'true';
+    const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    let eventCount = 0;
+    if (site) {
+      try {
+        const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/ux_events?site_id=eq.${body.siteId}&select=id`, { method: 'GET', headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE, Prefer: 'count=exact', Range: '0-0' } });
+        eventCount = Number((r.headers.get('content-range') || '').split('/')[1] || 0);
+      } catch (e) { /* table may not exist yet → 0 */ }
+    }
+    return { enabled, armed: !!(site && site.rum_armed), signedOff: !!(site && site.rum_signed_off), hasKey: !!(site && site.rum_key), eventCount };
+  },
+
+  // Worklist — aggregated defects for a site, ordered by organic-clicks-exposed.
+  'POST /ux-defects': async (body) => {
+    if (!body.siteId) return { defects: [], beacon: { armed: false } };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    let defects = [];
+    try {
+      const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/ux_defects?site_id=eq.${body.siteId}&status=eq.open&select=*&order=clicks_exposed.desc.nullslast&limit=200`, { headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE } });
+      if (r.ok) defects = await r.json();
+    } catch (e) { /* no table yet → empty worklist */ }
+    return { defects: defects || [], beacon: { armed: !!(site && site.rum_armed), signedOff: !!(site && site.rum_signed_off) } };
+  },
+
+  // Ignore / propose / apply on a defect. Fix-loop wiring (propose/apply → proposals)
+  // lands in Phase 1; the scaffold supports 'ignore' and is otherwise detect-only.
+  'POST /ux-defect-action': async (body) => {
+    if (!body.id || !body.siteId) return { error: 'id + siteId required' };
+    if (body.action === 'ignore') {
+      try {
+        await fetch(`${process.env.SUPABASE_URL}/rest/v1/ux_defects?id=eq.${body.id}&site_id=eq.${body.siteId}`, { method: 'PATCH', headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify({ status: 'ignored', updated_at: new Date().toISOString() }) });
+      } catch (e) { return { error: e.message }; }
+      return { ok: true, status: 'ignored' };
+    }
+    return { ok: false, deferred: true, note: 'Fix-loop (propose/apply → proposals → mu-plugin) wires in Phase 1; detect-only for now.' };
+  },
+
+  // Arm/disarm the beacon for a site. Gated on RUM_ENABLED + per-site compliance sign-off.
+  // Mints a per-site rum_key and tells that site's mu-plugin to (de)activate the loader.
+  'POST /arm-beacon': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    if (process.env.RUM_ENABLED !== 'true') return { ok: false, reason: 'disabled', note: 'Experience Monitor is off — set RUM_ENABLED=true on the server first.' };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    if (!site) return { error: 'site not found' };
+    if (body.on && !site.rum_signed_off) return { ok: false, reason: 'not-signed-off', note: 'Complete the per-site compliance sign-off (sets rum_signed_off) before arming.' };
+    let rumKey = site.rum_key;
+    if (body.on && !rumKey) rumKey = createHmac('sha256', process.env.SITE_SECRET_KEY || 'sentinel').update(site.id + ':' + Date.now()).digest('base64url').slice(0, 32);
+    await db.updateSite(body.siteId, { rum_armed: !!body.on, ...(rumKey ? { rum_key: rumKey } : {}) }).catch(() => {});
+    try {
+      const { creds } = await resolveCreds({ siteId: body.siteId });
+      const wp = clientFrom(creds);
+      const endpoint = process.env.PUBLIC_BASE_URL || 'https://sentinel-goodfor-2e75db85.koyeb.app';
+      const cfg = { armed: !!body.on, key: rumKey || '', endpoint, sample: Number(body.sample) || 0.05, consent: { mode: 'required' } };
+      await wp.request(`${creds.baseUrl}/wp-json/seoagent/v1/set-ux-beacon`, { method: 'POST', body: { config: cfg } });
+    } catch (e) { return { ok: true, armed: !!body.on, warn: 'site flag set, but the mu-plugin loader was not updated (needs v1.9.0): ' + e.message }; }
+    return { ok: true, armed: !!body.on };
   },
 
   // ── DataForSEO ────────────────────────────────────────────────────────────
@@ -2174,6 +2237,69 @@ const HEAVY_ROUTES = new Set([
   'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',
 ]);
 
+// ── Experience Monitor — UX beacon ingest (the high-volume hot path) ─────────
+// Cheapest route in the file: no Claude/WP/external fetch, no heavy work, a shed
+// BEFORE readBody/JSON.parse, a schema allowlist that REJECTS any PII-ish key, and
+// site_id stamped on every row. Only reached when RUM_ENABLED==='true' (default off).
+const UX_KEY_CACHE = new TTLCache({ max: 200, ttlMs: 5 * 60 * 1000 });  // rum_key → {siteId} | null
+const uxLimiter = new Limiter(4, 'ux-ingest');
+const UX_EVENT_TYPES = new Set(['js_error', 'unhandled_rejection', 'broken_resource', 'ajax_4xx', 'dest_404', 'broken_cta', 'form_validation']);
+const UX_BANNED_KEYS = ['value', 'innerHTML', 'outerHTML', 'html', 'screenshot', 'text'];   // PII / replay-adjacent — reject the whole event
+let UX_BUCKET = { tokens: 200, ts: Date.now() };  // process-wide token bucket (~20/s refill)
+function uxTakeToken() {
+  const now = Date.now();
+  const refill = Math.floor((now - UX_BUCKET.ts) / 50);
+  if (refill > 0) { UX_BUCKET.tokens = Math.min(200, UX_BUCKET.tokens + refill); UX_BUCKET.ts = now; }
+  if (UX_BUCKET.tokens <= 0) return false;
+  UX_BUCKET.tokens--; return true;
+}
+async function uxResolveSite(k) {
+  if (!k || typeof k !== 'string' || k.length > 64) return null;
+  const cached = UX_KEY_CACHE.get(k); if (cached !== undefined) return cached;
+  let site = null;
+  try {
+    const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/sites?rum_key=eq.${encodeURIComponent(k)}&select=id,rum_armed&limit=1`, { headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE } });
+    if (r.ok) { const rows = await r.json(); const row = rows && rows[0]; if (row && row.rum_armed) site = { siteId: row.id }; }
+  } catch (e) { /* unknown key → drop */ }
+  UX_KEY_CACHE.set(k, site);
+  return site;
+}
+function uxReadCapped(req, cap = 65536) {
+  return new Promise((resolve, reject) => {
+    let n = 0; const chunks = [];
+    req.on('data', (c) => { n += c.length; if (n > cap) { req.destroy(); reject(new Error('too big')); } else chunks.push(c); });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+function uxRow(ev, siteId, page, ipHash, pv, ver) {
+  if (!ev || typeof ev !== 'object') return null;
+  for (const bad of UX_BANNED_KEYS) if (Object.prototype.hasOwnProperty.call(ev, bad)) return null;  // PII guard
+  if (!UX_EVENT_TYPES.has(ev.t)) return null;
+  return {
+    site_id: siteId, page: String(page || '/').slice(0, 300), event_type: ev.t,
+    selector: ev.sel ? String(ev.sel).slice(0, 300) : null, role: ev.role ? String(ev.role).slice(0, 60) : null,
+    confidence: 'high', count: Math.min(Math.max(1, Number(ev.n) || 1), 1000),
+    detail: (ev.d && typeof ev.d === 'object' && !Array.isArray(ev.d)) ? ev.d : {},
+    ip_hash: ipHash, pv_id: pv ? String(pv).slice(0, 40) : null, beacon_ver: ver ? String(ver).slice(0, 20) : null,
+  };
+}
+async function uxBeaconIngest(req) {
+  if (Number(req.headers['content-length'] || 0) > 65536) return;   // shed BEFORE reading
+  if (!uxTakeToken()) return;                                        // process-wide rate cap
+  const raw = await uxReadCapped(req).catch(() => null);
+  if (!raw) return;
+  let body; try { body = JSON.parse(raw); } catch { return; }
+  const site = await uxResolveSite(body && body.k);
+  if (!site) return;                                                 // unknown / disarmed key
+  const ipRaw = String((req.headers['x-forwarded-for'] || '').split(',')[0] || '').trim().replace(/\.\d+$/, '.0');
+  const ipHash = createHmac('sha256', process.env.SITE_SECRET_KEY || 'sentinel').update(ipRaw + ':' + new Date().toISOString().slice(0, 10)).digest('hex').slice(0, 16);
+  const evs = Array.isArray(body.e) ? body.e.slice(0, 50) : [];
+  const rows = evs.map((ev) => uxRow(ev, site.siteId, body.p, ipHash, body.pv, body.v)).filter(Boolean);
+  if (!rows.length) return;
+  await uxLimiter.run(() => fetch(`${process.env.SUPABASE_URL}/rest/v1/ux_events`, { method: 'POST', headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify(rows) }));
+}
+
 const server = createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, {});
   const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -2268,6 +2394,13 @@ setTimeout(function(){try{window.close();}catch(e){} if(!window.closed){location
       clearInterval(heartbeat);
     }
     return res.end();
+  }
+
+  // ── UX beacon ingest (Experience Monitor) — special-cased: 204 empty so
+  // sendBeacon stays fire-and-forget; cheapest path; INERT unless RUM_ENABLED.
+  if (key === 'POST /ux-beacon') {
+    if (process.env.RUM_ENABLED === 'true') { try { await uxBeaconIngest(req); } catch (e) { /* never surface to the beacon */ } }
+    res.writeHead(204); return res.end();
   }
 
   const handler = routes[key];

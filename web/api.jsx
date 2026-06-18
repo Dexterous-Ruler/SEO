@@ -122,6 +122,11 @@
     geoPrompts(siteId, siteName, niche, sampleTitles, exclude) { return engine("/geo-prompts", { siteId, siteName, niche, sampleTitles, exclude }); },
     geoTrack(siteId, targetDomain, prompts, competitors) { return engine("/geo-track", { siteId, targetDomain, prompts, competitors }); },
     geoEnable(siteId, opts) { return engine("/geo-enable", Object.assign({ siteId }, opts || {})); },
+    // Experience Monitor (UX/conversion defects) — inert until RUM_ENABLED + site armed.
+    beaconStatus(siteId) { return engine("/beacon-status", { siteId }); },
+    uxDefects(siteId, opts) { return engine("/ux-defects", Object.assign({ siteId }, opts || {})); },
+    uxDefectAction(id, action, siteId) { return engine("/ux-defect-action", { id, action, siteId }); },
+    armBeacon(siteId, on, sample) { return engine("/arm-beacon", { siteId, on, sample }); },
     semrushSnapshot(siteId, domain, db) { return engine("/semrush-snapshot", { siteId, domain, db }); },
     semrushKeywordGap(target, competitor, db, siteId) { return engine("/semrush-keyword-gap", { target, competitor, db, siteId }); },
     semrushStriking(domain, db) { return engine("/semrush-striking", { domain, db }); },

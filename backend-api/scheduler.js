@@ -187,12 +187,48 @@ async function jobAutoApplyCss(site) {
   } catch (e) { console.error('[scheduler] auto-apply-css', site.id, e && e.message); }
 }
 
+// ── Experience Monitor — rollup + prune (INERT until RUM_ENABLED + site armed) ──
+// Both early-return when RUM_ENABLED!=='true', so the hourly sweep does one extra
+// boolean check and nothing else by default. Scaffold-level rollup (windowed group
+// → upsert); Phase 1 adds incremental accumulation + GSC-clicks join + RICE + a
+// draining watermark cursor (see EXPERIENCE-MONITOR-PLAN.md §8/§9).
+const HOUR = 60 * 60 * 1000;
+async function jobUxRollup(site) {
+  if (process.env.RUM_ENABLED !== 'true' || !site.rum_armed) return;
+  const since = new Date(Date.now() - 24 * HOUR).toISOString();
+  let events = [];
+  try { events = await sb(`ux_events?site_id=eq.${site.id}&received_at=gte.${since}&select=page,event_type,selector,role,count,pv_id,detail,received_at&order=received_at.asc&limit=1000`); } catch (e) { return; }
+  if (!events || !events.length) return;
+  const groups = new Map();
+  for (const ev of events) {
+    const sig = `${ev.page}|${ev.event_type}|${ev.selector || ''}`.slice(0, 500);
+    let g = groups.get(sig);
+    if (!g) { g = { sig, page: ev.page, event_type: ev.event_type, selector: ev.selector || null, occurrences: 0, sessions: new Set(), last: ev.received_at, sample: ev.detail || {} }; groups.set(sig, g); }
+    g.occurrences += Number(ev.count) || 1;
+    if (ev.pv_id) g.sessions.add(ev.pv_id);
+    if (ev.received_at > g.last) g.last = ev.received_at;
+  }
+  const rows = [...groups.values()].map((g) => ({
+    site_id: site.id, page: g.page, event_type: g.event_type, selector: g.selector, signature: g.sig,
+    confidence: 'high', occurrences: g.occurrences, sessions: g.sessions.size,
+    last_seen: g.last, sample_detail: g.sample, status: 'open', updated_at: new Date().toISOString(),
+  }));
+  try { await sbReq('ux_defects?on_conflict=site_id,signature', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify(rows) }); } catch (e) {}
+}
+async function jobUxPrune(site) {
+  if (process.env.RUM_ENABLED !== 'true') return;
+  const cutoff = new Date(Date.now() - 72 * HOUR).toISOString();
+  try { await sbReq(`ux_events?site_id=eq.${site.id}&received_at=lt.${cutoff}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }); } catch (e) {}
+}
+
 const JOBS = [
   { name: 'auto-index', every: DAY, run: jobAutoIndex },
   { name: 'gsc-health', every: DAY, run: jobGscHealth },
   { name: 'keyword-push', every: 7 * DAY, run: jobKeywordPush },
   { name: 'image-optimize', every: 7 * DAY, run: jobAutoOptimizeImages },
   { name: 'apply-css', every: 7 * DAY, run: jobAutoApplyCss },
+  { name: 'ux-rollup', every: HOUR, run: jobUxRollup },   // inert until RUM_ENABLED + rum_armed
+  { name: 'ux-prune',  every: DAY,  run: jobUxPrune },    // inert until RUM_ENABLED
 ];
 
 async function tick() {
