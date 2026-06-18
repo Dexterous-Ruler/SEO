@@ -1852,14 +1852,24 @@ const routes = {
     const pat = await db.getAirtablePat(siteId);
     if (!pat) return { error: 'Airtable not connected', needsConnect: true };
     const cfg = await db.getAirtableConfig(siteId);
-    if (!cfg || !cfg.base_id || !cfg.table_gaps) return { error: 'Configure the Airtable base + table first.', needsConfig: true };
+    if (!cfg || !cfg.base_id) return { error: 'Configure the Airtable base first.', needsConfig: true };
     try {
-      const [tables, page] = await Promise.all([
-        airtable.listTables(pat, cfg.base_id),
-        airtable.listRecords(pat, cfg.base_id, cfg.table_gaps, { pageSize: body.pageSize || 50, offset: body.offset }),
-      ]);
-      const table = tables.find((t) => t.id === cfg.table_gaps || t.name === cfg.table_gaps);
-      return { fields: table ? table.fields : [], tableName: table && table.name, records: page.records, offset: page.offset, keywordField: cfg.table_content || 'Keyword' };
+      const tables = await airtable.listTables(pat, cfg.base_id);
+      if (!tables.length) return { error: 'No tables in this Airtable base.', needsConfig: true };
+      // Which table to show: an explicit body.table (id/name) if it's in the base,
+      // else the configured keyword table, else the first table. Lets the grid switch
+      // between the keyword/content table and the GEO "AI Citation Results" table.
+      let target = null;
+      if (body.table) target = tables.find((t) => t.id === body.table || t.name === body.table);
+      if (!target && cfg.table_gaps) target = tables.find((t) => t.id === cfg.table_gaps || t.name === cfg.table_gaps);
+      if (!target) target = tables[0];
+      const page = await airtable.listRecords(pat, cfg.base_id, target.id, { pageSize: body.pageSize || 50, offset: body.offset });
+      return {
+        fields: target.fields || [], tableName: target.name, tableId: target.id,
+        records: page.records, offset: page.offset,
+        tables: tables.map((t) => ({ id: t.id, name: t.name })),
+        keywordField: cfg.table_content || 'Keyword',
+      };
     } catch (e) { return { error: e.message }; }
   },
   // Patch one record's fields (inline cell edit / Status change that triggers n8n).
@@ -1867,9 +1877,11 @@ const routes = {
     const pat = await db.getAirtablePat(body.siteId);
     if (!pat) return { error: 'Airtable not connected' };
     const cfg = await db.getAirtableConfig(body.siteId);
-    if (!cfg || !cfg.base_id || !cfg.table_gaps) return { error: 'Not configured' };
+    if (!cfg || !cfg.base_id) return { error: 'Not configured' };
     if (!body.recordId) return { error: 'recordId required' };
-    try { return { record: await airtable.updateRecord(pat, cfg.base_id, cfg.table_gaps, body.recordId, body.fields || {}) }; }
+    const tbl = body.table || cfg.table_gaps;  // edit the table the grid is viewing
+    if (!tbl) return { error: 'Not configured' };
+    try { return { record: await airtable.updateRecord(pat, cfg.base_id, tbl, body.recordId, body.fields || {}) }; }
     catch (e) { return { error: e.message }; }
   },
   // Add a new row.
@@ -1877,8 +1889,10 @@ const routes = {
     const pat = await db.getAirtablePat(body.siteId);
     if (!pat) return { error: 'Airtable not connected' };
     const cfg = await db.getAirtableConfig(body.siteId);
-    if (!cfg || !cfg.base_id || !cfg.table_gaps) return { error: 'Not configured' };
-    try { return { record: await airtable.createRecord(pat, cfg.base_id, cfg.table_gaps, body.fields || {}) }; }
+    if (!cfg || !cfg.base_id) return { error: 'Not configured' };
+    const tbl = body.table || cfg.table_gaps;
+    if (!tbl) return { error: 'Not configured' };
+    try { return { record: await airtable.createRecord(pat, cfg.base_id, tbl, body.fields || {}) }; }
     catch (e) { return { error: e.message }; }
   },
 

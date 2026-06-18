@@ -3518,27 +3518,29 @@ function GridCell({ field, value, onSave }) {
 
 function AirtableGrid({ ctx, siteId }) {
   const API = window.SentinelAPI;
-  const [d,setD] = useState(null);          // { fields, records, offset, tableName, keywordField }
+  const [d,setD] = useState(null);          // { fields, records, offset, tableName, tableId, tables }
   const [loading,setLoading] = useState(false);
   const [err,setErr] = useState(null);
   const [saving,setSaving] = useState(0);
+  const [table,setTable] = useState(null);  // selected table id (null → backend default = keyword table)
   const load = (offset)=>{
     setLoading(true); setErr(null);
-    API.airtableRecords(siteId,{ offset, pageSize:50 }).then(r=>{
+    API.airtableRecords(siteId,{ offset, pageSize:50, table }).then(r=>{
       if(r.error){ setErr(r.error); return; }
       setD(prev=> (offset&&prev) ? { ...r, records:[...prev.records, ...r.records] } : r);
     }).catch(e=>setErr(e.message)).finally(()=>setLoading(false));
   };
-  useEffect(()=>{ setD(null); load(); },[siteId]);
+  useEffect(()=>{ setD(null); },[siteId]);          // blank on site switch (different base)
+  useEffect(()=>{ load(); },[siteId, table]);       // (re)load on site OR table switch (no blank → smooth)
   const saveCell=(recId, fieldName, value)=>{
     setD(p=>({ ...p, records:p.records.map(r=>r.id===recId?{ ...r, fields:{ ...r.fields, [fieldName]:value } }:r) }));
     setSaving(c=>c+1);
-    API.airtableUpdateRecord(siteId, recId, { [fieldName]:value })
+    API.airtableUpdateRecord(siteId, recId, { [fieldName]:value }, d&&d.tableId)
       .then(r=>{ if(r.error) ctx.toast("Save failed: "+r.error,"clay"); })
       .catch(e=>ctx.toast("Save failed: "+e.message,"clay")).finally(()=>setSaving(c=>c-1));
   };
   const addRow=()=>{
-    API.airtableCreateRecord(siteId,{}).then(r=>{ if(r.error){ ctx.toast("Add failed: "+r.error,"clay"); return; } setD(p=>({ ...p, records:[r.record, ...p.records] })); ctx.toast("Row added — fill it in","teal"); }).catch(e=>ctx.toast(e.message,"clay"));
+    API.airtableCreateRecord(siteId,{}, d&&d.tableId).then(r=>{ if(r.error){ ctx.toast("Add failed: "+r.error,"clay"); return; } setD(p=>({ ...p, records:[r.record, ...p.records] })); ctx.toast("Row added — fill it in","teal"); }).catch(e=>ctx.toast(e.message,"clay"));
   };
 
   if(err) return <SoftCard hover={false}><ErrBanner msg={err} onRetry={()=>{ setErr(null); load(); }} /></SoftCard>;
@@ -3548,10 +3550,17 @@ function AirtableGrid({ ctx, siteId }) {
     <SoftCard hover={false} style={{ padding:0, overflow:"hidden" }}>
       <div style={{ display:"flex", alignItems:"center", gap:12, padding:"15px 18px", borderBottom:"1px solid var(--line-soft)", flexWrap:"wrap" }}>
         <div style={{ flex:1, minWidth:160 }}>
-          <div style={{ fontSize:15.5, fontWeight:800 }}>{d.tableName||"Records"}</div>
-          <div style={{ fontSize:11.5, color:"var(--muted)" }}>{d.records.length} loaded{d.offset?" · more available":""} · edits save live to Airtable</div>
+          {(d.tables && d.tables.length>1) ? (
+            <select value={d.tableId||""} onChange={e=>setTable(e.target.value)}
+              style={{ fontSize:15, fontWeight:800, padding:"6px 10px", borderRadius:"var(--r-md)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", color:"var(--ink)", outline:"none", maxWidth:340, cursor:"pointer" }}>
+              {d.tables.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          ) : (
+            <div style={{ fontSize:15.5, fontWeight:800 }}>{d.tableName||"Records"}</div>
+          )}
+          <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:3 }}>{d.records.length} loaded{d.offset?" · more available":""} · edits save live to Airtable</div>
         </div>
-        {saving>0 && <Chip tone="gold" size="sm"><Icon name="cog" size={11} className="audit-spin" />Saving…</Chip>}
+        {(saving>0||loading) && <Chip tone="gold" size="sm"><Icon name="cog" size={11} className="audit-spin" />{saving>0?"Saving…":"Loading…"}</Chip>}
         <NeoButton kind="primary" size="sm" icon="plus" onClick={addRow}>Add row</NeoButton>
       </div>
       <div className="scroll" style={{ overflowX:"auto", maxHeight:560, overflowY:"auto" }}>

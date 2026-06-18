@@ -205,8 +205,8 @@
     airtablePushKeywords(siteId, keywords) { return engine("/airtable-push-keywords", { siteId, keywords }); },
     // Embedded editable grid
     airtableRecords(siteId, opts) { return engine("/airtable-records", Object.assign({ siteId }, opts || {})); },
-    airtableUpdateRecord(siteId, recordId, fields) { return engine("/airtable-update-record", { siteId, recordId, fields }); },
-    airtableCreateRecord(siteId, fields) { return engine("/airtable-create-record", { siteId, fields }); },
+    airtableUpdateRecord(siteId, recordId, fields, table) { return engine("/airtable-update-record", { siteId, recordId, fields, table }); },
+    airtableCreateRecord(siteId, fields, table) { return engine("/airtable-create-record", { siteId, fields, table }); },
     airtableSync(siteId, opts) { return engine("/airtable-sync", Object.assign({ siteId }, opts || {})); },
     async listAirtableLog(siteId) { return sbSelect("airtable_sync_log", "site_id=eq." + siteId + "&select=*&order=created_at.desc&limit=15"); },
     connect(creds) { return engine("/connect", { creds }); },
