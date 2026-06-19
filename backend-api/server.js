@@ -312,7 +312,7 @@ const routes = {
     };
   },
   // Observability: live load, provider limiter/breaker state, cache hit rates.
-  'GET /status': async () => ({ ok: true, version: '2.0', uptimeSec: Math.round(process.uptime()), inFlight: INFLIGHT, infra: infraStats(), jobs: jobs.stats() }),
+  'GET /status': async () => ({ ok: true, version: '2.0', uptimeSec: Math.round(process.uptime()), inFlight: INFLIGHT, infra: infraStats(), jobs: jobs.stats(), ux: { enabled: process.env.RUM_ENABLED === 'true', ...uxStats } }),
 
   // ── Durable job queue ──────────────────────────────────────────────────────
   // Enqueue a registered background job → returns the job (poll /jobs/get).
@@ -668,29 +668,68 @@ const routes = {
     return { enabled, armed: !!(site && site.rum_armed), signedOff: !!(site && site.rum_signed_off), hasKey: !!(site && site.rum_key), eventCount };
   },
 
-  // Worklist — aggregated defects for a site, ordered by organic-clicks-exposed.
+  // Worklist — aggregated defects for a site. Derived metrics (defect_rate,
+  // clicks_exposed) are computed HERE from the accumulated counts + the GSC clicks
+  // joined in the rollup, so they're never stale. "exposed" is directional, not "lost".
   'POST /ux-defects': async (body) => {
     if (!body.siteId) return { defects: [], beacon: { armed: false } };
     const site = await db.getSite(body.siteId).catch(() => null);
-    let defects = [];
+    let rows = [];
     try {
-      const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/ux_defects?site_id=eq.${body.siteId}&status=eq.open&select=*&order=clicks_exposed.desc.nullslast&limit=200`, { headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE } });
-      if (r.ok) defects = await r.json();
+      const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/ux_defects?site_id=eq.${body.siteId}&status=eq.open&select=*&order=occurrences.desc&limit=300`, { headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE } });
+      if (r.ok) rows = await r.json();
     } catch (e) { /* no table yet → empty worklist */ }
-    return { defects: defects || [], beacon: { armed: !!(site && site.rum_armed), signedOff: !!(site && site.rum_signed_off) } };
+    const W = { high: 1, moderate: 0.5, low: 0.25 };
+    const defects = (rows || []).map((d) => {
+      const dr = d.pageviews_seen > 0 ? Math.min((d.occurrences || 0) / d.pageviews_seen, 1) : null;
+      const w = W[d.confidence] || 0.5;
+      const exposed = (d.gsc_clicks != null && dr != null) ? Math.round(d.gsc_clicks * dr * w) : null;
+      return { ...d, defect_rate: dr, clicks_exposed: exposed, rice_score: exposed };
+    });
+    defects.sort((a, b) => (b.clicks_exposed || 0) - (a.clicks_exposed || 0) || (b.occurrences || 0) - (a.occurrences || 0));
+    const totals = { exposed: defects.reduce((s, d) => s + (d.clicks_exposed || 0), 0), defects: defects.length };
+    return { defects: defects.slice(0, 200), totals, beacon: { armed: !!(site && site.rum_armed), signedOff: !!(site && site.rum_signed_off) } };
   },
 
-  // Ignore / propose / apply on a defect. Fix-loop wiring (propose/apply → proposals)
-  // lands in Phase 1; the scaffold supports 'ignore' and is otherwise detect-only.
+  // Ignore / propose / apply on a defect. 'propose' (and 'apply', which v1 routes the
+  // same way for human approval) create a normal `proposals` row → it flows through the
+  // EXISTING Review Queue → approval → mu-plugin loop. No new fix-side write surface.
   'POST /ux-defect-action': async (body) => {
     if (!body.id || !body.siteId) return { error: 'id + siteId required' };
+    const patch = async (fields) => fetch(`${process.env.SUPABASE_URL}/rest/v1/ux_defects?id=eq.${body.id}&site_id=eq.${body.siteId}`, { method: 'PATCH', headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify({ ...fields, updated_at: new Date().toISOString() }) });
     if (body.action === 'ignore') {
-      try {
-        await fetch(`${process.env.SUPABASE_URL}/rest/v1/ux_defects?id=eq.${body.id}&site_id=eq.${body.siteId}`, { method: 'PATCH', headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify({ status: 'ignored', updated_at: new Date().toISOString() }) });
-      } catch (e) { return { error: e.message }; }
+      try { await patch({ status: 'ignored' }); } catch (e) { return { error: e.message }; }
       return { ok: true, status: 'ignored' };
     }
-    return { ok: false, deferred: true, note: 'Fix-loop (propose/apply → proposals → mu-plugin) wires in Phase 1; detect-only for now.' };
+    if (body.action === 'propose' || body.action === 'apply') {
+      // Load the defect, map it to a proposal via the remediation matrix, enqueue it.
+      let d = null;
+      try { const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/ux_defects?id=eq.${body.id}&site_id=eq.${body.siteId}&select=*&limit=1`, { headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE } }); const rows = r.ok ? await r.json() : []; d = rows[0]; } catch (e) {}
+      if (!d) return { error: 'defect not found' };
+      const det = d.sample_detail || {};
+      const M = {
+        broken_resource: { channel: 'rest-write', field: 'image URL', before: det.src || d.selector || d.page, after: 'Replace the broken image with a working same-origin URL.' },
+        ajax_4xx: { channel: 'manual', field: 'endpoint', before: (det.src || '') + (det.status ? ' → ' + det.status : ''), after: 'Fix the failing first-party request / form handler.' },
+        dest_404: { channel: 'rest-write', field: 'internal link', before: 'landed on 404, referred from ' + (det.referrer || d.page), after: 'Re-point the source link to the correct live URL (or add a 301).' },
+        broken_cta: { channel: 'manual', field: 'CTA href', before: '“' + (det.label || '') + '” → ' + (d.selector || ''), after: 'Set the CTA href to its intended destination.' },
+        form_validation: { channel: 'manual', field: (det.field || 'field') + ' (' + (det.validity || '') + ')', before: 'repeated validation failure', after: 'Clarify the field requirement / fix the validation rule.' },
+        js_error: { channel: 'manual', field: 'JS error', before: det.message || '(uncaught error)', after: 'Investigate the uncaught JavaScript error on this page.' },
+        unhandled_rejection: { channel: 'manual', field: 'JS promise', before: det.message || '(unhandled rejection)', after: 'Investigate the unhandled promise rejection on this page.' },
+      };
+      const m = M[d.event_type] || { channel: 'manual', field: d.event_type, before: d.selector || d.page, after: 'Review this UX defect.' };
+      let created = null;
+      try {
+        created = await db.createProposal({
+          site_id: body.siteId, finding_id: d.signature, disc: 'experience', risk: 'low',
+          channel: m.channel, title: 'UX: ' + d.event_type.replace(/_/g, ' ') + ' — ' + d.page,
+          page: d.page, impact: '+UX', target: 'staging', field: m.field,
+          before_val: String(m.before).slice(0, 500), after_val: m.after, status: 'proposed',
+        });
+      } catch (e) { return { error: 'could not create proposal: ' + e.message }; }
+      try { await patch({ status: 'proposed', proposal_id: created && created.id }); } catch (e) {}
+      return { ok: true, status: 'proposed', proposalId: created && created.id, note: 'Added to the Review Queue — approve there to push it live.' };
+    }
+    return { error: 'unknown action' };
   },
 
   // Arm/disarm the beacon for a site. Gated on RUM_ENABLED + per-site compliance sign-off.
@@ -2242,9 +2281,13 @@ const HEAVY_ROUTES = new Set([
 // BEFORE readBody/JSON.parse, a schema allowlist that REJECTS any PII-ish key, and
 // site_id stamped on every row. Only reached when RUM_ENABLED==='true' (default off).
 const UX_KEY_CACHE = new TTLCache({ max: 200, ttlMs: 5 * 60 * 1000 });  // rum_key → {siteId} | null
+const UX_SITE_RATE = new TTLCache({ max: 200, ttlMs: 60 * 1000 });      // siteId → events this minute (flood breaker)
 const uxLimiter = new Limiter(4, 'ux-ingest');
-const UX_EVENT_TYPES = new Set(['js_error', 'unhandled_rejection', 'broken_resource', 'ajax_4xx', 'dest_404', 'broken_cta', 'form_validation']);
+const UX_EVENT_TYPES = new Set(['js_error', 'unhandled_rejection', 'broken_resource', 'ajax_4xx', 'dest_404', 'broken_cta', 'form_validation', 'pageview']);
 const UX_BANNED_KEYS = ['value', 'innerHTML', 'outerHTML', 'html', 'screenshot', 'text'];   // PII / replay-adjacent — reject the whole event
+const UX_DETAIL_KEYS = ['message', 'source', 'lineno', 'colno', 'stackHash', 'src', 'status', 'tag', 'referrer', 'label', 'field', 'fieldType', 'validity'];  // PII-free, scrubbed at source
+const UX_MODERATE = new Set(['broken_cta']);   // heuristic/composite → MODERATE confidence (never auto-applied)
+const uxStats = { accepted: 0, droppedCap: 0, droppedRate: 0, tripped: 0 };  // surfaced on /status
 let UX_BUCKET = { tokens: 200, ts: Date.now() };  // process-wide token bucket (~20/s refill)
 function uxTakeToken() {
   const now = Date.now();
@@ -2272,21 +2315,24 @@ function uxReadCapped(req, cap = 65536) {
     req.on('error', reject);
   });
 }
-function uxRow(ev, siteId, page, ipHash, pv, ver) {
+function uxRow(ev, siteId, page, ipHash, pv) {
   if (!ev || typeof ev !== 'object') return null;
-  for (const bad of UX_BANNED_KEYS) if (Object.prototype.hasOwnProperty.call(ev, bad)) return null;  // PII guard
-  if (!UX_EVENT_TYPES.has(ev.t)) return null;
+  for (const bad of UX_BANNED_KEYS) if (Object.prototype.hasOwnProperty.call(ev, bad)) return null;  // PII guard (defence-in-depth; beacon already scrubs)
+  const t = ev.type;                                  // beacon wire shape: { type, count, selector, +detail fields }
+  if (!UX_EVENT_TYPES.has(t)) return null;
+  const detail = {};
+  for (const f of UX_DETAIL_KEYS) { const v = ev[f]; if (v !== undefined && v !== null) detail[f] = (typeof v === 'string') ? v.slice(0, 200) : v; }
   return {
-    site_id: siteId, page: String(page || '/').slice(0, 300), event_type: ev.t,
-    selector: ev.sel ? String(ev.sel).slice(0, 300) : null, role: ev.role ? String(ev.role).slice(0, 60) : null,
-    confidence: 'high', count: Math.min(Math.max(1, Number(ev.n) || 1), 1000),
-    detail: (ev.d && typeof ev.d === 'object' && !Array.isArray(ev.d)) ? ev.d : {},
-    ip_hash: ipHash, pv_id: pv ? String(pv).slice(0, 40) : null, beacon_ver: ver ? String(ver).slice(0, 20) : null,
+    site_id: siteId, page: String(page || '/').slice(0, 300), event_type: t,
+    selector: ev.selector ? String(ev.selector).slice(0, 300) : null, role: null,
+    confidence: UX_MODERATE.has(t) ? 'moderate' : 'high',
+    count: Math.min(Math.max(1, Number(ev.count) || 1), 1000),
+    detail, ip_hash: ipHash, pv_id: pv ? String(pv).slice(0, 40) : null, beacon_ver: null,
   };
 }
 async function uxBeaconIngest(req) {
-  if (Number(req.headers['content-length'] || 0) > 65536) return;   // shed BEFORE reading
-  if (!uxTakeToken()) return;                                        // process-wide rate cap
+  if (Number(req.headers['content-length'] || 0) > 65536) { uxStats.droppedCap++; return; }  // shed BEFORE reading
+  if (!uxTakeToken()) { uxStats.droppedRate++; return; }                                       // process-wide rate cap
   const raw = await uxReadCapped(req).catch(() => null);
   if (!raw) return;
   let body; try { body = JSON.parse(raw); } catch { return; }
@@ -2295,8 +2341,21 @@ async function uxBeaconIngest(req) {
   const ipRaw = String((req.headers['x-forwarded-for'] || '').split(',')[0] || '').trim().replace(/\.\d+$/, '.0');
   const ipHash = createHmac('sha256', process.env.SITE_SECRET_KEY || 'sentinel').update(ipRaw + ':' + new Date().toISOString().slice(0, 10)).digest('hex').slice(0, 16);
   const evs = Array.isArray(body.e) ? body.e.slice(0, 50) : [];
-  const rows = evs.map((ev) => uxRow(ev, site.siteId, body.p, ipHash, body.pv, body.v)).filter(Boolean);
+  const rows = evs.map((ev) => uxRow(ev, site.siteId, body.p, ipHash, body.pv)).filter(Boolean);
   if (!rows.length) return;
+  // Per-site flood circuit-breaker: a broken deploy floods js_error at 100% sampling.
+  // >2000 events/min from one site → auto-disarm it (the events we 100%-sample are
+  // exactly what a flood produces). Stops accepting immediately + alerts.
+  const rate = (UX_SITE_RATE.get(site.siteId) || 0) + rows.length;
+  UX_SITE_RATE.set(site.siteId, rate);
+  if (rate > 2000) {
+    uxStats.tripped++;
+    UX_KEY_CACHE.set(body.k, null);  // disarm in-cache instantly (until TTL refresh from DB)
+    db.updateSite(site.siteId, { rum_armed: false }).catch(() => {});
+    db.logActivity({ site_id: site.siteId, type: 'alert', actor: 'Experience Monitor', icon: 'alert', text: 'Beacon auto-disarmed — ingest flood (>2000 events/min)', meta: 'circuit-breaker' }).catch(() => {});
+    return;
+  }
+  uxStats.accepted += rows.length;
   await uxLimiter.run(() => fetch(`${process.env.SUPABASE_URL}/rest/v1/ux_events`, { method: 'POST', headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify(rows) }));
 }
 

@@ -63,6 +63,9 @@
 
   var ORIGIN = location.origin;
   var ENDPOINT = String(CFG.endpoint).replace(/\/+$/, '') + '/ux-beacon';
+  // Ephemeral per-page-view id (NOT a persistent visitor id; never stored/reused) —
+  // lets the server count distinct page-views as "sessions" for a defect.
+  var PV = (Math.random().toString(36).slice(2, 10) + Date.now().toString(36)).slice(0, 16);
 
   // ---- Scrub-at-source helpers ----
   function pathOnly(url) {
@@ -200,6 +203,7 @@
       var payload = {
         k: CFG.key,
         p: location.pathname,
+        pv: PV,
         ts: Date.now(),
         sampled: SAMPLED,
         e: events
@@ -399,6 +403,9 @@
       checkDest404();
       // Idle DOM scans only when NOT sampled out (skip for always-only mode).
       if (SAMPLED) {
+        // Pageview denominator: one per sampled-in page view, shares the
+        // sampling denominator with the idle DOM-scan defects below.
+        capture({ type: 'pageview' });
         var ric = window.requestIdleCallback || function (cb) { return setTimeout(cb, 1); };
         ric(function () { scanBrokenCtas(); });
       }

@@ -193,27 +193,70 @@ async function jobAutoApplyCss(site) {
 // → upsert); Phase 1 adds incremental accumulation + GSC-clicks join + RICE + a
 // draining watermark cursor (see EXPERIENCE-MONITOR-PLAN.md §8/§9).
 const HOUR = 60 * 60 * 1000;
+// GSC landing-page map (clicks/position) per site, cached 1h so the hourly rollup
+// doesn't re-hit the GSC API every tick. Powers the organic-clicks-exposed join.
+const uxGscCache = Object.create(null);
+async function uxGscMap(site) {
+  const c = uxGscCache[site.id];
+  if (c && Date.now() - c.at < HOUR) return c.map;
+  const map = {};
+  try {
+    const saStr = await db.getGscSa(site.id).catch(() => null);
+    const property = site.gsc_property;
+    if (saStr && property) {
+      const snap = await gsc.snapshot(JSON.parse(saStr), property, { days: 28 });
+      for (const p of (snap.topPages || [])) {
+        let path = p.page; try { path = new URL(p.page).pathname; } catch (e) {}
+        map[path] = { clicks: p.clicks || 0, position: p.position != null ? p.position : null };
+      }
+    }
+  } catch (e) { /* GSC optional → no clicks_exposed for this site */ }
+  uxGscCache[site.id] = { at: Date.now(), map };
+  return map;
+}
+// Watermark for the draining cursor (separate job key so the tick's cadence mark()
+// on 'ux-rollup' doesn't clobber it). Advanced ONLY after a successful merge.
+async function markWatermark(siteId, iso) {
+  mem[`${siteId}:ux-rollup-wm`] = Date.parse(iso);
+  if (!RUNS_OK) return;
+  try { await sbReq('scheduler_runs?on_conflict=site_id,job', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates' }, body: JSON.stringify({ site_id: siteId, job: 'ux-rollup-wm', last_run: iso }) }); } catch (e) {}
+}
 async function jobUxRollup(site) {
   if (process.env.RUM_ENABLED !== 'true' || !site.rum_armed) return;
-  const since = new Date(Date.now() - 24 * HOUR).toISOString();
+  const T = new Date().toISOString();                                  // snapshot upper bound
+  const wmMs = await getLastRun(site.id, 'ux-rollup-wm');
+  const since = new Date(wmMs || (Date.now() - 72 * HOUR)).toISOString();
   let events = [];
-  try { events = await sb(`ux_events?site_id=eq.${site.id}&received_at=gte.${since}&select=page,event_type,selector,role,count,pv_id,detail,received_at&order=received_at.asc&limit=1000`); } catch (e) { return; }
+  try { events = await sb(`ux_events?site_id=eq.${site.id}&received_at=gt.${encodeURIComponent(since)}&received_at=lte.${encodeURIComponent(T)}&select=page,event_type,selector,count,pv_id,detail,received_at&order=received_at.asc&limit=3000`); } catch (e) { return; }
   if (!events || !events.length) return;
+  const pv = Object.create(null);     // page → pageview count (the defect_rate denominator)
   const groups = new Map();
   for (const ev of events) {
+    if (ev.event_type === 'pageview') { pv[ev.page] = (pv[ev.page] || 0) + (Number(ev.count) || 1); continue; }
     const sig = `${ev.page}|${ev.event_type}|${ev.selector || ''}`.slice(0, 500);
     let g = groups.get(sig);
-    if (!g) { g = { sig, page: ev.page, event_type: ev.event_type, selector: ev.selector || null, occurrences: 0, sessions: new Set(), last: ev.received_at, sample: ev.detail || {} }; groups.set(sig, g); }
-    g.occurrences += Number(ev.count) || 1;
-    if (ev.pv_id) g.sessions.add(ev.pv_id);
+    if (!g) { g = { sig, page: ev.page, event_type: ev.event_type, selector: ev.selector || null, occ: 0, sess: new Set(), last: ev.received_at, sample: ev.detail || {} }; groups.set(sig, g); }
+    g.occ += Number(ev.count) || 1;
+    if (ev.pv_id) g.sess.add(ev.pv_id);
     if (ev.received_at > g.last) g.last = ev.received_at;
   }
-  const rows = [...groups.values()].map((g) => ({
-    site_id: site.id, page: g.page, event_type: g.event_type, selector: g.selector, signature: g.sig,
-    confidence: 'high', occurrences: g.occurrences, sessions: g.sessions.size,
-    last_seen: g.last, sample_detail: g.sample, status: 'open', updated_at: new Date().toISOString(),
-  }));
-  try { await sbReq('ux_defects?on_conflict=site_id,signature', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify(rows) }); } catch (e) {}
+  if (!groups.size) { await markWatermark(site.id, T); return; }       // pageviews-only window
+  const gmap = await uxGscMap(site);
+  const MOD = new Set(['broken_cta']);
+  const rows = [...groups.values()].map((g) => {
+    const j = gmap[g.page] || null;
+    return {
+      site_id: site.id, page: g.page, event_type: g.event_type, selector: g.selector, signature: g.sig,
+      confidence: MOD.has(g.event_type) ? 'moderate' : 'high',
+      occurrences: g.occ, sessions: g.sess.size, pageviews_seen: pv[g.page] || 0,
+      last_seen: g.last, sample_detail: g.sample,
+      gsc_clicks: j ? j.clicks : null, gsc_position: j ? j.position : null,
+    };
+  });
+  try {
+    await sbReq('rpc/ux_defect_merge', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ rows }) });
+    await markWatermark(site.id, T);   // advance ONLY after a successful atomic merge
+  } catch (e) { /* leave watermark unchanged → retry this window next tick */ }
 }
 async function jobUxPrune(site) {
   if (process.env.RUM_ENABLED !== 'true') return;
