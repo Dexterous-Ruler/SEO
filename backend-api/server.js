@@ -680,8 +680,14 @@ const routes = {
       if (r.ok) rows = await r.json();
     } catch (e) { /* no table yet → empty worklist */ }
     const W = { high: 1, moderate: 0.5, low: 0.25 };
+    const ALWAYS = new Set(['js_error', 'unhandled_rejection', 'broken_resource', 'ajax_4xx', 'dest_404']);  // captured at 100%, not sampled
     const defects = (rows || []).map((d) => {
-      const dr = d.pageviews_seen > 0 ? Math.min((d.occurrences || 0) / d.pageviews_seen, 1) : null;
+      const sr = (d.sample_detail && Number(d.sample_detail.sr) > 0) ? Number(d.sample_detail.sr) : 1;
+      // ALWAYS-types: occurrences are 100%-basis but pageviews_seen is sampled-basis — scale the
+      // numerator by sr so the rate matches its denominator (prevents the ~100% inflation). Sampled
+      // idle-scan types (broken_cta/form_validation) already share the sampled basis.
+      const num = ALWAYS.has(d.event_type) ? (d.occurrences || 0) * sr : (d.occurrences || 0);
+      const dr = d.pageviews_seen > 0 ? Math.min(num / d.pageviews_seen, 1) : null;
       const w = W[d.confidence] || 0.5;
       const exposed = (d.gsc_clicks != null && dr != null) ? Math.round(d.gsc_clicks * dr * w) : null;
       return { ...d, defect_rate: dr, clicks_exposed: exposed, rice_score: exposed };
@@ -706,6 +712,8 @@ const routes = {
       let d = null;
       try { const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/ux_defects?id=eq.${body.id}&site_id=eq.${body.siteId}&select=*&limit=1`, { headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE } }); const rows = r.ok ? await r.json() : []; d = rows[0]; } catch (e) {}
       if (!d) return { error: 'defect not found' };
+      const siteRow = await db.getSite(body.siteId).catch(() => null);
+      if (!siteRow || !siteRow.owner) return { error: 'site not found or has no owner' };  // proposals.owner is NOT NULL + RLS-scoped
       const det = d.sample_detail || {};
       const M = {
         broken_resource: { channel: 'rest-write', field: 'image URL', before: det.src || d.selector || d.page, after: 'Replace the broken image with a working same-origin URL.' },
@@ -720,7 +728,7 @@ const routes = {
       let created = null;
       try {
         created = await db.createProposal({
-          site_id: body.siteId, finding_id: d.signature, disc: 'experience', risk: 'low',
+          site_id: body.siteId, owner: siteRow.owner, finding_id: d.signature, disc: 'experience', risk: 'low',
           channel: m.channel, title: 'UX: ' + d.event_type.replace(/_/g, ' ') + ' — ' + d.page,
           page: d.page, impact: '+UX', target: 'staging', field: m.field,
           before_val: String(m.before).slice(0, 500), after_val: m.after, status: 'proposed',
@@ -2332,16 +2340,20 @@ function uxRow(ev, siteId, page, ipHash, pv) {
 }
 async function uxBeaconIngest(req) {
   if (Number(req.headers['content-length'] || 0) > 65536) { uxStats.droppedCap++; return; }  // shed BEFORE reading
-  if (!uxTakeToken()) { uxStats.droppedRate++; return; }                                       // process-wide rate cap
   const raw = await uxReadCapped(req).catch(() => null);
   if (!raw) return;
   let body; try { body = JSON.parse(raw); } catch { return; }
   const site = await uxResolveSite(body && body.k);
-  if (!site) return;                                                 // unknown / disarmed key
-  const ipRaw = String((req.headers['x-forwarded-for'] || '').split(',')[0] || '').trim().replace(/\.\d+$/, '.0');
+  if (!site) return;                                                 // unknown/disarmed key — drop BEFORE spending a token (so a bad client can't starve real sites)
+  if (!uxTakeToken()) { uxStats.droppedRate++; return; }             // process-wide rate cap
+  // Anonymise the client IP before hashing: /24 for IPv4, /64 (first 4 hextets) for IPv6.
+  let ipRaw = String((req.headers['x-forwarded-for'] || '').split(',')[0] || '').trim();
+  ipRaw = ipRaw.includes(':') ? (ipRaw.split(':').slice(0, 4).join(':') + '::') : ipRaw.replace(/\.\d+$/, '.0');
   const ipHash = createHmac('sha256', process.env.SITE_SECRET_KEY || 'sentinel').update(ipRaw + ':' + new Date().toISOString().slice(0, 10)).digest('hex').slice(0, 16);
+  const sr = (Number(body.sr) > 0 && Number(body.sr) <= 1) ? Number(body.sr) : null;
   const evs = Array.isArray(body.e) ? body.e.slice(0, 50) : [];
   const rows = evs.map((ev) => uxRow(ev, site.siteId, body.p, ipHash, body.pv)).filter(Boolean);
+  if (sr != null) for (const r of rows) r.detail = { ...r.detail, sr };  // carry sample rate → per-type defect_rate normalisation at read
   if (!rows.length) return;
   // Per-site flood circuit-breaker: a broken deploy floods js_error at 100% sampling.
   // >2000 events/min from one site → auto-disarm it (the events we 100%-sample are

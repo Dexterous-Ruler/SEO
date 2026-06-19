@@ -165,7 +165,9 @@
   var idleTimer = null;
 
   function keyOf(ev) {
-    return (ev.type || '') + '|' + (ev.selector || '') + '|' + (ev.stackHash || '');
+    // Include the identity-bearing field per type so distinct broken_resource /
+    // ajax_4xx (src+status) and dest_404 (referrer) don't collapse into ONE row.
+    return (ev.type || '') + '|' + (ev.selector || ev.src || ev.referrer || '') + '|' + (ev.stackHash || ev.status || '');
   }
 
   function capture(ev) {
@@ -206,6 +208,7 @@
         pv: PV,
         ts: Date.now(),
         sampled: SAMPLED,
+        sr: sample,          // sample rate → lets the server normalise defect_rate per type
         e: events
       };
       var body = JSON.stringify(payload);
@@ -396,7 +399,7 @@
     document.addEventListener('visibilitychange', function () {
       try { if (document.visibilityState === 'hidden') { flush(); } } catch (e) {}
     });
-    window.addEventListener('pagehide', safe(flush));
+    window.addEventListener('pagehide', safe(function () { flush(); sent = true; }));  // terminal: stop buffering after the final flush
 
     // load-time work
     var onReady = function () {

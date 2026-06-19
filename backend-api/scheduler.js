@@ -211,7 +211,9 @@ async function uxGscMap(site) {
       }
     }
   } catch (e) { /* GSC optional → no clicks_exposed for this site */ }
-  uxGscCache[site.id] = { at: Date.now(), map };
+  // Don't cache an EMPTY map for the full hour (a transient GSC failure would blank
+  // clicks_exposed across all defects until the TTL); at:0 forces a retry next rollup.
+  uxGscCache[site.id] = { at: Object.keys(map).length ? Date.now() : 0, map };
   return map;
 }
 // Watermark for the draining cursor (separate job key so the tick's cadence mark()
@@ -229,6 +231,9 @@ async function jobUxRollup(site) {
   let events = [];
   try { events = await sb(`ux_events?site_id=eq.${site.id}&received_at=gt.${encodeURIComponent(since)}&received_at=lte.${encodeURIComponent(T)}&select=page,event_type,selector,count,pv_id,detail,received_at&order=received_at.asc&limit=3000`); } catch (e) { return; }
   if (!events || !events.length) return;
+  // If we hit the page cap, advance the watermark only to the LAST row we actually read
+  // (not to T) so events between it and T aren't skipped — the next tick resumes there.
+  const drained = events.length >= 3000 ? events[events.length - 1].received_at : T;
   const pv = Object.create(null);     // page → pageview count (the defect_rate denominator)
   const groups = new Map();
   for (const ev of events) {
@@ -240,7 +245,7 @@ async function jobUxRollup(site) {
     if (ev.pv_id) g.sess.add(ev.pv_id);
     if (ev.received_at > g.last) g.last = ev.received_at;
   }
-  if (!groups.size) { await markWatermark(site.id, T); return; }       // pageviews-only window
+  if (!groups.size) { await markWatermark(site.id, drained); return; }   // pageviews-only window (nothing to merge → safe non-transactional advance)
   const gmap = await uxGscMap(site);
   const MOD = new Set(['broken_cta']);
   const rows = [...groups.values()].map((g) => {
@@ -254,9 +259,11 @@ async function jobUxRollup(site) {
     };
   });
   try {
-    await sbReq('rpc/ux_defect_merge', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ rows }) });
-    await markWatermark(site.id, T);   // advance ONLY after a successful atomic merge
-  } catch (e) { /* leave watermark unchanged → retry this window next tick */ }
+    // Merge + watermark advance happen ATOMICALLY inside the RPC (migration 006): if the
+    // merge commits, the watermark commits; if it throws, both roll back → re-drain is safe.
+    await sbReq('rpc/ux_defect_merge', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ rows, p_site: site.id, p_watermark: drained }) });
+    mem[`${site.id}:ux-rollup-wm`] = Date.parse(drained);   // mirror to mem cache (DB watermark written transactionally by the RPC)
+  } catch (e) { /* leave watermark unchanged → retry this window next tick (merge rolled back, no double-count) */ }
 }
 async function jobUxPrune(site) {
   if (process.env.RUM_ENABLED !== 'true') return;
