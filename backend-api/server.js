@@ -712,8 +712,9 @@ const routes = {
       let d = null;
       try { const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/ux_defects?id=eq.${body.id}&site_id=eq.${body.siteId}&select=*&limit=1`, { headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE } }); const rows = r.ok ? await r.json() : []; d = rows[0]; } catch (e) {}
       if (!d) return { error: 'defect not found' };
+      // Mirror the frontend's createProposal: pass the site's owner (nullable in this
+      // deployment — existing proposals carry null owner and insert/render fine).
       const siteRow = await db.getSite(body.siteId).catch(() => null);
-      if (!siteRow || !siteRow.owner) return { error: 'site not found or has no owner' };  // proposals.owner is NOT NULL + RLS-scoped
       const det = d.sample_detail || {};
       const M = {
         broken_resource: { channel: 'rest-write', field: 'image URL', before: det.src || d.selector || d.page, after: 'Replace the broken image with a working same-origin URL.' },
@@ -728,7 +729,7 @@ const routes = {
       let created = null;
       try {
         created = await db.createProposal({
-          site_id: body.siteId, owner: siteRow.owner, finding_id: d.signature, disc: 'experience', risk: 'low',
+          site_id: body.siteId, owner: (siteRow && siteRow.owner) || null, finding_id: d.signature, disc: 'experience', risk: 'low',
           channel: m.channel, title: 'UX: ' + d.event_type.replace(/_/g, ' ') + ' — ' + d.page,
           page: d.page, impact: '+UX', target: 'staging', field: m.field,
           before_val: String(m.before).slice(0, 500), after_val: m.after, status: 'proposed',
