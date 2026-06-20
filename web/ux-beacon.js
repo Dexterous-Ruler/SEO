@@ -40,12 +40,16 @@
     try {
       if (window.__SENTINEL_CONSENT === true) { return true; }
       if (c && c.cookie) {
-        var needle = c.cookie + '=' + (c.value || '');
         var cookies = String(document.cookie || '').split(/;\s*/);
         for (var i = 0; i < cookies.length; i++) {
-          if (cookies[i] === needle) { return true; }
-          if (!c.value && cookies[i].indexOf(c.cookie + '=') === 0 &&
-              cookies[i].length > (c.cookie.length + 1)) { return true; }
+          var eq = cookies[i].indexOf('=');
+          if (eq < 0 || cookies[i].slice(0, eq) !== c.cookie) { continue; }
+          var val = cookies[i].slice(eq + 1);
+          var dec = val; try { dec = decodeURIComponent(val); } catch (e) {}
+          // contains: CMPs that pack every category into one cookie (CookieYes, Cookiebot…)
+          if (c.contains) { if (val.indexOf(c.contains) !== -1 || dec.indexOf(c.contains) !== -1) { return true; } }
+          else if (c.value) { if (val === c.value) { return true; } }   // exact (e.g. cmplz_statistics=allow)
+          else if (val) { return true; }                                // any non-empty value
         }
       }
     } catch (e) {}

@@ -33,6 +33,7 @@ import * as geo from './geo.js';
 // the module exposes the identical interface + return shapes.
 import * as semrush from './dataforseo.js';
 import * as airtable from './airtable.js';
+import * as adapters from './consent-adapters.js';
 import * as chatbot from './chat.js';
 import * as gsc from './gsc.js';
 import * as gscIndex from './gsc-index.js';
@@ -765,6 +766,60 @@ const routes = {
       await wp.request(`${creds.baseUrl}/wp-json/seoagent/v1/set-ux-beacon`, { method: 'POST', body: { config: cfg } });
     } catch (e) { return { ok: true, armed: !!body.on, warn: 'site flag set, but the mu-plugin loader was not updated (needs v1.9.0): ' + e.message }; }
     return { ok: true, armed: !!body.on };
+  },
+
+  // Probe a site's consent + tracker stack (READ-ONLY) — drives the UX Activation panel.
+  // Detects the installed CMP + the consent cookie to gate on, lists trackers needing a
+  // gate, and reports armed / signed-off / mu-plugin state. siteId optional → all sites.
+  'POST /site-probe': async (body) => {
+    const list = body.siteId ? [await db.getSite(body.siteId).catch(() => null)].filter(Boolean) : await db.listSites().catch(() => []);
+    const sites = [];
+    for (const site of list) {
+      const row = { siteId: site.id, name: site.name, url: site.url, armed: !!site.rum_armed, signedOff: !!site.rum_signed_off, hasKey: !!site.rum_key };
+      try {
+        const { creds } = await resolveCreds({ siteId: site.id });
+        const wp = clientFrom(creds);
+        const plugins = await wp.request('/plugins?_fields=plugin,status&per_page=200').catch(() => null);
+        if (Array.isArray(plugins)) {
+          const active = plugins.filter((p) => p && p.status === 'active').map((p) => String(p.plugin || '').split('/')[0].toLowerCase());
+          const { cmp, trackers } = adapters.detectConsent(active);
+          row.pluginsReadable = true;
+          row.cmp = cmp ? { name: cmp.name, slug: cmp.slug, cookie: cmp.cookie, value: cmp.value || null, contains: cmp.contains || null, review: !!cmp.review } : null;
+          row.trackers = trackers.map((t) => ({ name: t.name, match: t.match }));
+          row.consent = adapters.consentConfigFor(cmp);   // null → no CMP: needs first-party banner / manual install
+        } else {
+          row.pluginsReadable = false;   // WP /plugins blocked (security plugin/host) — mu-plugin probe is the fallback
+        }
+        const self = await wp.request(`${creds.baseUrl}/wp-json/seoagent/v1/optimize-selftest`).catch(() => null);
+        row.muPlugin = self ? { reachable: true, version: (self && (self.version || self.v)) || null } : { reachable: false };
+      } catch (e) { row.error = e.message; }
+      sites.push(row);
+    }
+    return { sites, rumEnabled: process.env.RUM_ENABLED === 'true' };
+  },
+
+  // Static self-test: fetch the homepage and verify the wiring observable server-side
+  // (beacon loader + RUM config injected, a CMP present, tracker present + best-effort
+  // neutralization). Cookie-on-accept + client-side blocking are verified in-browser, or
+  // post-arm via /status ux.accepted climbing.
+  'POST /beacon-selftest': async (body) => {
+    const { creds } = await resolveCreds({ siteId: body.siteId });
+    const base = String(creds.baseUrl || '').replace(/\/+$/, '');
+    let html = '';
+    try {
+      const r = await fetch(base + '/?sentinel_selftest=' + Date.now(), { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SentinelSelfTest/1.0)' }, redirect: 'follow' });
+      html = (await r.text()) || '';
+    } catch (e) { return { error: 'fetch failed: ' + e.message }; }
+    const lower = html.toLowerCase();
+    const checks = {
+      beaconLoaderPresent: /ux-beacon\.js/.test(lower),
+      sentinelRumConfig: /__sentinel_rum/.test(lower),
+      cmpPresent: /(cmplz|complianz|cookieyes|cookie-law-info|cookiebot|borlabs|moove_gdpr|cookie_notice)/.test(lower),
+      hotjarPresent: /hotjar/.test(lower),
+    };
+    const m = lower.match(/<script[^>]*>[^]*?hotjar[^]*?<\/script>/);
+    checks.hotjarNeutralizedServerSide = checks.hotjarPresent ? (m ? /text\/plain/.test(m[0]) : null) : null;   // advisory: many CMPs block client-side
+    return { url: base, checks };
   },
 
   // ── DataForSEO ────────────────────────────────────────────────────────────
