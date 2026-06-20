@@ -214,6 +214,14 @@ export const SCHEMAS = {
     { name: 'AI Cited Domains', type: 'multilineText' },
     { name: 'Synced At', type: 'dateTime', options: { dateFormat: { name: 'iso' }, timeFormat: { name: '24hour' }, timeZone: 'utc' } },
   ],
+  // Competitor share-of-voice (the GEO scan's SECOND result set) — its own table.
+  geo_competitors: [
+    { name: 'Domain', type: 'singleLineText' },
+    { name: 'Is You', type: 'checkbox', options: { icon: 'check', color: 'greenBright' } },
+    { name: 'Citations', type: 'number', options: { precision: 0 } },
+    { name: 'Share %', type: 'number', options: { precision: 0 } },
+    { name: 'Scanned At', type: 'dateTime', options: { dateFormat: { name: 'iso' }, timeFormat: { name: '24hour' }, timeZone: 'utc' } },
+  ],
   // Content opportunities = the content backlog a writer works from.
   opportunities: [
     { name: 'Title', type: 'singleLineText' },
@@ -256,6 +264,16 @@ export function mapGeo(results, now) {
     'AI Cited Domains': (r.citedDomains || []).join(', '), 'Synced At': now,
   }));
 }
+// Competitor share-of-voice rows (your own domain first, then competitors). Each
+// scan is a timestamped snapshot so the table becomes a share-of-voice trend.
+export function mapCompetitors(competitors, target, now) {
+  const rows = [];
+  if (target && target.domain) rows.push({ Domain: target.domain, 'Is You': true, Citations: Number(target.cited) || 0, 'Share %': Number(target.share) || 0, 'Scanned At': now });
+  for (const c of (competitors || [])) {
+    if (c && c.domain) rows.push({ Domain: c.domain, 'Is You': false, Citations: Number(c.cited) || 0, 'Share %': Number(c.share) || 0, 'Scanned At': now });
+  }
+  return rows;
+}
 export function mapOpportunities(clusters, now) {
   return (clusters || []).map((c) => ({
     Title: c.suggestedTitle || c.label, 'Primary Keyword': c.primaryKeyword || '', Cluster: c.label || '',
@@ -281,4 +299,4 @@ function briefToText(b) {
   return lines.join('\n');
 }
 
-export default { listBases, listTables, ensureTable, ensureField, createRecords, listRecords, updateRecord, createRecord, listFieldValues, pushKeywords, SCHEMAS, mapGaps, mapContent, mapGeo, mapOpportunities };
+export default { listBases, listTables, ensureTable, ensureField, createRecords, listRecords, updateRecord, createRecord, listFieldValues, pushKeywords, SCHEMAS, mapGaps, mapContent, mapGeo, mapCompetitors, mapOpportunities };

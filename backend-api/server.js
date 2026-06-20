@@ -2150,7 +2150,7 @@ const routes = {
       out[kind] = { pushed, table };
       await db.logAirtableSync({ site_id: siteId, kind, records_pushed: pushed, status: 'ok' });
     }
-    function defaultName(k) { return { gaps: 'SEO Keyword Gaps', content: 'Content Suggestions', geo: 'AI Citation Results', opportunities: 'Content Opportunities' }[k]; }
+    function defaultName(k) { return { gaps: 'SEO Keyword Gaps', content: 'Content Suggestions', geo: 'AI Citation Results', geo_competitors: 'AI Competitor Share', opportunities: 'Content Opportunities' }[k]; }
 
     // 1) Keyword gaps (DataForSEO) — needs a competitor; uses body.competitor or the data passed in.
     if (kinds.includes('gaps')) {
@@ -2182,6 +2182,11 @@ const routes = {
         } catch (e) { /* table may not exist yet → push all (ensureTable creates it) */ }
       }
       await push('geo', cfg.table_geo, geoRows, airtable.SCHEMAS.geo);
+      // Competitor share-of-voice — the SECOND result set. Different shape, so its own
+      // dedicated table ('AI Competitor Share') in the same base. Each scan appends a
+      // timestamped snapshot (no de-dupe → a share-of-voice trend over time).
+      const compRows = airtable.mapCompetitors(body.geoCompetitors || [], body.geoTarget || null, now);
+      if (compRows.length) await push('geo_competitors', cfg.table_geo_competitors, compRows, airtable.SCHEMAS.geo_competitors);
     }
     // 4) Content opportunities (keyword clusters from the Content screen).
     if (kinds.includes('opportunities')) {

@@ -2396,11 +2396,12 @@ function GeoScreen({ ctx }) {
   // Push the current scan's prompt/citation results to Airtable (de-duped server-side).
   const pushAirtable = ()=>{
     if(!d || d.error || !((d.results||[]).length)){ ctx.toast("Run a scan first","gold"); return; }
-    setPushing(true); ctx.toast("Pushing prompt results to Airtable…","teal");
-    API.airtableSync(s.id,{kinds:["geo"],geoResults:d.results}).then(r=>{
+    setPushing(true); ctx.toast("Pushing prompt + competitor results to Airtable…","teal");
+    API.airtableSync(s.id,{kinds:["geo"],geoResults:d.results,geoCompetitors:d.competitors||[],geoTarget:{domain:d.targetDomain,share:d.shareOfVoice,cited:d.promptsCited}}).then(r=>{
       if(r.error){ ctx.toast(r.needsConnect?"Connect Airtable first (Integrations screen)":r.needsConfig?"Pick an Airtable base first (Integrations screen)":r.error,"clay"); return; }
       const g=(r.synced&&r.synced.geo)||{}; const pushed=g.pushed||0; const skipped=(r.synced&&r.synced.geoSkipped)||0;
-      ctx.toast(pushed?("Pushed "+pushed+" result(s) to Airtable"+(skipped?" · "+skipped+" already there":"")):"All results already in Airtable ✓","teal");
+      const comp=(r.synced&&r.synced.geo_competitors)||{}; const compPushed=comp.pushed||0;
+      ctx.toast((pushed?("Pushed "+pushed+" prompt result(s)"+(skipped?" · "+skipped+" already there":"")):"Prompts already in Airtable")+(compPushed?(" · "+compPushed+" competitor row(s)"):"")+" ✓","teal");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(false));
   };
   // Publish llms.txt + AI-bot robots to the LIVE site (needs mu-plugin v1.8.0 + write-armed).
@@ -4355,7 +4356,8 @@ function App() {
         try{ API.logActivity({site_id:siteId,owner:site.owner,type:"audit",actor:"Agent",icon:"globe",text:"AI visibility scan — "+r.shareOfVoice+"% share of voice",meta:r.promptsCited+"/"+r.promptsTotal+" prompts cited"}); }catch(e){}
         toast("AI visibility: "+r.shareOfVoice+"% share of voice","teal");
         // Auto-push the scan to Airtable (best-effort; de-duped; silent if Airtable isn't set up).
-        try{ API.airtableSync(siteId,{kinds:["geo"],geoResults:r.results||[]}).then(res=>{ const g=res&&res.synced&&res.synced.geo; if(g&&g.pushed) toast("Pushed "+g.pushed+" prompt result(s) to Airtable","teal"); }).catch(()=>{}); }catch(e){}
+        // Sends BOTH result sets: prompt citations + competitor share-of-voice.
+        try{ API.airtableSync(siteId,{kinds:["geo"],geoResults:r.results||[],geoCompetitors:r.competitors||[],geoTarget:{domain:r.targetDomain,share:r.shareOfVoice,cited:r.promptsCited}}).then(res=>{ const g=res&&res.synced&&res.synced.geo; const c=res&&res.synced&&res.synced.geo_competitors; const n=(g&&g.pushed)||0, m=(c&&c.pushed)||0; if(n||m) toast("Pushed "+n+" result(s)"+(m?(" + "+m+" competitor row(s)"):"")+" to Airtable","teal"); }).catch(()=>{}); }catch(e){}
       }).catch(e=>setGeo({ error:e.message })).finally(()=>{ setGeoLoading(false); setGeoStatus(""); });
     },
     // Generate llms.txt + AI-bot robots allowlist (review-then-publish).
