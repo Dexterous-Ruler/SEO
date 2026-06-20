@@ -756,7 +756,12 @@ const routes = {
       const { creds } = await resolveCreds({ siteId: body.siteId });
       const wp = clientFrom(creds);
       const endpoint = process.env.PUBLIC_BASE_URL || 'https://sentinel-goodfor-2e75db85.koyeb.app';
-      const cfg = { armed: !!body.on, key: rumKey || '', endpoint, sample: Number(body.sample) || Number(process.env.RUM_SAMPLE) || 0.05, consent: { mode: 'required' } };
+      // Consent gate: the beacon stays inert until this cookie=value is present. Defaults to
+      // Complianz's per-category statistics cookie (cmplz_statistics=allow), overridable per-arm
+      // via body.consent. Fail-safe: if the cookie is never set, the beacon never collects.
+      const consentCookie = (body.consent && body.consent.cookie) ? String(body.consent.cookie) : 'cmplz_statistics';
+      const consentValue = (body.consent && body.consent.value != null) ? String(body.consent.value) : 'allow';
+      const cfg = { armed: !!body.on, key: rumKey || '', endpoint, sample: Number(body.sample) || Number(process.env.RUM_SAMPLE) || 0.05, consent: { mode: 'required', cookie: consentCookie, value: consentValue } };
       await wp.request(`${creds.baseUrl}/wp-json/seoagent/v1/set-ux-beacon`, { method: 'POST', body: { config: cfg } });
     } catch (e) { return { ok: true, armed: !!body.on, warn: 'site flag set, but the mu-plugin loader was not updated (needs v1.9.0): ' + e.message }; }
     return { ok: true, armed: !!body.on };
