@@ -130,6 +130,7 @@
     siteProbe(siteId) { return engine("/site-probe", siteId ? { siteId } : {}); },
     beaconSelftest(siteId) { return engine("/beacon-selftest", { siteId }); },
     setConsentBanner(siteId, opts) { return engine("/set-consent-banner", Object.assign({ siteId }, opts || {})); },
+    pushMuUpdate(siteId) { return engine("/push-mu-update", { siteId }); },
     semrushSnapshot(siteId, domain, db) { return engine("/semrush-snapshot", { siteId, domain, db }); },
     semrushKeywordGap(target, competitor, db, siteId) { return engine("/semrush-keyword-gap", { target, competitor, db, siteId }); },
     semrushStriking(domain, db) { return engine("/semrush-striking", { domain, db }); },

@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.10.0
+ * Version:     1.11.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -18,6 +18,8 @@
 if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
+
+    const VERSION = '1.11.0';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -530,7 +532,43 @@ class SEO_Agent_Optimize {
                 $cbRaw = get_option('seoagent_consent_banner', '');
                 $cbCfg = ($cbRaw !== '' && $cbRaw !== false) ? json_decode((string) $cbRaw, true) : null;
                 $cbOn = is_array($cbCfg) && (($cbCfg['enabled'] ?? null) === true);
-                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets', 'entity_tolerant_insert', 'multi_anchor_targets', 'meta_render', 'geo_publish', 'ux_beacon', 'consent_banner'], 'version' => '1.10.0', 'seo_plugin_owns_head' => $this->seo_plugin_owns_head(), 'ux_beacon_armed' => $uxArmed, 'consent_banner_enabled' => $cbOn];
+                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets', 'entity_tolerant_insert', 'multi_anchor_targets', 'meta_render', 'geo_publish', 'ux_beacon', 'consent_banner', 'self_update'], 'version' => self::VERSION, 'seo_plugin_owns_head' => $this->seo_plugin_owns_head(), 'ux_beacon_armed' => $uxArmed, 'consent_banner_enabled' => $cbOn];
+            },
+        ]);
+
+        // SELF-UPDATE — replace this mu-plugin with a newer version pushed by the
+        // authenticated backend. Hardened: ADMIN-ONLY; the code travels in the request
+        // body (never fetched from a request-supplied URL); sha256 + header/class/size
+        // checks; downgrade blocked; backup + loopback health-check + auto-rollback so a
+        // bad file can't brick the site (on hosts where loopback is blocked it fails safe,
+        // staying on the current version).
+        register_rest_route('seoagent/v1', '/self-update', [
+            'methods'  => 'POST',
+            'permission_callback' => function () { return current_user_can('manage_options'); },
+            'callback' => function ($req) {
+                $p    = $req->get_json_params();
+                $code = isset($p['code']) ? (string) $p['code'] : '';
+                $ver  = isset($p['version']) ? (string) $p['version'] : '';
+                $hash = isset($p['sha256']) ? strtolower((string) $p['sha256']) : '';
+                if (strlen($code) < 5000) return new WP_Error('bad', 'code missing or too small', ['status' => 400]);
+                if (hash('sha256', $code) !== $hash) return new WP_Error('hash', 'sha256 mismatch', ['status' => 400]);
+                if (strpos($code, '<?php') !== 0) return new WP_Error('bad', 'not a PHP file', ['status' => 400]);
+                if (strpos($code, 'Plugin Name: SEO Agent') === false || strpos($code, 'class SEO_Agent_Optimize') === false) return new WP_Error('bad', 'not the SEO Agent plugin', ['status' => 400]);
+                if ($ver === '' || version_compare($ver, self::VERSION, '<')) return new WP_Error('ver', 'refusing downgrade (' . $ver . ' < ' . self::VERSION . ')', ['status' => 400]);
+                $file = __FILE__;
+                if (!is_writable($file)) return new WP_Error('perm', 'plugin file not writable on this host — update manually', ['status' => 500]);
+                $current = @file_get_contents($file);
+                if ($current === false) return new WP_Error('read', 'could not read current plugin', ['status' => 500]);
+                if (@file_put_contents($file, $code) === false) return new WP_Error('write', 'write failed', ['status' => 500]);
+                // Loopback: a FRESH request loads the NEW code. THIS request still runs the
+                // OLD code in memory, so if the new file fatals we restore the backup here.
+                $resp = wp_remote_get(add_query_arg('seoagent_uphc', (string) time(), home_url('/')), ['timeout' => 15, 'redirection' => 1, 'sslverify' => false, 'headers' => ['Cache-Control' => 'no-cache']]);
+                $rc = is_wp_error($resp) ? 0 : (int) wp_remote_retrieve_response_code($resp);
+                if ($rc <= 0 || $rc >= 500) {
+                    @file_put_contents($file, $current);   // ROLLBACK — new version unhealthy
+                    return new WP_Error('health', 'new version failed health-check (HTTP ' . $rc . ') — rolled back to ' . self::VERSION, ['status' => 500]);
+                }
+                return ['ok' => true, 'updated_to' => $ver, 'health' => $rc];
             },
         ]);
     }

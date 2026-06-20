@@ -26,6 +26,8 @@ RUN npm pkg delete dependencies devDependencies scripts \
 # stage and already includes web/dist (the optimized bundle the server prefers).
 COPY backend-api ./backend-api
 COPY src ./src
+# Canonical mu-plugin — read at runtime by /push-mu-update to self-update sites.
+COPY wp-plugin ./wp-plugin
 COPY --from=webbuild /build/web ./web
 
 ENV NODE_ENV=production

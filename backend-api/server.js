@@ -8,10 +8,10 @@
 // server is stateless and can serve multiple WordPress accounts.
 // ===========================================================================
 import { createServer } from 'node:http';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, createHash, timingSafeEqual } from 'node:crypto';
 import { URL } from 'node:url';
 import { readFile, stat } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, normalize, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WordPressClient } from '../src/wp/client.js';
@@ -71,6 +71,19 @@ const PORT = Number(process.env.PORT || process.env.API_PORT || 8787);
 const WEB_SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'web');
 const WEB_DIST = join(WEB_SRC, 'dist');
 const WEB_DIR = existsSync(join(WEB_DIST, 'index.html')) ? WEB_DIST : WEB_SRC;
+
+// Canonical mu-plugin shipped in the container — read by /push-mu-update to self-update
+// sites. Cached after first read (immutable per deploy).
+const MU_PLUGIN_FILE = join(dirname(fileURLToPath(import.meta.url)), '..', 'wp-plugin', 'seo-agent-optimize.php');
+let _muCache = null;
+function readMuPlugin() {
+  if (_muCache) return _muCache;
+  const code = readFileSync(MU_PLUGIN_FILE, 'utf8');
+  const version = (code.match(/Version:\s*([0-9][0-9.]*)/) || [])[1] || '';
+  const sha256 = createHash('sha256').update(code, 'utf8').digest('hex');
+  _muCache = { code, version, sha256 };
+  return _muCache;
+}
 const STATIC_MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.jsx': 'text/babel; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -801,7 +814,7 @@ const routes = {
       } catch (e) { row.error = e.message; }
       sites.push(row);
     }
-    return { sites, rumEnabled: process.env.RUM_ENABLED === 'true' };
+    return { sites, rumEnabled: process.env.RUM_ENABLED === 'true', muLatest: (() => { try { return readMuPlugin().version; } catch (e) { return null; } })() };
   },
 
   // Static self-test: fetch the homepage and verify the wiring observable server-side
@@ -850,6 +863,23 @@ const routes = {
       if (!r || r.ok !== true) return { error: 'mu-plugin did not accept the banner config (needs v1.10.0)' };
     } catch (e) { return { error: 'mu-plugin not updated (needs v1.10.0): ' + e.message }; }
     return { ok: true, enabled: cfg.enabled, consent: adapters.FIRST_PARTY_CONSENT };
+  },
+
+  // Self-update a site's mu-plugin to the canonical version shipped in this build. The code
+  // travels through the authenticated channel (never a request-supplied URL); the mu-plugin
+  // validates sha256 + markers + no-downgrade and health-checks with auto-rollback.
+  'POST /push-mu-update': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    let mu;
+    try { mu = readMuPlugin(); } catch (e) { return { error: 'canonical mu-plugin not in container: ' + e.message }; }
+    if (!mu.version) return { error: 'could not parse canonical mu-plugin version' };
+    const { creds } = await resolveCreds({ siteId: body.siteId });
+    const wp = clientFrom(creds);
+    try {
+      const r = await wp.request(`${creds.baseUrl}/wp-json/seoagent/v1/self-update`, { method: 'POST', body: { code: mu.code, version: mu.version, sha256: mu.sha256 } });
+      if (!r || r.ok !== true) return { error: 'self-update not confirmed', detail: r };
+      return { ok: true, version: r.updated_to || mu.version };
+    } catch (e) { return { error: 'self-update failed (site needs mu-plugin v1.11.0+ with /self-update installed once first): ' + e.message }; }
   },
 
   // ── DataForSEO ────────────────────────────────────────────────────────────

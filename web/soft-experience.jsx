@@ -686,6 +686,20 @@ function UxActivationScreen({ ctx }) {
       .finally(() => setBusyFor(site.siteId, null));
   };
 
+  const muLatest = (probe && probe.muLatest) || null;
+  const verLt = (a, b) => { a = String(a || "").split("."); b = String(b || "").split("."); for (let i = 0; i < 3; i++) { const x = +(a[i] || 0), y = +(b[i] || 0); if (x < y) return true; if (x > y) return false; } return false; };
+  const updateMu = (site) => {
+    setBusyFor(site.siteId, "update");
+    Promise.resolve(API.pushMuUpdate(site.siteId))
+      .then((r) => {
+        if (r && r.error) { toast(r.error, "clay"); return; }
+        toast("Updated " + (site.name || "site") + " mu-plugin → v" + (r.version || muLatest), "teal");
+        load();
+      })
+      .catch((e) => toast((e && e.message) || "Update failed", "clay"))
+      .finally(() => setBusyFor(site.siteId, null));
+  };
+
   const sites = (probe && Array.isArray(probe.sites)) ? probe.sites : [];
 
   return (
@@ -719,6 +733,7 @@ function UxActivationScreen({ ctx }) {
           const test = tests[site.siteId];
           const action = busy[site.siteId];
           const cmpOk = !!site.cmp;
+          const muOld = !!(site.muPlugin && site.muPlugin.reachable && muLatest && verLt(site.muPlugin.version, muLatest));
           return (
             <SoftCard key={site.siteId} hover={false}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
@@ -729,7 +744,7 @@ function UxActivationScreen({ ctx }) {
                 <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center" }}>
                   <Chip tone={site.armed ? "teal" : "gray"} icon={site.armed ? "check" : "eye"}>{site.armed ? "Armed" : "Off"}</Chip>
                   <Chip tone={site.signedOff ? "teal" : "gold"} icon={site.signedOff ? "check" : "lock"}>{site.signedOff ? "Signed off" : "Not signed off"}</Chip>
-                  <Chip tone={site.muPlugin && site.muPlugin.reachable ? "gray" : "clay"} icon="bolt">{site.muPlugin && site.muPlugin.reachable ? ("mu " + (site.muPlugin.version || "?")) : "mu missing"}</Chip>
+                  <Chip tone={site.muPlugin && site.muPlugin.reachable ? (muOld ? "gold" : "gray") : "clay"} icon="bolt">{site.muPlugin && site.muPlugin.reachable ? ("mu " + (site.muPlugin.version || "?") + (muOld ? " · update" : "")) : "mu missing"}</Chip>
                 </div>
               </div>
 
@@ -772,6 +787,7 @@ function UxActivationScreen({ ctx }) {
 
               <div style={{ marginTop: 14, display: "flex", gap: 9, flexWrap: "wrap", alignItems: "center" }}>
                 <NeoButton kind="soft" size="sm" icon={action === "test" ? undefined : "radar"} disabled={!!action} onClick={() => runTest(site.siteId)}>{action === "test" && <Icon name="cog" size={14} className="audit-spin" />}Run self-test</NeoButton>
+                {muOld && <NeoButton kind="soft" size="sm" icon={action === "update" ? undefined : "refresh"} disabled={!!action} onClick={() => updateMu(site)}>{action === "update" && <Icon name="cog" size={14} className="audit-spin" />}Update mu-plugin → v{muLatest}</NeoButton>}
                 {site.armed ? (
                   <NeoButton kind="soft" size="sm" icon={action === "arm" ? undefined : "x"} disabled={!!action} onClick={() => disarm(site)}>{action === "arm" && <Icon name="cog" size={14} className="audit-spin" />}Disarm</NeoButton>
                 ) : (
