@@ -19,6 +19,7 @@ const SNAV_GROUPS = [
     // Experience Monitor — hidden until the operator turns the feature on
     // (window.SENTINEL_RUM); inert-by-default so the nav is unchanged otherwise.
     { k:"experience", label:"Experience Monitor", icon:"gauge", gated:"rum" },
+    { k:"uxactivation", label:"UX Activation", icon:"shield" },
   ]},
   { group:"Plan & Create Content", items:[
     { k:"plan",     label:"Content Plan", icon:"sparkles" },
@@ -4614,7 +4615,7 @@ function App() {
     },
   };
 
-  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen, experience:ExperienceScreen };
+  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen, experience:ExperienceScreen, uxactivation:UxActivationScreen };
   const Screen = SCREENS[screen] || Dashboard;
 
   let content = <Screen ctx={ctx} run />;

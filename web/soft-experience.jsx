@@ -610,4 +610,167 @@ function ExperienceScreen({ ctx }) {
   );
 }
 
-Object.assign(window, { ExperienceScreen });
+/* ===========================================================================
+   UX Activation — cross-site automation panel. Probes every connected site for
+   its consent stack (CMP + cookie), trackers needing a gate, mu-plugin + armed
+   state, then offers one-click self-test / arm. Arming is gated on the per-site
+   compliance sign-off (rum_signed_off) and a detected consent cookie.
+   =========================================================================== */
+function UxActivationScreen({ ctx }) {
+  const API = window.SentinelAPI;
+  const toast = (m, t) => ctx && ctx.toast && ctx.toast(m, t);
+  const [probe, setProbe] = useState(null);   // { sites, rumEnabled }
+  const [err, setErr] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [tests, setTests] = useState({});      // siteId -> selftest result
+  const [busy, setBusy] = useState({});         // siteId -> "test" | "arm"
+
+  const load = useCallback(() => {
+    if (!API || !API.siteProbe) { setErr("UX activation API is unavailable."); return; }
+    setLoading(true); setErr(null);
+    Promise.resolve(API.siteProbe())
+      .then((r) => {
+        if (r && r.error) { setErr(r.error); return; }
+        setProbe(r || { sites: [] });
+        // Surface the Experience Monitor nav item too once RUM is enabled server-side.
+        if (r && r.rumEnabled && !window.SENTINEL_RUM) { window.SENTINEL_RUM = true; if (window.__sentinelRerender) window.__sentinelRerender(); }
+      })
+      .catch((e) => setErr((e && e.message) || "Couldn't probe sites."))
+      .finally(() => setLoading(false));
+  }, [API]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const setBusyFor = (id, v) => setBusy((b) => Object.assign({}, b, { [id]: v }));
+
+  const runTest = (id) => {
+    setBusyFor(id, "test");
+    Promise.resolve(API.beaconSelftest(id))
+      .then((r) => setTests((t) => Object.assign({}, t, { [id]: r || {} })))
+      .catch((e) => toast((e && e.message) || "Self-test failed", "clay"))
+      .finally(() => setBusyFor(id, null));
+  };
+
+  const arm = (site) => {
+    if (!site.signedOff) { toast("Sign off compliance for this site first (set rum_signed_off).", "gold"); return; }
+    if (!site.consent) { toast("No consent cookie detected — install a CMP or enable the first-party banner first.", "gold"); return; }
+    setBusyFor(site.siteId, "arm");
+    Promise.resolve(API.armBeacon(site.siteId, true, 5, site.consent))
+      .then((r) => {
+        if (r && r.error) { toast(r.error, "clay"); return; }
+        toast("Armed " + (site.name || "site") + " at 5% — gated on " + site.consent.cookie, "teal");
+        load();
+      })
+      .catch((e) => toast((e && e.message) || "Arm failed", "clay"))
+      .finally(() => setBusyFor(site.siteId, null));
+  };
+
+  const disarm = (site) => {
+    setBusyFor(site.siteId, "arm");
+    Promise.resolve(API.armBeacon(site.siteId, false))
+      .then(() => { toast("Disarmed " + (site.name || "site"), "gold"); load(); })
+      .catch((e) => toast((e && e.message) || "Disarm failed", "clay"))
+      .finally(() => setBusyFor(site.siteId, null));
+  };
+
+  const sites = (probe && Array.isArray(probe.sites)) ? probe.sites : [];
+
+  return (
+    <div className="rise">
+      <PageHead title="UX Activation" sub="Detect each site's consent stack, wire the privacy beacon, and verify — across every connected site.">
+        <NeoButton kind="soft" icon={loading ? undefined : "refresh"} disabled={loading} onClick={load}>{loading && <Icon name="cog" size={15} className="audit-spin" />}Re-probe</NeoButton>
+      </PageHead>
+
+      {probe && probe.rumEnabled === false && (
+        <Well style={{ background: "var(--gold-bg)", marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700, color: "#7E5A14" }}>
+            <Icon name="lock" size={16} style={{ color: "var(--gold)" }} />RUM master switch is OFF — set RUM_ENABLED=true on the server before arming any site.
+          </div>
+        </Well>
+      )}
+
+      {err && (
+        <div style={{ display: "flex", gap: 12, padding: "14px 16px", background: "var(--clay-bg)", borderRadius: "var(--r-md)", boxShadow: "var(--neo-xs)", alignItems: "flex-start", marginBottom: 16 }}>
+          <Icon name="alert" size={18} style={{ color: "var(--clay)", flexShrink: 0 }} />
+          <div style={{ flex: 1, fontSize: 13, color: "#8A4231" }}>{err}</div>
+          <NeoButton kind="soft" size="sm" icon="refresh" onClick={load}>Retry</NeoButton>
+        </div>
+      )}
+
+      {loading && !probe && (
+        <SoftCard hover={false}><div style={{ padding: "14px 4px", color: "var(--muted)", fontSize: 14, display: "flex", alignItems: "center", gap: 11 }}><Icon name="cog" size={18} className="audit-spin" />Probing all connected sites…</div></SoftCard>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {sites.map((site) => {
+          const test = tests[site.siteId];
+          const action = busy[site.siteId];
+          const cmpOk = !!site.cmp;
+          return (
+            <SoftCard key={site.siteId} hover={false}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 15.5, fontWeight: 800, letterSpacing: "-.01em" }}>{site.name || site.url}</div>
+                  <div style={{ fontSize: 12, color: "var(--faint)", marginTop: 1 }}>{site.url}</div>
+                </div>
+                <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center" }}>
+                  <Chip tone={site.armed ? "teal" : "gray"} icon={site.armed ? "check" : "eye"}>{site.armed ? "Armed" : "Off"}</Chip>
+                  <Chip tone={site.signedOff ? "teal" : "gold"} icon={site.signedOff ? "check" : "lock"}>{site.signedOff ? "Signed off" : "Not signed off"}</Chip>
+                  <Chip tone={site.muPlugin && site.muPlugin.reachable ? "gray" : "clay"} icon="bolt">{site.muPlugin && site.muPlugin.reachable ? ("mu " + (site.muPlugin.version || "?")) : "mu missing"}</Chip>
+                </div>
+              </div>
+
+              {site.error && <div style={{ marginTop: 10, fontSize: 12.5, color: "var(--clay)", display: "flex", gap: 6, alignItems: "center" }}><Icon name="alert" size={13} />{site.error}</div>}
+              {site.pluginsReadable === false && <div style={{ marginTop: 10, fontSize: 12.5, color: "#7E5A14", display: "flex", gap: 6, alignItems: "center" }}><Icon name="alert" size={13} style={{ color: "var(--gold)" }} />Plugin list blocked by a security plugin — can't auto-detect the CMP. Allowlist /wp-json/wp/v2/plugins.</div>}
+
+              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-2)", minWidth: 64 }}>Consent</span>
+                  {cmpOk ? (
+                    <Chip tone="teal" icon="shield">{site.cmp.name} → {site.consent.cookie}{site.consent.value ? ("=" + site.consent.value) : (site.consent.contains ? (" ∈ “" + site.consent.contains + "”") : "")}</Chip>
+                  ) : (
+                    <Chip tone="clay" icon="alert">No CMP detected — needs a consent banner</Chip>
+                  )}
+                  {site.cmp && site.cmp.review && <Chip tone="gold" icon="eye">verify cookie</Chip>}
+                </div>
+                {Array.isArray(site.trackers) && site.trackers.length > 0 && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-2)", minWidth: 64 }}>Trackers</span>
+                    {site.trackers.map((t) => <Chip key={t.name} tone="gold" icon="eye">{t.name} — gate before consent</Chip>)}
+                  </div>
+                )}
+              </div>
+
+              {test && !test.error && test.checks && (
+                <Well style={{ marginTop: 12 }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                    {[["Beacon loader", test.checks.beaconLoaderPresent], ["RUM config", test.checks.sentinelRumConfig], ["CMP present", test.checks.cmpPresent], ["Tracker present", test.checks.hotjarPresent], ["Tracker blocked", test.checks.hotjarNeutralizedServerSide]].map(([label, val]) => (
+                      <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: "var(--r-pill)", background: "var(--surface)", boxShadow: "var(--neo-xs)", color: val === true ? "var(--t-700)" : (val === false ? "var(--clay)" : "var(--muted)") }}>
+                        <Icon name={val === true ? "check" : (val === false ? "x" : "eye")} size={12} sw={2.6} />{label}
+                      </span>
+                    ))}
+                  </div>
+                </Well>
+              )}
+              {test && test.error && <div style={{ marginTop: 10, fontSize: 12.5, color: "var(--clay)" }}>Self-test: {test.error}</div>}
+
+              <div style={{ marginTop: 14, display: "flex", gap: 9, flexWrap: "wrap", alignItems: "center" }}>
+                <NeoButton kind="soft" size="sm" icon={action === "test" ? undefined : "radar"} disabled={!!action} onClick={() => runTest(site.siteId)}>{action === "test" && <Icon name="cog" size={14} className="audit-spin" />}Run self-test</NeoButton>
+                {site.armed ? (
+                  <NeoButton kind="soft" size="sm" icon={action === "arm" ? undefined : "x"} disabled={!!action} onClick={() => disarm(site)}>{action === "arm" && <Icon name="cog" size={14} className="audit-spin" />}Disarm</NeoButton>
+                ) : (
+                  <NeoButton kind="primary" size="sm" icon={action === "arm" ? undefined : "bolt"} disabled={!!action || !site.signedOff || !cmpOk} onClick={() => arm(site)}>{action === "arm" && <Icon name="cog" size={14} className="audit-spin" />}Arm at 5%</NeoButton>
+                )}
+                {!site.signedOff && <span style={{ fontSize: 11.5, color: "var(--faint)" }}>Sign off compliance to enable arming</span>}
+                {site.signedOff && !cmpOk && <span style={{ fontSize: 11.5, color: "var(--faint)" }}>Install a CMP (or first-party banner) to enable arming</span>}
+              </div>
+            </SoftCard>
+          );
+        })}
+        {probe && sites.length === 0 && !loading && <SoftCard hover={false}><div style={{ padding: "14px 4px", color: "var(--muted)", fontSize: 14 }}>No connected sites found.</div></SoftCard>}
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { ExperienceScreen, UxActivationScreen });
