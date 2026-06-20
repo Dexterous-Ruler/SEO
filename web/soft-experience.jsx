@@ -45,6 +45,13 @@ const EXP_EVENTS = {
   form_abandon:           { icon: "edit",     tone: "plum", label: "Form abandonment" },
   layout_shift:           { icon: "layers",   tone: "gold", label: "Layout shift" },
   slow_interaction:       { icon: "clock",    tone: "gold", label: "Slow interaction" },
+  inp_slow:               { icon: "clock",    tone: "gold", label: "Slow interaction (INP)" },
+  console_error:          { icon: "alert",    tone: "gold", label: "Console error" },
+  js_error:               { icon: "alert",    tone: "clay", label: "JS error" },
+  unhandled_rejection:    { icon: "alert",    tone: "clay", label: "Unhandled rejection" },
+  ajax_4xx:               { icon: "alert",    tone: "clay", label: "Failed request (4xx)" },
+  dest_404:               { icon: "link",     tone: "clay", label: "404 landing" },
+  form_validation:        { icon: "edit",     tone: "gold", label: "Form validation error" },
 };
 function expEventMeta(t) {
   return EXP_EVENTS[t] || { icon: "search", tone: "gray", label: String(t || "Issue").replace(/[_-]+/g, " ") };

@@ -756,7 +756,7 @@ const routes = {
       const { creds } = await resolveCreds({ siteId: body.siteId });
       const wp = clientFrom(creds);
       const endpoint = process.env.PUBLIC_BASE_URL || 'https://sentinel-goodfor-2e75db85.koyeb.app';
-      const cfg = { armed: !!body.on, key: rumKey || '', endpoint, sample: Number(body.sample) || 0.05, consent: { mode: 'required' } };
+      const cfg = { armed: !!body.on, key: rumKey || '', endpoint, sample: Number(body.sample) || Number(process.env.RUM_SAMPLE) || 0.05, consent: { mode: 'required' } };
       await wp.request(`${creds.baseUrl}/wp-json/seoagent/v1/set-ux-beacon`, { method: 'POST', body: { config: cfg } });
     } catch (e) { return { ok: true, armed: !!body.on, warn: 'site flag set, but the mu-plugin loader was not updated (needs v1.9.0): ' + e.message }; }
     return { ok: true, armed: !!body.on };
@@ -2297,10 +2297,11 @@ const HEAVY_ROUTES = new Set([
 const UX_KEY_CACHE = new TTLCache({ max: 200, ttlMs: 5 * 60 * 1000 });  // rum_key → {siteId} | null
 const UX_SITE_RATE = new TTLCache({ max: 200, ttlMs: 60 * 1000 });      // siteId → events this minute (flood breaker)
 const uxLimiter = new Limiter(4, 'ux-ingest');
-const UX_EVENT_TYPES = new Set(['js_error', 'unhandled_rejection', 'broken_resource', 'ajax_4xx', 'dest_404', 'broken_cta', 'form_validation', 'pageview']);
+const UX_EVENT_TYPES = new Set(['js_error', 'unhandled_rejection', 'broken_resource', 'ajax_4xx', 'dest_404', 'broken_cta', 'form_validation', 'pageview',
+  'dead_click', 'rage_click', 'console_error', 'form_abandon', 'inp_slow']);   // last 5 = Phase-2 heuristic signals
 const UX_BANNED_KEYS = ['value', 'innerHTML', 'outerHTML', 'html', 'screenshot', 'text'];   // PII / replay-adjacent — reject the whole event
-const UX_DETAIL_KEYS = ['message', 'source', 'lineno', 'colno', 'stackHash', 'src', 'status', 'tag', 'referrer', 'label', 'field', 'fieldType', 'validity'];  // PII-free, scrubbed at source
-const UX_MODERATE = new Set(['broken_cta']);   // heuristic/composite → MODERATE confidence (never auto-applied)
+const UX_DETAIL_KEYS = ['message', 'source', 'lineno', 'colno', 'stackHash', 'src', 'status', 'tag', 'referrer', 'label', 'field', 'fieldType', 'validity', 'dur'];  // PII-free, scrubbed at source ('dur' = INP latency ms; 'value' is banned)
+const UX_MODERATE = new Set(['broken_cta', 'dead_click', 'rage_click', 'console_error', 'form_abandon', 'inp_slow']);   // heuristic/composite → MODERATE confidence (advisory, never auto-applied)
 const uxStats = { accepted: 0, droppedCap: 0, droppedRate: 0, tripped: 0 };  // surfaced on /status
 let UX_BUCKET = { tokens: 200, ts: Date.now() };  // process-wide token bucket (~20/s refill)
 function uxTakeToken() {

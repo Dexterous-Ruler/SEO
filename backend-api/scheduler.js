@@ -247,7 +247,7 @@ async function jobUxRollup(site) {
   }
   if (!groups.size) { await markWatermark(site.id, drained); return; }   // pageviews-only window (nothing to merge → safe non-transactional advance)
   const gmap = await uxGscMap(site);
-  const MOD = new Set(['broken_cta']);
+  const MOD = new Set(['broken_cta', 'dead_click', 'rage_click', 'console_error', 'form_abandon', 'inp_slow']);  // heuristic/composite → MODERATE (advisory)
   const rows = [...groups.values()].map((g) => {
     const j = gmap[g.page] || null;
     return {

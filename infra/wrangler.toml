@@ -1,0 +1,9 @@
+name = "sentinel-ux-beacon-edge"
+main = "ux-beacon-edge-worker.js"
+compatibility_date = "2025-06-01"
+
+[vars]
+# Real Sentinel ingest base+path on the Koyeb nano. The Worker forwards valid,
+# size-capped, rate-limited beacons here. Override per-environment with a secret
+# (`wrangler secret put SENTINEL_INGEST`) if you don't want it committed.
+SENTINEL_INGEST = "https://sentinel-goodfor-2e75db85.koyeb.app/ux-beacon"

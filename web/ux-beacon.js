@@ -382,6 +382,236 @@
     } catch (err) {}
   }
 
+  // ===========================================================================
+  // Phase-2 HEURISTIC signals (MODERATE confidence, advisory).
+  // ALL of these run ONLY on the SAMPLED-in path (they are NOT in the ALWAYS
+  // map, and capture() already drops non-ALWAYS events when sampled out — so
+  // wiring them inside the SAMPLED block in onReady is belt-and-braces).
+  // Each is wrapped via safe()/try-catch so it can never throw into the page,
+  // self-disables if its observer throws, and is bounded by a per-page-view
+  // counter (<=5 of each). No banned keys (value/innerHTML/outerHTML/html/
+  // text/screenshot); INP latency uses 'dur', never 'value'.
+  // ===========================================================================
+  var H_CAP = 5; // max emissions per heuristic, per page view
+
+  function shortLabel(el) {
+    try {
+      var t = (el && el.textContent ? el.textContent : '').replace(/\s+/g, ' ').trim();
+      if (t.length > 40) { t = t.slice(0, 40); }
+      return scrubText(t);
+    } catch (e) { return ''; }
+  }
+
+  function isInteractive(el) {
+    try {
+      if (!el || el.nodeType !== 1) { return false; }
+      var tag = (el.tagName || '').toLowerCase();
+      if (tag === 'a' || tag === 'button') { return true; }
+      if (el.getAttribute && el.getAttribute('role') === 'button') { return true; }
+      if (tag === 'input') {
+        var it = (el.type || '').toLowerCase();
+        if (it === 'submit' || it === 'button') { return true; }
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  // ---- Phase-2 #1: rage_click ----
+  // Tiny ring buffer of recent {sel, t}; >=3 clicks on the SAME stableSelector
+  // within ~700ms => rage_click.
+  var rageRing = [];
+  var rageCount = 0;
+  function onRageClick(e) {
+    try {
+      if (rageCount >= H_CAP) { return; }
+      var el = e && e.target;
+      if (!el || el.nodeType !== 1) { return; }
+      var sel = stableSelector(el);
+      if (!sel) { return; }
+      var now = (e && typeof e.timeStamp === 'number' && e.timeStamp) || Date.now();
+      rageRing.push({ sel: sel, t: now });
+      if (rageRing.length > 12) { rageRing.shift(); }
+      var hits = 0;
+      for (var i = 0; i < rageRing.length; i++) {
+        if (rageRing[i].sel === sel && (now - rageRing[i].t) <= 700) { hits++; }
+      }
+      if (hits >= 3) {
+        rageCount++;
+        capture({ type: 'rage_click', selector: sel, label: shortLabel(el) });
+        // reset this selector's entries so a single burst fires once
+        var kept = [];
+        for (var j = 0; j < rageRing.length; j++) {
+          if (rageRing[j].sel !== sel) { kept.push(rageRing[j]); }
+        }
+        rageRing = kept;
+      }
+    } catch (err) {}
+  }
+
+  // ---- Phase-2 #2: dead_click ----
+  // On click/pointerup of an interactive-looking element, open a ~700ms
+  // transient MutationObserver + snapshot location.href. After the window, if
+  // NO navigation and NO relevant DOM mutation happened => dead_click.
+  // Conservative (low false-positive); observer always disconnected after.
+  var deadCount = 0;
+  var deadPending = false;
+  function onDeadClick(e) {
+    try {
+      if (deadCount >= H_CAP || deadPending) { return; }
+      var el = e && e.target;
+      if (!el || el.nodeType !== 1) { return; }
+      var anchor = (el.closest && (el.closest('a,button,[role="button"],input[type="submit"],input[type="button"]'))) || el;
+      if (!isInteractive(anchor)) { return; }
+      var sel = stableSelector(anchor);
+      if (!sel) { return; }
+      var label = shortLabel(anchor);
+      var hrefBefore = location.href;
+      var mutated = false;
+      var mo = null;
+      if (typeof MutationObserver === 'undefined') { return; }
+      try {
+        mo = new MutationObserver(function (records) {
+          try {
+            // any childList add/remove or attribute change anywhere = "something happened"
+            if (records && records.length) { mutated = true; }
+          } catch (x) { try { mo.disconnect(); } catch (y) {} }
+        });
+        mo.observe(document.body, { childList: true, subtree: true, attributes: true });
+      } catch (x) { return; }
+      deadPending = true;
+      setTimeout(function () {
+        try {
+          if (mo) { try { mo.disconnect(); } catch (y) {} mo = null; }
+          deadPending = false;
+          var navigated = (location.href !== hrefBefore);
+          if (!navigated && !mutated) {
+            deadCount++;
+            capture({ type: 'dead_click', selector: sel, label: label });
+          }
+        } catch (z) { deadPending = false; }
+      }, 700);
+    } catch (err) {}
+  }
+
+  // ---- Phase-2 #3: console_error ----
+  // Restore-safe patch of console.error / console.warn: save original, wrap to
+  // capture then ALWAYS call through to original. Guards against double-patching
+  // and recursion (a capture-side throw can never re-enter the patched fn).
+  var consoleCount = 0;
+  var consolePatched = false;
+  var inConsole = false;
+  function patchConsole() {
+    try {
+      if (consolePatched) { return; }
+      if (typeof console === 'undefined' || !console) { return; }
+      consolePatched = true;
+      wrapConsole('error', 'console_error');
+      wrapConsole('warn', 'console_error');
+    } catch (e) {}
+  }
+  function wrapConsole(method, evType) {
+    try {
+      var orig = console[method];
+      if (typeof orig !== 'function') { return; }
+      console[method] = function () {
+        if (!inConsole) {
+          inConsole = true;
+          try {
+            if (consoleCount < H_CAP && arguments.length) {
+              consoleCount++;
+              capture({ type: evType, message: scrubText(String(arguments[0])) });
+            }
+          } catch (e) {}
+          inConsole = false;
+        }
+        try { return orig.apply(console, arguments); } catch (e) {}
+      };
+    } catch (e) {}
+  }
+
+  // ---- Phase-2 #4: form_abandon ----
+  // Track last-focused form field name (sensitive types/[data-sensitive]
+  // redacted to '[sensitive]', mirroring onInvalid). On submit, mark that form
+  // submitted. On pagehide/visibility->hidden, if a field was focused in an
+  // UNSUBMITTED form, emit form_abandon once.
+  var abandonField = null;       // scrubbed/redacted name of last-focused field
+  var abandonForm = null;        // the <form> that field belongs to
+  var submittedForms = [];       // forms observed to have submitted
+  var abandonEmitted = false;
+  function onFieldFocus(e) {
+    try {
+      var el = e && e.target;
+      if (!el || el.nodeType !== 1) { return; }
+      var tag = (el.tagName || '').toLowerCase();
+      if (tag !== 'input' && tag !== 'select' && tag !== 'textarea') { return; }
+      var form = el.form || (el.closest && el.closest('form'));
+      if (!form) { return; }
+      var type = (el.type || '').toLowerCase();
+      var sensitive = SENSITIVE_TYPES[type] ||
+        (el.hasAttribute && el.hasAttribute('data-sensitive'));
+      abandonField = sensitive ? '[sensitive]' : scrubText(el.name || el.id || '');
+      abandonForm = form;
+    } catch (err) {}
+  }
+  function onFormSubmit(e) {
+    try {
+      var form = e && e.target;
+      if (form && submittedForms.indexOf(form) === -1) { submittedForms.push(form); }
+    } catch (err) {}
+  }
+  function checkFormAbandon() {
+    try {
+      if (abandonEmitted) { return; }
+      if (!abandonField || !abandonForm) { return; }
+      if (submittedForms.indexOf(abandonForm) !== -1) { return; }
+      abandonEmitted = true;
+      capture({ type: 'form_abandon', field: abandonField });
+    } catch (err) {}
+  }
+
+  // ---- Phase-2 #5: inp_slow ----
+  // PerformanceObserver({ type:'event', durationThreshold:200, buffered:true })
+  // with 'longtask' fallback. Interactions over ~300ms => inp_slow with 'dur'
+  // (NOT 'value'). Throttled/capped so it can't flood.
+  var inpCount = 0;
+  var inpObs = null;
+  function startInpObserver() {
+    try {
+      if (typeof PerformanceObserver === 'undefined') { return; }
+      var supported = PerformanceObserver.supportedEntryTypes || [];
+      var useEvent = supported.indexOf && supported.indexOf('event') !== -1;
+      inpObs = new PerformanceObserver(function (list) {
+        try {
+          if (inpCount >= H_CAP) { try { inpObs.disconnect(); } catch (x) {} inpObs = null; return; }
+          var entries = list.getEntries();
+          for (var i = 0; i < entries.length; i++) {
+            handleInpEntry(entries[i]);
+            if (inpCount >= H_CAP) { break; }
+          }
+        } catch (e) { try { inpObs.disconnect(); } catch (x) {} inpObs = null; }
+      });
+      if (useEvent) {
+        inpObs.observe({ type: 'event', durationThreshold: 200, buffered: true });
+      } else {
+        inpObs.observe({ type: 'longtask', buffered: true });
+      }
+    } catch (e) { inpObs = null; }
+  }
+  function handleInpEntry(entry) {
+    try {
+      if (inpCount >= H_CAP) { return; }
+      var dur = entry && typeof entry.duration === 'number' ? entry.duration : 0;
+      if (dur <= 300) { return; }
+      var sel = '';
+      try {
+        var tgt = entry.target; // present on PerformanceEventTiming in supporting browsers
+        if (tgt && tgt.nodeType === 1) { sel = stableSelector(tgt); }
+      } catch (x) {}
+      inpCount++;
+      capture({ type: 'inp_slow', dur: Math.round(dur), selector: sel });
+    } catch (e) {}
+  }
+
   // ---- Wiring ----
   function safe(fn) {
     return function (ev) { try { fn(ev); } catch (e) {} };
@@ -411,6 +641,23 @@
         capture({ type: 'pageview' });
         var ric = window.requestIdleCallback || function (cb) { return setTimeout(cb, 1); };
         ric(function () { scanBrokenCtas(); });
+
+        // Phase-2 HEURISTIC signals — sampled-in only, self-protected, bounded.
+        try { document.addEventListener('click', safe(onRageClick), true); } catch (e) {}
+        try {
+          document.addEventListener('click', safe(onDeadClick), true);
+          document.addEventListener('pointerup', safe(onDeadClick), true);
+        } catch (e) {}
+        try { patchConsole(); } catch (e) {}
+        try {
+          document.addEventListener('focusin', safe(onFieldFocus), true);
+          document.addEventListener('submit', safe(onFormSubmit), true);
+          document.addEventListener('visibilitychange', function () {
+            try { if (document.visibilityState === 'hidden') { checkFormAbandon(); } } catch (e) {}
+          });
+          window.addEventListener('pagehide', safe(checkFormAbandon));
+        } catch (e) {}
+        try { startInpObserver(); } catch (e) {}
       }
     };
     if (document.readyState === 'complete' || document.readyState === 'interactive') {
