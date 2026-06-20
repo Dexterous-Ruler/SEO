@@ -792,6 +792,12 @@ const routes = {
         }
         const self = await wp.request(`${creds.baseUrl}/wp-json/seoagent/v1/optimize-selftest`).catch(() => null);
         row.muPlugin = self ? { reachable: true, version: (self && (self.version || self.v)) || null } : { reachable: false };
+        row.bannerSupported = !!(self && Array.isArray(self.features) && self.features.indexOf('consent_banner') !== -1);
+        // No third-party CMP, but our first-party banner is enabled → that's the consent source.
+        if (!row.cmp && self && self.consent_banner_enabled) {
+          row.cmp = { name: 'First-party banner', slug: 'seoagent', cookie: 'seoagent_consent', value: 'statistics', firstParty: true };
+          row.consent = adapters.FIRST_PARTY_CONSENT;
+        }
       } catch (e) { row.error = e.message; }
       sites.push(row);
     }
@@ -819,7 +825,31 @@ const routes = {
     };
     const m = lower.match(/<script[^>]*>[^]*?hotjar[^]*?<\/script>/);
     checks.hotjarNeutralizedServerSide = checks.hotjarPresent ? (m ? /text\/plain/.test(m[0]) : null) : null;   // advisory: many CMPs block client-side
+    checks.firstPartyBannerPresent = /seoagent-consent/.test(lower);
     return { url: base, checks };
+  },
+
+  // Enable/disable the first-party consent banner on a site's mu-plugin (the no-CMP
+  // fallback). Returns the consent config to arm with — gates the beacon on
+  // seoagent_consent=statistics. Requires mu-plugin v1.10.0+.
+  'POST /set-consent-banner': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    const { creds } = await resolveCreds({ siteId: body.siteId });
+    const wp = clientFrom(creds);
+    const cfg = {
+      enabled: body.enabled !== false,
+      cookie: 'seoagent_consent',
+      text: body.text || 'We use privacy-friendly analytics to understand how this site is used and improve it. No personal data, session recording, or cross-site tracking.',
+      accept: body.accept || 'Accept',
+      decline: body.decline || 'Decline',
+      policyUrl: body.policyUrl || '',
+      policyLabel: body.policyLabel || 'Privacy Policy',
+    };
+    try {
+      const r = await wp.request(`${creds.baseUrl}/wp-json/seoagent/v1/set-consent-banner`, { method: 'POST', body: { config: cfg } });
+      if (!r || r.ok !== true) return { error: 'mu-plugin did not accept the banner config (needs v1.10.0)' };
+    } catch (e) { return { error: 'mu-plugin not updated (needs v1.10.0): ' + e.message }; }
+    return { ok: true, enabled: cfg.enabled, consent: adapters.FIRST_PARTY_CONSENT };
   },
 
   // ── DataForSEO ────────────────────────────────────────────────────────────

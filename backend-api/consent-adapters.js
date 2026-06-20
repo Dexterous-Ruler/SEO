@@ -47,6 +47,10 @@ export function detectConsent(activeSlugs) {
   return { cmp, trackers };
 }
 
+// Our own first-party consent banner (mu-plugin output_consent_banner) sets this cookie
+// on Accept. Used to gate the beacon on sites that have no third-party CMP.
+export const FIRST_PARTY_CONSENT = { mode: 'required', cookie: 'seoagent_consent', value: 'statistics' };
+
 // The consent config to hand /arm-beacon (and thus the beacon) for a detected CMP.
 export function consentConfigFor(cmp) {
   if (!cmp) return null;
@@ -56,4 +60,4 @@ export function consentConfigFor(cmp) {
   return c;
 }
 
-export default { CONSENT_ADAPTERS, KNOWN_TRACKERS, detectConsent, consentConfigFor };
+export default { CONSENT_ADAPTERS, KNOWN_TRACKERS, FIRST_PARTY_CONSENT, detectConsent, consentConfigFor };

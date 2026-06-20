@@ -673,6 +673,19 @@ function UxActivationScreen({ ctx }) {
       .finally(() => setBusyFor(site.siteId, null));
   };
 
+  const enableBanner = (site) => {
+    const policyUrl = (window.prompt("Privacy policy URL for the consent banner (optional — leave blank to skip):", "") || "").trim();
+    setBusyFor(site.siteId, "banner");
+    Promise.resolve(API.setConsentBanner(site.siteId, { enabled: true, policyUrl }))
+      .then((r) => {
+        if (r && r.error) { toast(r.error, "clay"); return; }
+        toast("First-party consent banner enabled on " + (site.name || "site"), "teal");
+        load();
+      })
+      .catch((e) => toast((e && e.message) || "Couldn't enable the banner", "clay"))
+      .finally(() => setBusyFor(site.siteId, null));
+  };
+
   const sites = (probe && Array.isArray(probe.sites)) ? probe.sites : [];
 
   return (
@@ -729,14 +742,17 @@ function UxActivationScreen({ ctx }) {
                   {cmpOk ? (
                     <Chip tone="teal" icon="shield">{site.cmp.name} → {site.consent.cookie}{site.consent.value ? ("=" + site.consent.value) : (site.consent.contains ? (" ∈ “" + site.consent.contains + "”") : "")}</Chip>
                   ) : (
-                    <Chip tone="clay" icon="alert">No CMP detected — needs a consent banner</Chip>
+                    <Chip tone="clay" icon="alert">No CMP detected</Chip>
                   )}
+                  {!cmpOk && site.bannerSupported && <NeoButton kind="soft" size="sm" icon={action === "banner" ? undefined : "shield"} disabled={!!action} onClick={() => enableBanner(site)}>{action === "banner" && <Icon name="cog" size={14} className="audit-spin" />}Enable consent banner</NeoButton>}
+                  {!cmpOk && !site.bannerSupported && <span style={{ fontSize: 11.5, color: "var(--faint)" }}>Update mu-plugin to v1.10.0 for the first-party banner</span>}
                   {site.cmp && site.cmp.review && <Chip tone="gold" icon="eye">verify cookie</Chip>}
                 </div>
                 {Array.isArray(site.trackers) && site.trackers.length > 0 && (
                   <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
                     <span style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-2)", minWidth: 64 }}>Trackers</span>
                     {site.trackers.map((t) => <Chip key={t.name} tone="gold" icon="eye">{t.name} — gate before consent</Chip>)}
+                    {site.cmp && site.cmp.firstParty && <span style={{ fontSize: 11.5, color: "#7E5A14" }}>⚠ the first-party banner gates our beacon only — it doesn't block these; use a CMP to block them</span>}
                   </div>
                 )}
               </div>

@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.9.0
+ * Version:     1.10.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -43,6 +43,10 @@ class SEO_Agent_Optimize {
         // UX beacon (RUM) — INERT by default: prints nothing unless the
         // seoagent_ux_beacon option is present AND armed===true (see output_ux_beacon).
         add_action('wp_footer', [$this, 'output_ux_beacon'], 20);
+        // First-party consent banner — INERT by default: prints nothing unless the
+        // seoagent_consent_banner option is present AND enabled===true. For sites with
+        // no third-party CMP, this gates the UX beacon (sets seoagent_consent=statistics).
+        add_action('wp_footer', [$this, 'output_consent_banner'], 18);
         add_action('wp_head', [$this, 'output_404_marker'], 1);
     }
 
@@ -229,6 +233,64 @@ class SEO_Agent_Optimize {
         echo "<script async src=\"" . $src . "\"></script>\n";
     }
 
+    /* ── First-party consent banner — INERT BY DEFAULT ───────────────────────
+       Config in the 'seoagent_consent_banner' option (JSON):
+         {"enabled":false,"cookie":"seoagent_consent","text":"…","accept":"Accept",
+          "decline":"Decline","policyUrl":"…","policyLabel":"Privacy Policy"}
+       Prints NOTHING unless enabled===true. Opt-in: sets seoagent_consent=statistics
+       only on Accept (=denied on Decline). Honours GPC/DNT (silently declines, never
+       shows). Self-contained (no deps); the beacon then gates on the cookie. */
+    public function output_consent_banner() {
+        if (is_admin() || is_feed()) return;
+        $raw = get_option('seoagent_consent_banner', '');
+        if ($raw === '' || $raw === false) return;
+        $cfg = json_decode((string) $raw, true);
+        if (!is_array($cfg) || ($cfg['enabled'] ?? null) !== true) return;   // INERT unless enabled
+        $cookie = isset($cfg['cookie']) ? preg_replace('/[^A-Za-z0-9_-]/', '', (string) $cfg['cookie']) : 'seoagent_consent';
+        if ($cookie === '') { $cookie = 'seoagent_consent'; }
+        $text    = isset($cfg['text'])    && $cfg['text']    !== '' ? (string) $cfg['text']    : 'We use privacy-friendly analytics to understand how this site is used and improve it. No personal data, session recording, or cross-site tracking.';
+        $accept  = isset($cfg['accept'])  && $cfg['accept']  !== '' ? (string) $cfg['accept']  : 'Accept';
+        $decline = isset($cfg['decline']) && $cfg['decline'] !== '' ? (string) $cfg['decline'] : 'Decline';
+        $label   = isset($cfg['policyLabel']) && $cfg['policyLabel'] !== '' ? (string) $cfg['policyLabel'] : 'Privacy Policy';
+        $policy  = isset($cfg['policyUrl']) ? esc_url((string) $cfg['policyUrl']) : '';
+        ?>
+<style id="seoagent-consent-css">
+#seoagent-consent{position:fixed;left:16px;right:16px;bottom:16px;z-index:2147483646;max-width:560px;margin:0 auto;background:#fff;color:#1a1a1a;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.18);padding:18px 20px;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;display:none}
+#seoagent-consent.on{display:block}
+#seoagent-consent p{margin:0 0 14px}
+#seoagent-consent a{color:#0a8f5b;text-decoration:underline}
+#seoagent-consent .sa-row{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end;align-items:center}
+#seoagent-consent button{cursor:pointer;border:0;border-radius:9px;padding:10px 18px;font-weight:600;font-size:13.5px;line-height:1}
+#seoagent-consent .sa-acc{background:#0a8f5b;color:#fff}
+#seoagent-consent .sa-dec{background:#ececec;color:#333}
+@media (prefers-color-scheme:dark){#seoagent-consent{background:#1e1e1e;color:#eee}#seoagent-consent .sa-dec{background:#333;color:#ddd}}
+</style>
+<div id="seoagent-consent" role="dialog" aria-live="polite" aria-label="Privacy consent">
+  <p><?php echo esc_html($text); ?><?php if ($policy) { ?> <a href="<?php echo $policy; ?>" rel="nofollow"><?php echo esc_html($label); ?></a><?php } ?></p>
+  <div class="sa-row">
+    <button type="button" class="sa-dec" id="seoagent-consent-dec"><?php echo esc_html($decline); ?></button>
+    <button type="button" class="sa-acc" id="seoagent-consent-acc"><?php echo esc_html($accept); ?></button>
+  </div>
+</div>
+<script>
+(function(){try{
+  var NAME=<?php echo wp_json_encode($cookie); ?>;
+  function get(n){var m=document.cookie.match('(?:^|; )'+n.replace(/([.*+?^${}()|[\]\\])/g,'\\$1')+'=([^;]*)');return m?m[1]:null;}
+  function set(v){try{document.cookie=NAME+'='+v+';max-age=31536000;path=/;samesite=Lax'+(location.protocol==='https:'?';secure':'');}catch(e){}}
+  var nav=navigator||{};
+  if(nav.globalPrivacyControl===true||nav.doNotTrack==='1'||window.doNotTrack==='1'){ if(!get(NAME)){ set('denied'); } return; }
+  if(get(NAME)){ return; }
+  var el=document.getElementById('seoagent-consent'); if(!el){ return; }
+  el.className='on';
+  function close(v){ set(v); el.className=''; }
+  var a=document.getElementById('seoagent-consent-acc'), d=document.getElementById('seoagent-consent-dec');
+  if(a){ a.addEventListener('click',function(){ close('statistics'); }); }
+  if(d){ d.addEventListener('click',function(){ close('denied'); }); }
+}catch(e){}})();
+</script>
+        <?php
+    }
+
     /* Mark 404 responses so the beacon (and crawlers) can detect soft/hard 404s. */
     public function output_404_marker() {
         if (is_404()) echo "\n<meta name=\"sentinel-404\" content=\"1\">\n";
@@ -288,6 +350,19 @@ class SEO_Agent_Optimize {
                 update_option('seoagent_ux_beacon', wp_json_encode($cfg));
                 $this->purge();
                 return ['ok' => true, 'armed' => !empty($cfg['armed'])];
+            },
+        ]);
+
+        // First-party consent banner config (output_consent_banner). Absent = INERT.
+        register_rest_route('seoagent/v1', '/set-consent-banner', [
+            'methods'  => 'POST',
+            'permission_callback' => $perm,
+            'callback' => function ($req) {
+                $cfg = $req->get_json_params()['config'] ?? null;
+                if ($cfg === null) return new WP_Error('bad', 'config required', ['status' => 400]);
+                update_option('seoagent_consent_banner', wp_json_encode($cfg));
+                $this->purge();
+                return ['ok' => true, 'enabled' => !empty($cfg['enabled'])];
             },
         ]);
 
@@ -452,7 +527,10 @@ class SEO_Agent_Optimize {
                 $uxRaw = get_option('seoagent_ux_beacon', '');
                 $uxCfg = ($uxRaw !== '' && $uxRaw !== false) ? json_decode((string) $uxRaw, true) : null;
                 $uxArmed = is_array($uxCfg) && (($uxCfg['armed'] ?? null) === true);
-                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets', 'entity_tolerant_insert', 'multi_anchor_targets', 'meta_render', 'geo_publish', 'ux_beacon'], 'version' => '1.9.0', 'seo_plugin_owns_head' => $this->seo_plugin_owns_head(), 'ux_beacon_armed' => $uxArmed];
+                $cbRaw = get_option('seoagent_consent_banner', '');
+                $cbCfg = ($cbRaw !== '' && $cbRaw !== false) ? json_decode((string) $cbRaw, true) : null;
+                $cbOn = is_array($cbCfg) && (($cbCfg['enabled'] ?? null) === true);
+                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets', 'entity_tolerant_insert', 'multi_anchor_targets', 'meta_render', 'geo_publish', 'ux_beacon', 'consent_banner'], 'version' => '1.10.0', 'seo_plugin_owns_head' => $this->seo_plugin_owns_head(), 'ux_beacon_armed' => $uxArmed, 'consent_banner_enabled' => $cbOn];
             },
         ]);
     }
