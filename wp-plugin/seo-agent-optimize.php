@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.11.0
+ * Version:     1.12.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.11.0';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.12.0';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -49,6 +49,9 @@ class SEO_Agent_Optimize {
         // seoagent_consent_banner option is present AND enabled===true. For sites with
         // no third-party CMP, this gates the UX beacon (sets seoagent_consent=statistics).
         add_action('wp_footer', [$this, 'output_consent_banner'], 18);
+        // When the first-party banner is enabled AND consent isn't yet granted, neutralise
+        // known third-party tracker scripts (Hotjar/GA/Meta/Clarity) until consent.
+        add_action('template_redirect', [$this, 'start_consent_blocker'], 2);
         add_action('wp_head', [$this, 'output_404_marker'], 1);
     }
 
@@ -274,7 +277,7 @@ class SEO_Agent_Optimize {
     <button type="button" class="sa-acc" id="seoagent-consent-acc"><?php echo esc_html($accept); ?></button>
   </div>
 </div>
-<script>
+<script data-seoagent="consent">
 (function(){try{
   var NAME=<?php echo wp_json_encode($cookie); ?>;
   function get(n){var m=document.cookie.match('(?:^|; )'+n.replace(/([.*+?^${}()|[\]\\])/g,'\\$1')+'=([^;]*)');return m?m[1]:null;}
@@ -285,12 +288,41 @@ class SEO_Agent_Optimize {
   var el=document.getElementById('seoagent-consent'); if(!el){ return; }
   el.className='on';
   function close(v){ set(v); el.className=''; }
+  // On Accept, re-execute any tracker scripts the server neutralised (type=text/plain).
+  function activate(){ try{ var b=document.querySelectorAll('script[type="text/plain"][data-seoagent-blocked]'); for(var k=0;k<b.length;k++){ var o=b[k], s=document.createElement('script'); for(var j=0;j<o.attributes.length;j++){ var at=o.attributes[j]; if(at.name!=='type'&&at.name!=='data-seoagent-blocked'){ s.setAttribute(at.name, at.value); } } if(o.src){ s.src=o.src; } else { s.text=o.textContent||''; } o.parentNode.replaceChild(s,o); } }catch(e){} }
   var a=document.getElementById('seoagent-consent-acc'), d=document.getElementById('seoagent-consent-dec');
-  if(a){ a.addEventListener('click',function(){ close('statistics'); }); }
+  if(a){ a.addEventListener('click',function(){ close('statistics'); activate(); }); }
   if(d){ d.addEventListener('click',function(){ close('denied'); }); }
 }catch(e){}})();
 </script>
         <?php
+    }
+
+    /* ── Consent-gated tracker blocker (first-party-banner sites only) ───────────
+       When the first-party banner is enabled and the visitor hasn't granted statistics
+       consent (seoagent_consent=statistics), neutralise known tracker <script> tags so
+       they don't run until consent. Scoped to a known pattern set — failure mode is
+       "not blocked", never a broken page. Complianz-managed sites don't enable our banner,
+       so this never touches them. The banner's JS re-executes the blocked scripts on Accept. */
+    public function start_consent_blocker() {
+        if (is_admin() || is_feed()) return;
+        $raw = get_option('seoagent_consent_banner', '');
+        if ($raw === '' || $raw === false) return;                          // banner off → no blocking
+        $cfg = json_decode((string) $raw, true);
+        if (!is_array($cfg) || ($cfg['enabled'] ?? null) !== true) return;
+        $cookie = isset($cfg['cookie']) ? (string) $cfg['cookie'] : 'seoagent_consent';
+        if (isset($_COOKIE[$cookie]) && $_COOKIE[$cookie] === 'statistics') return;   // consent granted → allow
+        ob_start([$this, 'block_trackers']);
+    }
+    public function block_trackers($html) {
+        if (!is_string($html) || $html === '') return $html;
+        $pat = '(static\.hotjar\.com|hotjar|googletagmanager\.com|google-analytics\.com|connect\.facebook\.net|clarity\.ms)';
+        return preg_replace_callback('#<script\b([^>]*)>(.*?)</script>#is', function ($m) use ($pat) {
+            if (stripos($m[1], 'data-seoagent') !== false) return $m[0];    // never touch our own scripts
+            if (!preg_match('#' . $pat . '#i', $m[0])) return $m[0];
+            $attrs = preg_replace('#\stype\s*=\s*("[^"]*"|\'[^\']*\'|\S+)#i', '', $m[1]);
+            return '<script' . $attrs . ' type="text/plain" data-seoagent-blocked="1">' . $m[2] . '</script>';
+        }, $html);
     }
 
     /* Mark 404 responses so the beacon (and crawlers) can detect soft/hard 404s. */
@@ -532,7 +564,7 @@ class SEO_Agent_Optimize {
                 $cbRaw = get_option('seoagent_consent_banner', '');
                 $cbCfg = ($cbRaw !== '' && $cbRaw !== false) ? json_decode((string) $cbRaw, true) : null;
                 $cbOn = is_array($cbCfg) && (($cbCfg['enabled'] ?? null) === true);
-                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets', 'entity_tolerant_insert', 'multi_anchor_targets', 'meta_render', 'geo_publish', 'ux_beacon', 'consent_banner', 'self_update'], 'version' => self::VERSION, 'seo_plugin_owns_head' => $this->seo_plugin_owns_head(), 'ux_beacon_armed' => $uxArmed, 'consent_banner_enabled' => $cbOn];
+                return ['ok' => true, 'features' => ['webp_on_the_fly', 'jsonld', 'custom_css', 'insert_link', 'page_text', 'refresh_block', 'repeater_widgets', 'entity_tolerant_insert', 'multi_anchor_targets', 'meta_render', 'geo_publish', 'ux_beacon', 'consent_banner', 'self_update', 'tracker_block'], 'version' => self::VERSION, 'seo_plugin_owns_head' => $this->seo_plugin_owns_head(), 'ux_beacon_armed' => $uxArmed, 'consent_banner_enabled' => $cbOn];
             },
         ]);
 
