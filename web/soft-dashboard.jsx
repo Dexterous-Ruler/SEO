@@ -2745,6 +2745,7 @@ function GscScreen({ ctx }) {
     if(r.status==="applied") ctx.toast("Refreshed live"+(imgN?(" · "+imgN+" image(s) optimised ("+(imgKB/1024).toFixed(1)+" MB)"):"")+(r.indexed&&r.indexed.ok?" · re-indexed":"")+" ✓","teal");
     else if(r.status==="blocked") ctx.toast("This site is read-only — arm writes first","gold");
     else if(r.status==="manual") ctx.toast("Content needs pasting (page-builder)"+(imgN?(" · "+imgN+" image(s) optimised"):""),"gold");
+    else if(r.status==="thin") ctx.toast(r.reason||"Skipped — not enough article content for a meaningful refresh","gold");
     else if(r.error) ctx.toast(r.error,"clay");
     return merged;
   };
@@ -2753,18 +2754,18 @@ function GscScreen({ ctx }) {
   };
   const doRefreshAll = async ()=>{
     const pages=(decay&&decay.pages)||[]; if(!pages.length) return;
-    let applied=0,manual=0,blocked=0,imgs=0;
+    let applied=0,manual=0,blocked=0,imgs=0,skipped=0;
     for(let i=0;i<pages.length;i++){
       setRefreshAll({ done:i, total:pages.length });
       try{
         const r=await API.contentRefresh(s.id, pages[i], true);
-        if(r.status==="applied")applied++; else if(r.status==="manual")manual++; else if(r.status==="blocked"){blocked++;continue;}
+        if(r.status==="applied")applied++; else if(r.status==="manual")manual++; else if(r.status==="thin")skipped++; else if(r.status==="blocked"){blocked++;continue;}
         if(r.status==="applied"||r.status==="manual"){ try{ const im=await API.pageOptimizeImages(s.id, pages[i], true); imgs+=(im&&im.uploaded)||0; }catch(e){} }
       }catch(e){}
     }
     setRefreshAll(null);
     if(blocked) ctx.toast("Site is read-only — arm writes for it, then retry","gold");
-    else ctx.toast(applied+" refreshed & re-indexed"+(imgs?(" · "+imgs+" image(s) optimised"):"")+(manual?(" · "+manual+" need pasting (page-builder)"):"")+" ✓","teal");
+    else ctx.toast(applied+" refreshed & re-indexed"+(imgs?(" · "+imgs+" image(s) optimised"):"")+(manual?(" · "+manual+" need pasting (page-builder)"):"")+(skipped?(" · "+skipped+" skipped (too thin)"):"")+" ✓","teal");
   };
 
   const connect = ()=>{

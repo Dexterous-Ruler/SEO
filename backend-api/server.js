@@ -1933,13 +1933,30 @@ const routes = {
     const niche = (site && (site.niche || (site.stack && site.stack.niche))) || '';
     let monthYear = ''; try { monthYear = new Date().toLocaleString('en-GB', { month: 'long', year: 'numeric' }); } catch (e) {}
 
-    // 1) Ground the refresh in the page's real, current text (works on any builder).
+    // 1) Ground the refresh in the page's real ARTICLE body — NOT the nav/footer/marketing
+    //    chrome (grabbing the whole page made blocks restate site-wide product blurbs &
+    //    ratings). Prefer the mu-plugin's builder-aware page-text, then the WP post content,
+    //    then a raw page fetch (last resort, includes chrome).
     let pageText = '';
-    try {
-      const res = await fetch(pageUrl, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } });
-      const html = await res.text();
-      pageText = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
-    } catch (e) {}
+    if (body.siteId) {
+      try {
+        const gCreds = await credsForSite(body.siteId);
+        const gwp = new WordPressClient(gCreds);
+        let gf = (page._id && page._type) ? { id: page._id, type: page._type } : null;
+        if (!gf) { try { gf = await gwp.resolvePostByUrl(pageUrl); } catch (e) {} }
+        if (gf && gf.id) {
+          try { const pt = await gwp.request(`${gwp.baseUrl}/wp-json/seoagent/v1/page-text?post_id=${gf.id}`); if (pt && pt.text && String(pt.text).trim().length > 80) pageText = String(pt.text).replace(/\s+/g, ' ').trim().slice(0, 4000); } catch (e) {}
+          if (!pageText) { try { const post = await gwp.request(`/${gf.type}/${gf.id}?_fields=content`); const rnd = (post && post.content && post.content.rendered) || ''; if (rnd) pageText = rnd.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000); } catch (e) {} }
+        }
+      } catch (e) {}
+    }
+    if (!pageText) {
+      try {
+        const res = await fetch(pageUrl, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } });
+        const html = await res.text();
+        pageText = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
+      } catch (e) {}
+    }
 
     // 2) Generate the freshness block (Claude — strictly grounded, no invented facts).
     const parts = await claude.refreshContent({
@@ -1950,6 +1967,14 @@ const routes = {
     const blockHtml = buildRefreshBlock(parts, monthYear);
     // A clean, paste-ready version (markers stripped) for the manual fallback.
     const pasteHtml = blockHtml.replace(REFRESH_OPEN + '\n', '').replace('\n' + REFRESH_CLOSE + '\n', '');
+
+    // Quality gate — never insert a filler block. If the page yielded no article-specific
+    // substance, skip rather than add a generic "Updated for …" stamp (what reads as
+    // "a block that doesn't say anything").
+    const realPoints = (parts.points || []).filter((p) => String(p || '').trim().length > 12);
+    if (!(String(parts.intro || '').trim().length > 50 && realPoints.length >= 2)) {
+      return { status: 'thin', reason: 'This page didn\'t yield enough article-specific content for a meaningful refresh, so no block was added (it would just be a generic "updated" stamp). Add substantive updates to the page, or refresh it manually.', parts, blockHtml: pasteHtml, monthYear };
+    }
 
     if (!body.apply) {
       return { status: 'preview', parts, blockHtml: pasteHtml, monthYear, willIndex: true };

@@ -235,12 +235,14 @@ Current page content (verbatim excerpt — use ONLY facts present here, invent n
 """${(currentText || '').slice(0, 3500)}"""
 
 Rules:
-- Strictly grounded in the excerpt. If a fact isn't in it, don't state it. NEVER invent statistics, dates, prices, legal claims, or guarantees.
-- Conservative and factual. This may be a legal/financial (YMYL) page — accuracy over flourish.
-- "intro": 1–2 fresh sentences that restate the page's value for someone searching now (${monthYear || 'this year'}).
-- "points": 3–5 concise bullet points that surface the most useful, decision-relevant info already in the page (each ≤ 18 words).
-- "heading": a short H2 like "Updated for ${monthYear || 'this year'}" or a topical refresh heading.
-- "note": one short line inviting the reader to read on / contact (no fake urgency, no invented offers).
+- Base the block ONLY on the article's SUBJECT MATTER from the excerpt. IGNORE site-wide navigation, footers, marketing blurbs, ratings/review counts ("trusted by N users", star ratings), app/product feature lists, badges and calls-to-action — that is page chrome, NOT the article.
+- Strictly grounded: if a fact isn't in the excerpt, don't state it. NEVER invent statistics, dates, prices, legal claims, or guarantees. This may be a legal/financial (YMYL) page — accuracy over flourish.
+- Every piece must add REAL, specific, decision-relevant value about the topic. NO generic filler ("we've updated this page", "explore our features", restating that a product exists).
+- "heading": a short, TOPICAL H2 about the article's subject (a sharper angle or a "what to know now" framing). Avoid a bare "Updated for ${monthYear || 'this year'}".
+- "intro": 1–2 sentences of genuinely useful, topic-specific context for someone searching now (${monthYear || 'this year'}).
+- "points": 3–5 specific, decision-relevant takeaways ABOUT THE TOPIC, drawn from the excerpt (each ≤ 22 words). Never product/app features or marketing.
+- "note": one short, relevant line (no fake urgency, no invented offers).
+- If the excerpt contains NO substantive article content (only chrome/marketing/nav), return empty strings and an empty points array — do NOT fabricate a block.
 
 Output ONLY a JSON object: {"heading":"...","intro":"...","points":["...","..."],"note":"..."}`,
     }],
