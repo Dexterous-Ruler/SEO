@@ -1933,6 +1933,39 @@ const routes = {
     const niche = (site && (site.niche || (site.stack && site.stack.niche))) || '';
     let monthYear = ''; try { monthYear = new Date().toLocaleString('en-GB', { month: 'long', year: 'numeric' }); } catch (e) {}
 
+    // QUIET refresh — never inserts a visible content block (operators found the inserted block
+    // too generic/not useful). Strips any prior block, bumps the page's modified date (a real
+    // ranking-freshness signal), and re-indexes. Returns before the legacy block-gen path below.
+    if (!body.apply) {
+      return { status: 'preview', quiet: true, note: "Quiet refresh: bumps the page's freshness/modified date and re-submits it for indexing — no content block is added." };
+    }
+    if (site && site.write_armed === false && !body.force) {
+      return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then refresh.' };
+    }
+    {
+      let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
+      const wp = new WordPressClient(creds);
+      let found = (page._id && page._type) ? { id: page._id, type: page._type } : null;
+      if (!found) { try { found = await wp.resolvePostByUrl(pageUrl); } catch (e) {} }
+      if (!found || !found.id) return { status: 'manual', reason: 'Could not match this URL to a WordPress post/page.', manualHint: 'Re-save the page in your editor to bump its modified date.' };
+      let touched = false, removedBlock = false;
+      try {
+        const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/refresh-block`, { method: 'POST', body: { post_id: found.id, remove: true, touch: true, open: REFRESH_OPEN, close: REFRESH_CLOSE } });
+        if (r && r.ok) { touched = true; removedBlock = !!r.replaced; }
+      } catch (e) { /* mu-plugin absent/old → classic fallback */ }
+      if (!touched) {
+        try {
+          const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content`).catch(() => null);
+          const raw = (post && post.content && (post.content.raw != null ? post.content.raw : '')) || '';
+          if (raw.length) { const s = stripRefreshBlock(raw); await wp.update(found.type, found.id, { content: s.html }, { force: true }); touched = true; removedBlock = s.removed; }
+        } catch (e) {}
+      }
+      const indexed = await submitOneForIndex(body.siteId, pageUrl);
+      if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'sparkles', text: `Refreshed “${page.title || pageUrl}”`, meta: 'freshness date + re-indexed' + (removedBlock ? ' · removed old block' : '') }).catch(() => {});
+      return { status: 'applied', via: 'quiet', quiet: true, removedBlock, indexed, postId: found.id, note: 'Freshness date bumped + re-indexed' + (removedBlock ? ' (removed a prior block)' : '') + ' — no content block added.' };
+    }
+
+    // ── Legacy block-insertion path below is no longer reached (kept for reference) ──
     // 1) Ground the refresh in the page's real ARTICLE body — NOT the nav/footer/marketing
     //    chrome (grabbing the whole page made blocks restate site-wide product blurbs &
     //    ratings). Prefer the mu-plugin's builder-aware page-text, then the WP post content,
@@ -2051,6 +2084,35 @@ const routes = {
     const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
     if (site) await db.logActivity({ site_id: site.id, type: 'config', actor: 'You', icon: 'undo', text: `Removed refresh from “${page.title || pageUrl}”`, meta: pageUrl }).catch(() => {});
     return { status: 'removed', via: 'content' };
+  },
+
+  // Site-wide cleanup: strip any legacy freshness block from EVERY post/page that has one.
+  // Calls the mu-plugin's idempotent remove on each id (a true no-op where there's no block,
+  // so untouched pages aren't re-saved or re-dated). Removes both classic + Elementor blocks.
+  'POST /refresh-blocks-purge': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
+    const wp = new WordPressClient(creds);
+    let scanned = 0, removed = 0, failed = 0;
+    for (const type of ['posts', 'pages']) {
+      for (let pageN = 1; pageN <= 30; pageN++) {
+        let rows;
+        try { rows = await wp.request(`/${type}?per_page=100&page=${pageN}&status=publish,draft,private&_fields=id`); }
+        catch (e) { break; }
+        if (!Array.isArray(rows) || !rows.length) break;
+        for (const r of rows) {
+          scanned++;
+          try {
+            const rr = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/refresh-block`, { method: 'POST', body: { post_id: r.id, remove: true, open: REFRESH_OPEN, close: REFRESH_CLOSE } });
+            if (rr && rr.ok && rr.replaced) removed++;
+          } catch (e) { failed++; }
+        }
+        if (rows.length < 100) break;
+      }
+    }
+    const site = await db.getSite(body.siteId).catch(() => null);
+    if (site && removed) await db.logActivity({ site_id: site.id, type: 'config', actor: 'You', icon: 'undo', text: `Removed ${removed} legacy refresh block(s) site-wide`, meta: `${scanned} pages scanned` }).catch(() => {});
+    return { ok: true, scanned, removed, failed };
   },
 
   // Optimise the images USED ON one page (content-decay "refresh & optimise").

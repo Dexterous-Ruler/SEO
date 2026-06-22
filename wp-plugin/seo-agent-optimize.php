@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.12.0
+ * Version:     1.13.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.12.0';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.13.0';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -490,10 +490,13 @@ class SEO_Agent_Optimize {
                     $arr = array_values(array_filter($arr, function ($el) { return strpos(wp_json_encode($el), 'seoagent-refresh') === false; }));
                     $replaced = count($arr) !== $before;
                     if (!$remove) array_unshift($arr, seoagent_refresh_section($marked));
-                    update_post_meta($id, '_elementor_data', wp_slash(wp_json_encode($arr)));
-                    delete_post_meta($id, '_elementor_css');
-                    if (class_exists('\\Elementor\\Plugin')) { try { \Elementor\Plugin::$instance->files_manager->clear_cache(); } catch (\Throwable $e) {} }
-                    $this->purge();
+                    if ($replaced || !$remove) {   // write only when something actually changed (purge-safe no-op otherwise)
+                        update_post_meta($id, '_elementor_data', wp_slash(wp_json_encode($arr)));
+                        delete_post_meta($id, '_elementor_css');
+                        if (class_exists('\\Elementor\\Plugin')) { try { \Elementor\Plugin::$instance->files_manager->clear_cache(); } catch (\Throwable $e) {} }
+                    }
+                    if (!empty($p['touch'])) wp_update_post(['ID' => $id]);   // bump modified date (quiet refresh)
+                    if ($replaced || !$remove || !empty($p['touch'])) $this->purge();
                     return ['ok' => true, 'mode' => 'elementor', 'post_id' => $id, 'replaced' => $replaced, 'removed' => $remove];
                 }
                 // Classic / Gutenberg → post_content is what renders.
@@ -502,8 +505,9 @@ class SEO_Agent_Optimize {
                 $had = (bool) preg_match($re, $content);
                 $content = preg_replace($re, '', $content);
                 if (!$remove) $content = $marked . "\n" . $content;
-                wp_update_post(['ID' => $id, 'post_content' => $content]);
-                $this->purge();
+                if ($had || !$remove) { wp_update_post(['ID' => $id, 'post_content' => $content]); }   // write only on change
+                elseif (!empty($p['touch'])) { wp_update_post(['ID' => $id]); }                        // else bump modified if asked
+                if ($had || !$remove || !empty($p['touch'])) $this->purge();
                 return ['ok' => true, 'mode' => 'content', 'post_id' => $id, 'replaced' => $had, 'removed' => $remove];
             },
         ]);
