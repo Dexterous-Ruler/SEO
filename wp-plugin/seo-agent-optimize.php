@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.13.0
+ * Version:     1.14.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.13.0';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.14.0';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -509,6 +509,39 @@ class SEO_Agent_Optimize {
                 elseif (!empty($p['touch'])) { wp_update_post(['ID' => $id]); }                        // else bump modified if asked
                 if ($had || !$remove || !empty($p['touch'])) $this->purge();
                 return ['ok' => true, 'mode' => 'content', 'post_id' => $id, 'replaced' => $had, 'removed' => $remove];
+            },
+        ]);
+
+        // Site-wide purge of legacy freshness blocks — one DB pass (fast; no per-page HTTP).
+        // Finds classic blocks (post_content) + Elementor blocks (_elementor_data) via LIKE
+        // and strips them. Touches ONLY pages that actually have a block.
+        register_rest_route('seoagent/v1', '/refresh-blocks-purge', [
+            'methods'  => 'POST',
+            'permission_callback' => $perm,
+            'callback' => function () {
+                global $wpdb;
+                $removed = 0;
+                $re = '#<!--seoagent-refresh-->.*?<!--/seoagent-refresh-->\s*#s';
+                // Classic / Gutenberg: marker lives in post_content.
+                $ids = $wpdb->get_col("SELECT ID FROM {$wpdb->posts} WHERE post_status IN ('publish','draft','private','pending') AND post_content LIKE '%seoagent-refresh%'");
+                foreach ($ids as $id) {
+                    $c = (string) get_post_field('post_content', (int) $id);
+                    $nc = preg_replace($re, '', $c);
+                    if ($nc !== $c) { wp_update_post(['ID' => (int) $id, 'post_content' => $nc]); $removed++; }
+                }
+                // Elementor: marker lives in the _elementor_data meta.
+                $eids = $wpdb->get_col("SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_elementor_data' AND meta_value LIKE '%seoagent-refresh%'");
+                foreach ($eids as $id) {
+                    $data = get_post_meta((int) $id, '_elementor_data', true);
+                    $arr = is_string($data) ? json_decode($data, true) : $data;
+                    if (!is_array($arr)) continue;
+                    $before = count($arr);
+                    $arr = array_values(array_filter($arr, function ($el) { return strpos(wp_json_encode($el), 'seoagent-refresh') === false; }));
+                    if (count($arr) !== $before) { update_post_meta((int) $id, '_elementor_data', wp_slash(wp_json_encode($arr))); delete_post_meta((int) $id, '_elementor_css'); $removed++; }
+                }
+                if ($removed && class_exists('\\Elementor\\Plugin')) { try { \Elementor\Plugin::$instance->files_manager->clear_cache(); } catch (\Throwable $e) {} }
+                if ($removed) $this->purge();
+                return ['ok' => true, 'removed' => $removed, 'classic_found' => count($ids), 'elementor_found' => count($eids)];
             },
         ]);
 
