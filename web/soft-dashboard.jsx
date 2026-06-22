@@ -1422,13 +1422,7 @@ function OpportunitiesScreen({ ctx }) {
     <div className="rise">
       <PageHead title="Content Opportunities" sub="Keyword clusters from your rankings, competitors & live trends (in your target market) — gap-checked against your sitemap.">
         <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
-          <div title="Target country for opportunities, trends & briefs — sets this site's market" style={{ display:"inline-flex", alignItems:"center", gap:5, padding:"5px 9px 5px 11px", borderRadius:99, background:"var(--surface)", boxShadow:"var(--neo-xs)", fontSize:12, fontWeight:700, color:"var(--ink)" }}>
-            <Icon name="globe" size={13} style={{ color:"var(--muted)" }} />
-            <select value={dbVal} onChange={e=>changeCountry(e.target.value)} style={{ appearance:"none", WebkitAppearance:"none", border:"none", background:"transparent", fontSize:12, fontWeight:700, fontFamily:"inherit", color:"var(--ink)", cursor:"pointer", outline:"none", paddingRight:1 }}>
-              {(dbList||[{db:dbVal,label:dbVal.toUpperCase()}]).map(c=>(<option key={c.db} value={c.db}>{c.label}</option>))}
-            </select>
-            <span style={{ color:"var(--muted)", fontSize:10, marginLeft:-2 }}>▾</span>
-          </div>
+          <CountrySelect value={dbVal} options={dbList} onChange={changeCountry} title="Target country for opportunities, trends & briefs — sets this site's market" />
           {data && <NeoButton kind="soft" size="sm" icon="layers" onClick={()=>pushAirtable(clusters.filter(c=>c.isGap),"gaps")} disabled={pushing==="gaps"}>{pushing==="gaps"&&<Icon name="cog" size={14} className="audit-spin" />}Send gaps → Airtable</NeoButton>}
           <NeoButton kind="primary" size="sm" icon={busy?undefined:"sparkles"} disabled={busy} onClick={load}>{busy&&<Icon name="cog" size={15} className="audit-spin" />}{busy?"Analyzing…":data?"Re-analyze":"Find opportunities"}</NeoButton>
         </div>
@@ -2238,13 +2232,7 @@ function ContentScreen({ ctx }) {
     <div className="rise">
       <PageHead title="Content Intelligence" sub={`Keyword clusters, content gaps & new-article ideas for ${s.name}.`}>
         <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
-          <div title="Target country for content intel, briefs & research — sets this site's market" style={{ display:"inline-flex", alignItems:"center", gap:5, padding:"5px 9px 5px 11px", borderRadius:99, background:"var(--surface)", boxShadow:"var(--neo-xs)", fontSize:12, fontWeight:700, color:"var(--ink)" }}>
-            <Icon name="globe" size={13} style={{ color:"var(--muted)" }} />
-            <select value={dbVal} onChange={e=>changeCountry(e.target.value)} style={{ appearance:"none", WebkitAppearance:"none", border:"none", background:"transparent", fontSize:12, fontWeight:700, fontFamily:"inherit", color:"var(--ink)", cursor:"pointer", outline:"none", paddingRight:1 }}>
-              {(dbList||[{db:dbVal,label:dbVal.toUpperCase()}]).map(c=>(<option key={c.db} value={c.db}>{c.label}</option>))}
-            </select>
-            <span style={{ color:"var(--muted)", fontSize:10, marginLeft:-2 }}>▾</span>
-          </div>
+          <CountrySelect value={dbVal} options={dbList} onChange={changeCountry} title="Target country for content intel, briefs & research — sets this site's market" />
           {d && !d.error && !loading && <NeoButton kind="soft" size="sm" icon={pushing?undefined:"upload"} disabled={pushing} onClick={pushToAirtable}>{pushing&&<Icon name="cog" size={15} className="audit-spin" />}{pushing?"Pushing…":"Push to Airtable"}</NeoButton>}
           <NeoButton kind="primary" icon={loading?undefined:"sparkles"} disabled={loading} onClick={ctx.runContentIntel}>
             {loading && <Icon name="cog" size={17} className="audit-spin" />}{loading?"Analyzing…":d?"Re-analyze":"Analyze content"}
@@ -3306,14 +3294,7 @@ function SemrushScreen({ ctx }) {
     <div className="rise">
       <PageHead title="DataForSEO" sub={`Live search-performance data for ${domain}.`}>
         <div style={{ display:"flex", gap:10 }}>
-          <div title="Keyword data market — pick the country DataForSEO pulls rankings, volumes & competitors from" style={{ display:"inline-flex", alignItems:"center", gap:5, padding:"5px 9px 5px 11px", borderRadius:99, background:"var(--surface)", boxShadow:"var(--neo-xs)", fontSize:12, fontWeight:700, color:"var(--ink)" }}>
-            <Icon name="globe" size={13} style={{ color:"var(--muted)" }} />
-            <select value={dbVal} onChange={e=>changeDb(e.target.value)}
-              style={{ appearance:"none", WebkitAppearance:"none", border:"none", background:"transparent", fontSize:12, fontWeight:700, fontFamily:"inherit", color:"var(--ink)", cursor:"pointer", outline:"none", paddingRight:1 }}>
-              {(dbList||[{db:dbVal,label:dbVal.toUpperCase()}]).map(c=>(<option key={c.db} value={c.db}>{c.label} database</option>))}
-            </select>
-            <span style={{ color:"var(--muted)", fontSize:10, marginLeft:-2 }}>▾</span>
-          </div>
+          <CountrySelect value={dbVal} options={dbList} onChange={changeDb} title="Keyword data market — pick the country DataForSEO pulls rankings, volumes & competitors from" />
           {units!=null && <Chip tone={units<100?"clay":units<1000?"gold":"teal"} size="sm" icon="bolt">${(units/100).toFixed(2)} balance</Chip>}
           {data && <NeoButton kind="soft" size="sm" icon="trend" onClick={load}>Refresh</NeoButton>}
         </div>

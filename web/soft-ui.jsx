@@ -292,8 +292,58 @@ function Field({ label, hint, children }) {
   );
 }
 
+// Searchable country/market picker — soft-UI dropdown with a filter box. Replaces the native
+// <select> used for the per-site market. value = db code, options = [{db,label}], onChange(db).
+function CountrySelect({ value, options, onChange, title }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const ref = useRef(null);
+  const opts = (options && options.length) ? options : [{ db: value, label: String(value || "").toUpperCase() }];
+  const cur = opts.find((o) => o.db === value);
+  const label = cur ? cur.label : String(value || "").toUpperCase();
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setQ(""); } };
+    const onEsc = (e) => { if (e.key === "Escape") { setOpen(false); setQ(""); } };
+    document.addEventListener("mousedown", onDoc); document.addEventListener("keydown", onEsc);
+    return () => { document.removeEventListener("mousedown", onDoc); document.removeEventListener("keydown", onEsc); };
+  }, [open]);
+  const ql = q.trim().toLowerCase();
+  const filtered = ql ? opts.filter((o) => String(o.label || "").toLowerCase().includes(ql) || String(o.db || "").toLowerCase().includes(ql)) : opts;
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button type="button" title={title || "Target country / market"} onClick={() => setOpen((o) => !o)}
+        style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "6px 10px 6px 11px", borderRadius: 99, border: "none", background: "var(--surface)", boxShadow: open ? "var(--neo-in)" : "var(--neo-xs)", fontSize: 12, fontWeight: 700, color: "var(--ink)", cursor: "pointer", fontFamily: "inherit" }}>
+        <Icon name="globe" size={13} style={{ color: "var(--t-700)" }} />
+        <span>{label}</span>
+        <span style={{ color: "var(--muted)", fontSize: 10, marginLeft: -1 }}>▾</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 200, width: 250, background: "var(--surface)", borderRadius: "var(--r-md)", boxShadow: "0 14px 38px rgba(0,0,0,.18)", padding: 8 }}>
+          <div style={{ position: "relative", marginBottom: 6 }}>
+            <Icon name="search" size={13} style={{ color: "var(--faint)", position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)" }} />
+            <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search countries…"
+              style={{ width: "100%", boxSizing: "border-box", padding: "8px 11px 8px 31px", borderRadius: "var(--r-pill)", border: "none", background: "var(--bg)", boxShadow: "var(--neo-in)", fontSize: 13, color: "var(--ink)", outline: "none", fontFamily: "inherit" }} />
+          </div>
+          <div className="scroll" style={{ maxHeight: 256, overflow: "auto", display: "flex", flexDirection: "column", gap: 2 }}>
+            {filtered.map((o) => (
+              <button key={o.db} type="button" onClick={() => { onChange(o.db); setOpen(false); setQ(""); }}
+                style={{ textAlign: "left", padding: "8px 11px", borderRadius: 9, border: "none", cursor: "pointer", fontSize: 13, fontWeight: o.db === value ? 700 : 500, background: o.db === value ? "var(--t-50)" : "transparent", color: o.db === value ? "var(--t-700)" : "var(--ink)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}
+                onMouseEnter={(e) => { if (o.db !== value) e.currentTarget.style.background = "var(--bg)"; }}
+                onMouseLeave={(e) => { if (o.db !== value) e.currentTarget.style.background = "transparent"; }}>
+                <span>{o.label}</span>{o.db === value && <Icon name="check" size={13} sw={2.6} style={{ color: "var(--t-700)" }} />}
+              </button>
+            ))}
+            {!filtered.length && <div style={{ padding: "9px 11px", fontSize: 12.5, color: "var(--muted)" }}>No country matches “{q}”.</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 Object.assign(window, {
-  Icon, SoftCard, Well, NeoButton, Chip, Toggle, Gauge, Ring, SectionHead, Glyph,
+  Icon, SoftCard, Well, NeoButton, Chip, Toggle, Gauge, Ring, SectionHead, Glyph, CountrySelect,
   SoftModal, SoftModalHead, SoftDiff, SoftRisk, SoftInput, Field,
   softDisc, softStatus, impactTone,
   tealForScore, useCountUp, prefersReduced, TT, useState, useEffect, useRef, useCallback
