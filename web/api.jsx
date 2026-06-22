@@ -122,6 +122,7 @@
     geoPrompts(siteId, siteName, niche, sampleTitles, exclude) { return engine("/geo-prompts", { siteId, siteName, niche, sampleTitles, exclude }); },
     geoTrack(siteId, targetDomain, prompts, competitors) { return engine("/geo-track", { siteId, targetDomain, prompts, competitors }); },
     geoEnable(siteId, opts) { return engine("/geo-enable", Object.assign({ siteId }, opts || {})); },
+    geoHistory(siteId) { return engine("/geo-history", { siteId }); },
     // Experience Monitor (UX/conversion defects) — inert until RUM_ENABLED + site armed.
     beaconStatus(siteId) { return engine("/beacon-status", { siteId }); },
     uxDefects(siteId, opts) { return engine("/ux-defects", Object.assign({ siteId }, opts || {})); },

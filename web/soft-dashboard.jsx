@@ -2393,7 +2393,13 @@ function GeoScreen({ ctx }) {
   const [boosting, setBoosting] = useState(false);
   const [pushing, setPushing] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [pushingOpps, setPushingOpps] = useState(false);
+  const [geoHist, setGeoHist] = useState(null);
+  const [ctxText, setCtxText] = useState(s.geo_context || "");
+  const [savingCtx, setSavingCtx] = useState(false);
   const API = window.SentinelAPI;
+  // Load scan history (for the trend) + reset the per-site context on site change.
+  useEffect(()=>{ setCtxText(s.geo_context||""); if(API&&API.geoHistory) API.geoHistory(s.id).then(r=>setGeoHist((r&&r.runs)||[])).catch(()=>{}); },[s.id, d]);
   // Push the current scan's prompt/citation results to Airtable (de-duped server-side).
   const pushAirtable = ()=>{
     if(!d || d.error || !((d.results||[]).length)){ ctx.toast("Run a scan first","gold"); return; }
@@ -2404,6 +2410,25 @@ function GeoScreen({ ctx }) {
       const comp=(r.synced&&r.synced.geo_competitors)||{}; const compPushed=comp.pushed||0;
       ctx.toast((pushed?("Pushed "+pushed+" prompt result(s)"+(skipped?" · "+skipped+" already there":"")):"Prompts already in Airtable")+(compPushed?(" · "+compPushed+" competitor row(s)"):"")+" ✓","teal");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(false));
+  };
+  // Push the "show up for these" opportunities (uncited queries) to their own Airtable table.
+  const pushAirtableOpps = ()=>{
+    if(!opportunities.length){ ctx.toast("No opportunities to push — run a scan first","gold"); return; }
+    setPushingOpps(true); ctx.toast("Pushing opportunities to Airtable…","teal");
+    API.airtableSync(s.id,{kinds:["geo_opportunities"],geoOpportunities:opportunities}).then(r=>{
+      if(r.error){ ctx.toast(r.needsConnect?"Connect Airtable first (Integrations screen)":r.needsConfig?"Pick an Airtable base first (Integrations screen)":r.error,"clay"); return; }
+      const g=(r.synced&&r.synced.geo_opportunities)||{}; const pushed=g.pushed||0; const skipped=(r.synced&&r.synced.geoOppsSkipped)||0;
+      ctx.toast(pushed?("Pushed "+pushed+" opportunit"+(pushed===1?"y":"ies")+(skipped?" · "+skipped+" already there":"")):"All opportunities already in Airtable ✓","teal");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushingOpps(false));
+  };
+  // Save the per-site AI context (steers the next scan's prompt generation).
+  const saveContext = ()=>{
+    setSavingCtx(true);
+    Promise.resolve(API.updateSite(s.id,{geo_context:ctxText})).then(r=>{
+      if(r&&r.error){ ctx.toast("Couldn't save context (the geo_context column may be missing): "+r.error,"clay"); return; }
+      s.geo_context=ctxText;
+      ctx.toast("Site context saved — used to focus the next scan's prompts","teal");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setSavingCtx(false));
   };
   // Publish llms.txt + AI-bot robots to the LIVE site (needs mu-plugin v1.8.0 + write-armed).
   const publishGeo = ()=>{
@@ -2459,6 +2484,17 @@ function GeoScreen({ ctx }) {
         <span style={{ fontSize:12, color:"var(--muted)" }}>Compared in the same AI answers</span>
       </SoftCard>
 
+      {/* per-site AI context — steers prompt generation toward what this site actually is */}
+      <SoftCard hover={false} style={{ marginBottom:18 }}>
+        <SectionHead sub="Tell the AI what this site is about, who it serves and what to focus on — used to generate sharper, on-topic prompts. Saved per site.">Site context for AI prompts</SectionHead>
+        <textarea value={ctxText} onChange={e=>setCtxText(e.target.value)} rows={3}
+          placeholder="e.g. A UK consumer app that scans food & skincare barcodes to reveal ingredients, allergens and safety scores. Audience: health-conscious shoppers. Focus prompts on ingredient safety, product comparisons and label decoding."
+          style={{ width:"100%", boxSizing:"border-box", padding:"11px 13px", borderRadius:"var(--r-md)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none", resize:"vertical", fontFamily:"inherit", lineHeight:1.5 }} />
+        <div style={{ display:"flex", justifyContent:"flex-end", marginTop:10 }}>
+          <NeoButton kind="soft" size="sm" icon={savingCtx?undefined:"check"} disabled={savingCtx||ctxText===(s.geo_context||"")} onClick={saveContext}>{savingCtx&&<Icon name="cog" size={13} className="audit-spin" />}Save context</NeoButton>
+        </div>
+      </SoftCard>
+
       {!d && !loading && (
         <SoftCard hover={false}>
           <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:12, padding:"32px 10px", textAlign:"center" }}>
@@ -2487,6 +2523,12 @@ function GeoScreen({ ctx }) {
               <div style={{ fontSize:12.5, color:"var(--muted)", marginBottom:8 }}>% of prompts that cite your site</div>
               <Gauge value={d.shareOfVoice} size={168} sw={17} center={<><span style={{ fontSize:46, fontWeight:800, color:tealForScore(d.shareOfVoice), lineHeight:1 }}>{d.shareOfVoice}</span><span style={{ fontSize:12, color:"var(--muted)", fontWeight:600, marginTop:4 }}>%</span></>} />
               <Chip tone={d.promptsCited>0?"teal":"clay"} size="sm" icon="globe" style={{ marginTop:12 }}>{d.promptsCited}/{d.promptsTotal} prompts cited</Chip>
+              {d.delta && d.previous && (
+                <div style={{ marginTop:10, fontSize:12.5, fontWeight:700, color: d.delta.shareOfVoice>0?"var(--t-700)":d.delta.shareOfVoice<0?"var(--clay)":"var(--muted)" }}>
+                  {d.delta.shareOfVoice>0?("▲ +"+d.delta.shareOfVoice):d.delta.shareOfVoice<0?("▼ "+d.delta.shareOfVoice):"no change"} pts vs last scan
+                  {d.delta.promptsCited?(" · "+(d.delta.promptsCited>0?"+":"")+d.delta.promptsCited+" cited"):""}
+                </div>
+              )}
             </SoftCard>
             <SoftCard tone="dark">
               <SectionHead light sub="Who AI cites for your buyer-intent queries">Competitive Share</SectionHead>
@@ -2519,7 +2561,7 @@ function GeoScreen({ ctx }) {
           {/* opportunities — the new queries we want to show up for */}
           {opportunities.length>0 && (
             <SoftCard hover={false}>
-              <SectionHead sub="Fresh queries where AI isn’t citing you yet — target these next (each scan surfaces new ones)">Opportunities — show up for these</SectionHead>
+              <SectionHead sub="Fresh queries where AI isn’t citing you yet — target these next (each scan surfaces new ones)" right={<NeoButton kind="soft" size="sm" icon={pushingOpps?undefined:"grid"} disabled={pushingOpps} onClick={pushAirtableOpps}>{pushingOpps&&<Icon name="cog" size={13} className="audit-spin" />}Push to Airtable</NeoButton>}>Opportunities — show up for these</SectionHead>
               <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
                 {opportunities.map((r,i)=>(
                   <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:11, padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", boxShadow:"var(--neo-in)" }}>
@@ -2530,6 +2572,28 @@ function GeoScreen({ ctx }) {
                     </div>
                   </div>
                 ))}
+              </div>
+            </SoftCard>
+          )}
+
+          {/* scan history — track progress (up/down) over time */}
+          {Array.isArray(geoHist) && geoHist.length>1 && (
+            <SoftCard hover={false}>
+              <SectionHead sub="Share of AI voice across your recent scans — newest first">Scan history</SectionHead>
+              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                {geoHist.slice(0,8).map((h,i)=>{
+                  const prev=geoHist[i+1]; const dlt=prev?Math.round((h.shareOfVoice||0)-(prev.shareOfVoice||0)):null;
+                  let when="—"; try{ if(h.at) when=new Date(h.at).toLocaleDateString(undefined,{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"}); }catch(e){}
+                  return (
+                    <div key={i} style={{ display:"flex", alignItems:"center", gap:12, padding:"9px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+                      <span style={{ fontSize:12, color:"var(--muted)", minWidth:124 }}>{when}</span>
+                      <div style={{ flex:1, height:8, borderRadius:99, background:"var(--bg-2)", overflow:"hidden" }}><div style={{ width:Math.max(2,Math.min(100,Number(h.shareOfVoice)||0))+"%", height:"100%", background:"var(--t-700)" }} /></div>
+                      <span style={{ fontSize:13.5, fontWeight:800, minWidth:42, textAlign:"right" }}>{h.shareOfVoice}%</span>
+                      <span style={{ fontSize:11.5, color:"var(--muted)", minWidth:60, textAlign:"right" }}>{h.promptsCited}/{h.promptsTotal}</span>
+                      <span style={{ fontSize:12, fontWeight:700, minWidth:40, textAlign:"right", color: dlt>0?"var(--t-700)":dlt<0?"var(--clay)":"var(--faint)" }}>{dlt===null?"":dlt>0?("▲"+dlt):dlt<0?("▼"+Math.abs(dlt)):"–"}</span>
+                    </div>
+                  );
+                })}
               </div>
             </SoftCard>
           )}

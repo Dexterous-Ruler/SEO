@@ -222,6 +222,13 @@ export const SCHEMAS = {
     { name: 'Share %', type: 'number', options: { precision: 0 } },
     { name: 'Scanned At', type: 'dateTime', options: { dateFormat: { name: 'iso' }, timeFormat: { name: '24hour' }, timeZone: 'utc' } },
   ],
+  // GEO "show up for these" — uncited buyer-intent queries to target next.
+  geo_opportunities: [
+    { name: 'Query', type: 'multilineText' },
+    { name: 'Intent', type: 'singleLineText' },
+    { name: 'AI Currently Cites', type: 'multilineText' },
+    { name: 'Surfaced At', type: 'dateTime', options: { dateFormat: { name: 'iso' }, timeFormat: { name: '24hour' }, timeZone: 'utc' } },
+  ],
   // Content opportunities = the content backlog a writer works from.
   opportunities: [
     { name: 'Title', type: 'singleLineText' },
@@ -274,6 +281,13 @@ export function mapCompetitors(competitors, target, now) {
   }
   return rows;
 }
+// GEO opportunities = uncited prompts from a scan (the "show up for these" list).
+export function mapGeoOpportunities(opps, now) {
+  return (opps || []).filter((r) => r && r.prompt && !r.error).map((r) => ({
+    Query: r.prompt, Intent: r.intent || '',
+    'AI Currently Cites': (r.citedDomains || []).join(', '), 'Surfaced At': now,
+  }));
+}
 export function mapOpportunities(clusters, now) {
   return (clusters || []).map((c) => ({
     Title: c.suggestedTitle || c.label, 'Primary Keyword': c.primaryKeyword || '', Cluster: c.label || '',
@@ -299,4 +313,4 @@ function briefToText(b) {
   return lines.join('\n');
 }
 
-export default { listBases, listTables, ensureTable, ensureField, createRecords, listRecords, updateRecord, createRecord, listFieldValues, pushKeywords, SCHEMAS, mapGaps, mapContent, mapGeo, mapCompetitors, mapOpportunities };
+export default { listBases, listTables, ensureTable, ensureField, createRecords, listRecords, updateRecord, createRecord, listFieldValues, pushKeywords, SCHEMAS, mapGaps, mapContent, mapGeo, mapCompetitors, mapGeoOpportunities, mapOpportunities };

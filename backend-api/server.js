@@ -576,8 +576,11 @@ const routes = {
       } catch (e) { /* best-effort — fall back to no exclusions */ }
     }
     exclude = [...new Set(exclude)];
-    const prompts = await geo.suggestPrompts({ siteName: body.siteName, niche, sampleTitles: titles, exclude });
-    return { prompts, groundedOn: titles.length, excluded: exclude.length };
+    // Per-site operator context ("what this site is about") steers prompt generation.
+    let context = body.context || '';
+    if (!context && body.siteId) { try { const st = await db.getSite(body.siteId); if (st && st.geo_context) context = st.geo_context; } catch (e) {} }
+    const prompts = await geo.suggestPrompts({ siteName: body.siteName, niche, sampleTitles: titles, exclude, context });
+    return { prompts, groundedOn: titles.length, excluded: exclude.length, usedContext: !!context };
   },
 
   // Run a citation-tracking pass: query prompts via Claude+web-search, detect
@@ -590,6 +593,11 @@ const routes = {
     });
     // Persist the run + the prompt set.
     if (body.siteId) {
+      // Up/down vs the PREVIOUS scan — fetch the last run BEFORE inserting this one.
+      try {
+        const pr = await fetch(`${process.env.SUPABASE_URL}/rest/v1/geo_runs?site_id=eq.${body.siteId}&select=share_of_voice,prompts_cited,prompts_total,created_at&order=created_at.desc&limit=1`, { headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE } });
+        if (pr.ok) { const rows = await pr.json(); const p = rows && rows[0]; if (p) { out.previous = { shareOfVoice: p.share_of_voice, promptsCited: p.prompts_cited, promptsTotal: p.prompts_total, at: p.created_at }; out.delta = { shareOfVoice: (out.shareOfVoice || 0) - (p.share_of_voice || 0), promptsCited: (out.promptsCited || 0) - (p.prompts_cited || 0) }; } }
+      } catch (e) { /* best-effort delta */ }
       try {
         await fetch(`${process.env.SUPABASE_URL}/rest/v1/geo_runs`, {
           method: 'POST',
@@ -599,6 +607,17 @@ const routes = {
       } catch (e) { /* best-effort persist */ }
     }
     return out;
+  },
+
+  // Recent AI-visibility scans (newest first) — drives the scan-history/trend card.
+  'POST /geo-history': async (body) => {
+    if (!body.siteId) return { runs: [] };
+    try {
+      const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/geo_runs?site_id=eq.${body.siteId}&select=share_of_voice,prompts_cited,prompts_total,created_at&order=created_at.desc&limit=12`, { headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE } });
+      if (!r.ok) return { runs: [] };
+      const rows = await r.json();
+      return { runs: (rows || []).map((x) => ({ shareOfVoice: x.share_of_voice, promptsCited: x.prompts_cited, promptsTotal: x.prompts_total, at: x.created_at })) };
+    } catch (e) { return { runs: [], error: e.message }; }
   },
 
   // GEO enablement: generate llms.txt + AI-bot robots, and (when apply:true) PUBLISH
@@ -2270,7 +2289,7 @@ const routes = {
       out[kind] = { pushed, table };
       await db.logAirtableSync({ site_id: siteId, kind, records_pushed: pushed, status: 'ok' });
     }
-    function defaultName(k) { return { gaps: 'SEO Keyword Gaps', content: 'Content Suggestions', geo: 'AI Citation Results', geo_competitors: 'AI Competitor Share', opportunities: 'Content Opportunities' }[k]; }
+    function defaultName(k) { return { gaps: 'SEO Keyword Gaps', content: 'Content Suggestions', geo: 'AI Citation Results', geo_competitors: 'AI Competitor Share', geo_opportunities: 'AI Visibility Opportunities', opportunities: 'Content Opportunities' }[k]; }
 
     // 1) Keyword gaps (DataForSEO) — needs a competitor; uses body.competitor or the data passed in.
     if (kinds.includes('gaps')) {
@@ -2311,6 +2330,20 @@ const routes = {
     // 4) Content opportunities (keyword clusters from the Content screen).
     if (kinds.includes('opportunities')) {
       await push('opportunities', cfg.table_opportunities, airtable.mapOpportunities(body.clusters || [], now), airtable.SCHEMAS.opportunities);
+    }
+    // 5) GEO opportunities — the "show up for these" uncited queries (de-duped by Query).
+    if (kinds.includes('geo_opportunities')) {
+      let oppRows = airtable.mapGeoOpportunities(body.geoOpportunities || [], now);
+      if (oppRows.length) {
+        try {
+          const t = cfg.table_geo_opportunities || defaultName('geo_opportunities');
+          const seen = await airtable.listFieldValues(pat, baseId, t, 'Query');
+          const before = oppRows.length;
+          oppRows = oppRows.filter((r) => !seen.has(String(r.Query || '').trim().toLowerCase()));
+          out.geoOppsSkipped = before - oppRows.length;
+        } catch (e) { /* table may not exist yet → push all (ensureTable creates it) */ }
+      }
+      await push('geo_opportunities', cfg.table_geo_opportunities, oppRows, airtable.SCHEMAS.geo_opportunities);
     }
 
     await db.upsertAirtableConfig(siteId, { last_sync: now });

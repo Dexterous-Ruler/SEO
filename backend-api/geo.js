@@ -152,7 +152,7 @@ export async function runCitationTracking({ targetDomain, prompts, competitors =
 }
 
 // Generate a default buyer-intent prompt set for a site/niche using Claude.
-export async function suggestPrompts({ siteName, niche, sampleTitles = [], exclude = [] }) {
+export async function suggestPrompts({ siteName, niche, sampleTitles = [], exclude = [], context = '' }) {
   // Anchor STRICTLY on the real page titles so the prompts match what the site
   // actually is — not what its brand name sounds like (e.g. "GoodFor" must not be
   // assumed to be an employee-recognition tool when it's a food/skincare scanner).
@@ -162,6 +162,11 @@ export async function suggestPrompts({ siteName, niche, sampleTitles = [], exclu
   const excludeBlock = (exclude && exclude.length)
     ? `\n\nAlready asked in PRIOR scans — generate DIFFERENT questions, do NOT repeat these or close paraphrases:\n${exclude.slice(0, 40).map((p) => '- ' + p).join('\n')}`
     : '';
+  // Operator-provided per-site context — authoritative steer on what the site is about,
+  // who it serves, and what to focus on. Weighted heavily over brand-name inference.
+  const contextBlock = (context && String(context).trim())
+    ? `\n\nOPERATOR CONTEXT (authoritative — what this site is about, who it serves, what to focus on). Weight this HEAVILY when choosing topics + intent:\n${String(context).trim().slice(0, 1200)}`
+    : '';
   const res = await fetch(API, {
     method: 'POST',
     headers: { 'x-api-key': key(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
@@ -169,7 +174,7 @@ export async function suggestPrompts({ siteName, niche, sampleTitles = [], exclu
       model: MODEL, max_tokens: 1200,
       messages: [{
         role: 'user',
-        content: `You are generating buyer-intent questions to measure how often AI assistants cite a specific website.\n\nSite: "${siteName}"${niche ? ` — stated niche: ${niche}` : ''}\n${topicBlock}\n\nGenerate 18 realistic buyer-intent questions a potential CUSTOMER of THIS site would ask ChatGPT or Perplexity. Mix informational, commercial, and comparison intent.\n\nCRITICAL RULES:\n- Base every question ONLY on what this specific site/product actually does (per the page titles above). Do NOT infer the product category from the brand name alone, and never invent an unrelated industry.\n- Write them the way a real person would search — natural questions, NOT stuffed with the brand/domain name (most should not mention the brand at all).${excludeBlock}\n\nReturn ONLY a JSON array of objects: [{"prompt":"...","intent":"informational|commercial|comparison"}]. No markdown.`,
+        content: `You are generating buyer-intent questions to measure how often AI assistants cite a specific website.\n\nSite: "${siteName}"${niche ? ` — stated niche: ${niche}` : ''}\n${topicBlock}${contextBlock}\n\nGenerate 18 realistic buyer-intent questions a potential CUSTOMER of THIS site would ask ChatGPT or Perplexity. Mix informational, commercial, and comparison intent.\n\nCRITICAL RULES:\n- Base every question ONLY on what this specific site/product actually does (per the page titles above). Do NOT infer the product category from the brand name alone, and never invent an unrelated industry.\n- Write them the way a real person would search — natural questions, NOT stuffed with the brand/domain name (most should not mention the brand at all).${excludeBlock}\n\nReturn ONLY a JSON array of objects: [{"prompt":"...","intent":"informational|commercial|comparison"}]. No markdown.`,
       }],
     }),
   });
