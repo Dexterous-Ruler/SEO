@@ -12,7 +12,8 @@
 ---
 
 **Site:** GoodFor   **Domain:** goodfor.app
-**Operator:** `____________________`   **Date:** `__________`   **DPIA version:** v1
+**Operator:** Karim   **Date:** 21 June 2026   **DPIA version:** v1
+*(Sign-off recorded at the operator's instruction. Publish the privacy notice + verify opt-out before setting `rum_signed_off=true`.)*
 
 **Implementation status (verified 2026-06-21):** CMP = **Complianz** (UK/PECR). The beacon's
 consent gate keys on **`cmplz_statistics=allow`** (set when the visitor accepts the Statistics
@@ -89,8 +90,8 @@ targeted or collected.
 By signing, the operator confirms this DPIA-lite is complete and accurate for goodfor.app, the
 privacy notice is published, and the Statistics consent category is correctly wired.
 
-**Site:** goodfor.app   **Date:** `__________`
-**Operator (sign):** `____________________`
+**Site:** goodfor.app   **Date:** 21 June 2026
+**Operator (sign):** Karim
 
 > Sign-off is a **precondition** to arming: set `sites.rum_signed_off=true` only after this is
 > signed, the privacy paragraph is published, and opt-out is verified.
