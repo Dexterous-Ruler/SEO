@@ -2380,6 +2380,48 @@ const routes = {
     }
     function defaultName(k) { return { gaps: 'SEO Keyword Gaps', content: 'Content Suggestions', geo: 'AI Citation Results', geo_competitors: 'AI Competitor Share', geo_opportunities: 'AI Visibility Opportunities', opportunities: 'Content Opportunities' }[k]; }
 
+    // Resolve the site's Article Writer table — the ONE n8n-watched table (stored as
+    // table_gaps). Returns {tableId, tableName, briefField, fieldSet} or null if the
+    // config is unset OR points at a missing/stale table (so callers fall back). All
+    // content pushes (keywords, clusters, briefs) land here — never a new table —
+    // which is what the client wants (one table → the one article-writer workflow).
+    let _awTarget;
+    async function articleWriterTarget() {
+      if (_awTarget !== undefined) return _awTarget;
+      const tref = cfg.table_gaps;
+      if (!tref) return (_awTarget = null);
+      let tables = [];
+      try { tables = await airtable.listTables(pat, baseId); } catch (e) { tables = []; }
+      const tbl = tables.find((t) => t.id === tref || t.name === tref);
+      if (!tbl) return (_awTarget = null);   // table_gaps points to a deleted/stale table
+      let briefField = 'Content Brief';
+      const names = new Set((tbl.fields || []).map((f) => f.name));
+      if (!names.has('Content Brief')) { try { briefField = await airtable.ensureField(pat, baseId, tbl.id, 'Content Brief', 'multilineText'); } catch (e) { briefField = null; } }
+      if (briefField) names.add(briefField);
+      return (_awTarget = { tableId: tbl.id, tableName: tbl.name, briefField, fieldSet: names });
+    }
+    // Push rows into the Article Writer table, field-set-filtered (so a differing
+    // schema can't 422) and de-duped (case-insensitive) by `dedupeField`.
+    async function pushToArticleWriter(kind, rows, dedupeField) {
+      const aw = await articleWriterTarget();
+      if (!aw) return false;   // not resolvable → caller falls back to legacy behaviour
+      let r = (rows || []).filter(Boolean);
+      if (aw.fieldSet) r = r.map((row) => { const o = {}; for (const k of Object.keys(row)) if (aw.fieldSet.has(k)) o[k] = row[k]; return o; }).filter((o) => Object.keys(o).length);
+      const total = r.length;
+      if (dedupeField && r.length) {
+        try {
+          const seen = await airtable.listFieldValues(pat, baseId, aw.tableId, dedupeField);
+          const batch = new Set();
+          r = r.filter((row) => { const k = String(row[dedupeField] || '').trim().toLowerCase(); if (!k) return true; if (seen.has(k) || batch.has(k)) return false; batch.add(k); return true; });
+        } catch (e) { /* read failed → push all */ }
+      }
+      let pushed = 0;
+      if (r.length) pushed = await airtable.createRecords(pat, baseId, aw.tableId, r);
+      out[kind] = { pushed, table: aw.tableName, skipped: total - pushed };
+      await db.logAirtableSync({ site_id: siteId, kind, records_pushed: pushed, status: 'ok' });
+      return true;
+    }
+
     // 1) Keyword gaps (DataForSEO) — needs a competitor; uses body.competitor or the data passed in.
     if (kinds.includes('gaps')) {
       let gaps = body.gaps;
@@ -2389,7 +2431,11 @@ const routes = {
         const g = await semrush.keywordGap(dom, body.competitor, { db: site.semrush_db || 'uk' }).catch(() => ({ gaps: [] }));
         gaps = g.gaps;
       }
-      await push('gaps', cfg.table_gaps, airtable.mapGaps(gaps || [], 'DataForSEO', now), airtable.SCHEMAS.gaps);
+      const rows = airtable.mapGaps(gaps || [], 'DataForSEO', now);
+      // Land keywords in the Article Writer table (de-duped by Keyword); only if that
+      // table isn't configured do we fall back to a dedicated 'SEO Keyword Gaps' table.
+      const done = await pushToArticleWriter('gaps', rows, 'Keyword');
+      if (!done) await push('gaps', cfg.table_gaps, rows, airtable.SCHEMAS.gaps);
     }
     // 2) Content suggestions (passed from the UI's content-intel result)
     if (kinds.includes('content')) {
@@ -2416,9 +2462,19 @@ const routes = {
       const compRows = airtable.mapCompetitors(body.geoCompetitors || [], body.geoTarget || null, now);
       if (compRows.length) await push('geo_competitors', cfg.table_geo_competitors, compRows, airtable.SCHEMAS.geo_competitors);
     }
-    // 4) Content opportunities (keyword clusters from the Content screen).
+    // 4) Content opportunities (keyword clusters from the Content screen) → the SAME
+    //    Article Writer table (one row per cluster, carrying its brief if generated),
+    //    NOT a separate table. De-duped by Title. Falls back to a dedicated
+    //    'Content Opportunities' table only when no Article Writer table is configured.
     if (kinds.includes('opportunities')) {
-      await push('opportunities', cfg.table_opportunities, airtable.mapOpportunities(body.clusters || [], now), airtable.SCHEMAS.opportunities);
+      const aw = await articleWriterTarget();
+      const clusters = body.clusters || [];
+      if (aw) {
+        const rows = clusters.map((c) => airtable.mapArticleBrief(c, c.brief || null, aw.briefField, null));
+        await pushToArticleWriter('opportunities', rows, 'Title');
+      } else {
+        await push('opportunities', cfg.table_opportunities, airtable.mapOpportunities(clusters, now), airtable.SCHEMAS.opportunities);
+      }
     }
     // 5) GEO opportunities — the "show up for these" uncited queries (de-duped by Query).
     if (kinds.includes('geo_opportunities')) {
@@ -2442,32 +2498,12 @@ const routes = {
     //    the user flips it to "Write Article" in the grid (the existing trigger), so a
     //    button click never auto-fires generation/publish (which costs API credits).
     if (kinds.includes('article_brief')) {
-      const tref = cfg.table_gaps;  // the keyword/article table the n8n flow watches
-      if (!tref) { out.article_brief = { error: 'No Article Writer table configured for this site.' }; }
+      const aw = await articleWriterTarget();
+      if (!aw) { out.article_brief = { error: 'No Article Writer table configured for this site.' }; }
       else {
-        let tableId = tref, briefField = 'Content Brief', fieldSet = null;
-        try {
-          const tables = await airtable.listTables(pat, baseId).catch(() => []);
-          const tbl = tables.find((t) => t.id === tref || t.name === tref);
-          if (tbl) {
-            tableId = tbl.id;
-            const names = new Set((tbl.fields || []).map((f) => f.name));
-            if (!names.has('Content Brief')) {
-              briefField = await airtable.ensureField(pat, baseId, tbl.id, 'Content Brief', 'multilineText'); // null if no schema:write
-            }
-            if (briefField) names.add(briefField);
-            fieldSet = names;
-          }
-        } catch (e) { /* fall back to bare push below */ }
-        const row = airtable.mapArticleBrief(body.cluster || {}, body.brief || null, briefField, fieldSet);
+        const row = airtable.mapArticleBrief(body.cluster || {}, body.brief || null, aw.briefField, null);
         if (!row) { out.article_brief = { pushed: 0, note: 'no brief' }; }
-        else {
-          try {
-            const rec = await airtable.createRecord(pat, baseId, tableId, row);
-            out.article_brief = { pushed: 1, recordId: rec.id, briefField: briefField || 'Description' };
-            await db.logAirtableSync({ site_id: siteId, kind: 'article_brief', records_pushed: 1, status: 'ok' });
-          } catch (e) { out.article_brief = { error: e.message }; }
-        }
+        else { await pushToArticleWriter('article_brief', [row], 'Title'); }
       }
     }
 

@@ -1409,8 +1409,10 @@ function OpportunitiesScreen({ ctx }) {
     setPushing(tag);
     API.airtableSync(s.id,{kinds:["opportunities"],clusters:withBriefs(clusters)}).then(r=>{
       if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
-      const n=(r.synced&&r.synced.opportunities&&r.synced.opportunities.pushed)||0;
-      ctx.toast(n+" opportunit"+(n===1?"y":"ies")+" sent to Airtable","teal");
+      const res=(r.synced&&r.synced.opportunities)||{};
+      if(res.error){ ctx.toast("Airtable: "+res.error,"clay"); return; }
+      const n=res.pushed||0, sk=res.skipped||0;
+      ctx.toast(n+" → "+(res.table||"Article Writer")+(sk?(" · "+sk+" already there"):"")+" — set Status to “Write Article” to generate","teal");
     }).catch(e=>ctx.toast("Airtable: "+e.message,"clay")).finally(()=>setPushing(""));
   };
   // Push a generated brief into the EXISTING Article Writer table (the one n8n flow),
