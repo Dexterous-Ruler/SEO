@@ -65,6 +65,22 @@ function expConfMeta(c) {
   return { tone: "gray", label: (k ? k[0].toUpperCase() + k.slice(1) : "Low") + " confidence" };
 }
 
+/* sample_detail is a free-form object the beacon sends (e.g. {label,text,href,src,message}).
+   Render a human string from it — NEVER the raw object (rendering an object throws React #31). */
+function expSampleText(s) {
+  if (!s) return "";
+  if (typeof s === "string") return s;
+  if (typeof s !== "object") return String(s);
+  const bits = [];
+  if (s.label) bits.push("“" + String(s.label) + "”");
+  if (s.text && s.text !== s.label) bits.push("“" + String(s.text) + "”");
+  if (s.href) bits.push(String(s.href));
+  if (s.src) bits.push(String(s.src));
+  if (s.message) bits.push(String(s.message));
+  if (s.reason) bits.push(String(s.reason));
+  return bits.join(" · ");
+}
+
 /* Only HIGH-confidence, deterministically-fixable defects get [Apply].
    Everything else routes through [Review] (human-in-the-loop). */
 const EXP_FIXABLE = new Set(["broken_resource", "broken_cta", "broken internal link", "broken_internal_link", "tap-target", "tap_target"]);
@@ -89,6 +105,7 @@ function ExpDefectModal({ d, ctx, onClose, onAction }) {
   const ev = expEventMeta(d.event_type);
   const conf = expConfMeta(d.confidence);
   const canApply = expCanApply(d);
+  const sampleText = expSampleText(d.sample_detail);
   const [busy, setBusy] = useState("");
   const act = (action) => {
     setBusy(action);
@@ -137,8 +154,8 @@ function ExpDefectModal({ d, ctx, onClose, onAction }) {
             <Chip tone="gray" size="sm" icon="gauge">defect rate {expPct(d.defect_rate)}</Chip>
             {isFinite(Number(d.rice_score)) && <Chip tone="plum" size="sm" icon="layers">RICE {Math.round(Number(d.rice_score))}</Chip>}
           </div>
-          {d.sample_detail && (
-            <div style={{ marginTop: 10, fontSize: 13, color: "var(--ink-2)", lineHeight: 1.55 }}>{d.sample_detail}</div>
+          {sampleText && (
+            <div style={{ marginTop: 10, fontSize: 13, color: "var(--ink-2)", lineHeight: 1.55 }}>{sampleText}</div>
           )}
         </div>
 
