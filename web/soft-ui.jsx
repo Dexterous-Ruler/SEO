@@ -308,6 +308,18 @@ const PAGE_GUIDES = {
     ],
     setup: "Connect a live WordPress site to begin (step 1).",
   },
+  "ai-strategist": {
+    what: "A live chat assistant that reads the active site's audits, keywords, competitor gaps and AI-visibility, then answers strategic questions and drafts briefs grounded in your real data.",
+    how: ["Pick the site in the “Working on” selector.", "Type a question (or click a suggested prompt) and send — attach an image or use voice if needed.", "Use “New chat” to start over, the History list to reopen past chats, or “Export” to save as Markdown."],
+    options: [
+      { label: "Working on", desc: "Chooses which connected site's data the assistant can see." },
+      { label: "Suggested prompts", desc: "One-click starter questions (gaps, opportunities, briefs)." },
+      { label: "New chat / History", desc: "Start fresh, or reopen and delete saved conversations." },
+      { label: "Attach / Voice / Send / Stop", desc: "Composer controls — image input, dictation, send, stop generating." },
+      { label: "Export", desc: "Downloads the conversation as Markdown." },
+    ],
+    setup: "Requires at least one connected WordPress site.",
+  },
 };
 if (typeof window !== "undefined") window.PAGE_GUIDES = PAGE_GUIDES;
 

@@ -3950,6 +3950,8 @@ function ChatScreen({ ctx }) {
   const API = window.SentinelAPI;
   const sites = ctx.sites.filter(s=>s.status==="connected");
   const [chatSite,setChatSite] = useState(ctx.site && ctx.site.status==="connected" ? ctx.site.id : (sites[0]&&sites[0].id));
+  const [guideOpen,setGuideOpen] = useState(false);
+  const chatGuide = ((typeof window!=="undefined" && window.PAGE_GUIDES) || {})["ai-strategist"] || null;
   const active = ctx.sites.find(s=>s.id===chatSite);
   const { msgs, busy, send, stop, reset, load, convoId } = useChat(chatSite);
   const [input,setInput] = useState("");
@@ -3994,10 +3996,18 @@ function ChatScreen({ ctx }) {
     <div className="rise" style={{ height:"calc(100vh - 150px)", display:"flex", flexDirection:"column" }}>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:16, marginBottom:16, flexWrap:"wrap" }}>
         <div>
-          <h1 style={{ margin:0, fontSize:28, fontWeight:800, letterSpacing:"-.025em", display:"flex", alignItems:"center", gap:10 }}>
-            <span style={{ width:38, height:38, borderRadius:12, background:"linear-gradient(135deg,var(--t-500),var(--t-700))", color:"#F3EFE4", display:"grid", placeItems:"center" }}><Icon name="sparkles" size={20} /></span>
-            AI Strategist
-          </h1>
+          <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+            <h1 style={{ margin:0, fontSize:28, fontWeight:800, letterSpacing:"-.025em", display:"flex", alignItems:"center", gap:10 }}>
+              <span style={{ width:38, height:38, borderRadius:12, background:"linear-gradient(135deg,var(--t-500),var(--t-700))", color:"#F3EFE4", display:"grid", placeItems:"center" }}><Icon name="sparkles" size={20} /></span>
+              AI Strategist
+            </h1>
+            {chatGuide && (
+              <button onClick={()=>setGuideOpen(o=>!o)} title="How to use this page"
+                style={{ display:"inline-flex", alignItems:"center", gap:5, padding:"5px 11px", borderRadius:"var(--r-pill)", border:"none", cursor:"pointer", background:"var(--bg)", boxShadow:guideOpen?"var(--neo-in)":"var(--neo-sm)", color:guideOpen?"var(--t-700)":"var(--muted)", fontSize:11.5, fontWeight:700 }}>
+                <Icon name="help" size={13} />How to use
+              </button>
+            )}
+          </div>
           <p style={{ margin:"6px 0 0", fontSize:14, color:"var(--muted)" }}>Connected to your live data — audits, keywords, gaps, AI visibility.</p>
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
@@ -4012,6 +4022,8 @@ function ChatScreen({ ctx }) {
           {msgs.length>0 && <NeoButton kind="soft" size="sm" icon="doc" onClick={()=>{ const c=convos.find(x=>x.id===convoId); window.SentinelHelpers.exportConversation(c?c.title:"Conversation", msgs, active&&active.name); ctx.toast("Conversation exported (Markdown)","teal"); }}>Export</NeoButton>}
         </div>
       </div>
+
+      {chatGuide && guideOpen && <PageGuidePanel guide={chatGuide} onClose={()=>setGuideOpen(false)} />}
 
       <div style={{ flex:1, display:"flex", gap:16, minHeight:0 }}>
         {/* history sidebar */}
