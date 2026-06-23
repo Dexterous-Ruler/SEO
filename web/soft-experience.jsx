@@ -278,6 +278,7 @@ function ExperienceScreen({ ctx }) {
   const [toggling, setToggling] = useState(false);
   const [sampling, setSampling] = useState(5);     // 2 / 5 / 10  (%)
   const [drill, setDrill] = useState(null);
+  const [bulk, setBulk] = useState(false);
 
   const toast = (m, t) => ctx && ctx.toast && ctx.toast(m, t);
 
@@ -371,6 +372,22 @@ function ExperienceScreen({ ctx }) {
       .catch((e) => toast((e && e.message) || "Action failed.", "clay"));
   };
 
+  /* ---- bulk: send every active defect to the review queue in one click ----
+     Proposing is safe (no live write) — each becomes a proposal in Approve
+     Changes, where you bulk-approve + Apply (N) to push them live. */
+  const doBulkPropose = () => {
+    const list = (data && Array.isArray(data.defects)) ? data.defects : [];
+    if (!list.length) { toast("No active defects to send.", "gold"); return; }
+    if (!API || !API.uxDefectAction) { toast("Experience monitor API is unavailable.", "clay"); return; }
+    setBulk(true);
+    (async () => {
+      let n = 0;
+      for (const d of list) { try { const r = await API.uxDefectAction(d.id, "propose", s.id); if (r && !r.error) n++; } catch (e) {} }
+      toast(n + " defect" + (n === 1 ? "" : "s") + " sent to the review queue — approve & apply them in Approve Changes", n ? "teal" : "gold");
+      loadDefects();
+    })().finally(() => setBulk(false));
+  };
+
   const armed = !!(status && status.armed);
   const defects = (data && Array.isArray(data.defects)) ? data.defects : [];
   const totals = (data && data.totals) || {};
@@ -419,6 +436,7 @@ function ExperienceScreen({ ctx }) {
               <Toggle on={armed} disabled={toggling} onChange={(v) => toggleBeacon(v)} size={42} />
             </div>
           )}
+          {armed && defects.length > 0 && <NeoButton kind="primary" icon={bulk ? undefined : "upload"} disabled={bulk || loadingDefects} onClick={doBulkPropose}>{bulk && <Icon name="cog" size={15} className="audit-spin" />}Send all {defects.length} → Review</NeoButton>}
           {armed && <NeoButton kind="soft" icon={loadingDefects ? undefined : "refresh"} disabled={loadingDefects} onClick={loadDefects}>{loadingDefects && <Icon name="cog" size={15} className="audit-spin" />}Refresh</NeoButton>}
         </div>
       </PageHead>
