@@ -3,15 +3,29 @@
    =========================================================== */
 
 /* ---- shared page header ---- */
-function PageHead({ title, sub, children }) {
+function PageHead({ title, sub, children, guideKey }) {
+  const [guideOpen, setGuideOpen] = useState(false);
+  const gk = guideKey || pageGuideKey(title);
+  const guide = ((typeof window !== "undefined" && window.PAGE_GUIDES) || {})[gk] || null;
   return (
-    <div style={{ display:"flex", alignItems:"flex-end", justifyContent:"space-between", gap:16, flexWrap:"wrap", marginBottom:22 }}>
-      <div>
-        <h1 style={{ margin:0, fontSize:30, fontWeight:800, letterSpacing:"-.025em" }}>{title}</h1>
-        <p style={{ margin:"7px 0 0", fontSize:14.5, color:"var(--muted)" }}>{sub}</p>
+    <>
+      <div style={{ display:"flex", alignItems:"flex-end", justifyContent:"space-between", gap:16, flexWrap:"wrap", marginBottom:(guide&&guideOpen)?14:22 }}>
+        <div>
+          <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+            <h1 style={{ margin:0, fontSize:30, fontWeight:800, letterSpacing:"-.025em" }}>{title}</h1>
+            {guide && (
+              <button onClick={()=>setGuideOpen(o=>!o)} title="How to use this page"
+                style={{ display:"inline-flex", alignItems:"center", gap:5, padding:"5px 11px", borderRadius:"var(--r-pill)", border:"none", cursor:"pointer", background:"var(--bg)", boxShadow:guideOpen?"var(--neo-in)":"var(--neo-sm)", color:guideOpen?"var(--t-700)":"var(--muted)", fontSize:11.5, fontWeight:700 }}>
+                <Icon name="help" size={13} />How to use
+              </button>
+            )}
+          </div>
+          <p style={{ margin:"7px 0 0", fontSize:14.5, color:"var(--muted)" }}>{sub}</p>
+        </div>
+        {children}
       </div>
-      {children}
-    </div>
+      {guide && guideOpen && <PageGuidePanel guide={guide} onClose={()=>setGuideOpen(false)} />}
+    </>
   );
 }
 

@@ -45,6 +45,7 @@ const SI = {
   link:"M9 15l6-6M10 6l1-1a4 4 0 016 6l-1 1M14 18l-1 1a4 4 0 01-6-6l1-1",
   filter:"M3 5h18l-7 8v6l-4 2v-8z",
   gauge:"M12 14l4-4M5 19a9 9 0 1114 0",
+  help:"M12 22a10 10 0 100-20 10 10 0 000 20M9.2 9a2.8 2.8 0 015.4 1c0 1.8-2.6 2.2-2.6 3.6M12 17.5h.01",
 };
 function Icon({ name, size=20, sw=2, style, fill }) {
   const d = SI[name] || SI.grid;
@@ -83,6 +84,232 @@ function SoftCard({ children, pad=24, tone, hover=true, onClick, style, classNam
 function Well({ children, pad=16, style }) {
   return <div style={{ background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", padding:pad, ...style }}>{children}</div>;
 }
+
+/* ---- in-app page help ----
+   PAGE_GUIDES (keyed by normalized page title) holds the "How to use this page"
+   content. PageHead renders the toggle + this panel automatically when a guide
+   exists for its title — so adding help to a page = adding an entry here. */
+function pageGuideKey(title){ return String(title||"").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,""); }
+function PageGuidePanel({ guide, onClose }){
+  if(!guide) return null;
+  const Lbl = ({ children })=>(<div style={{ fontSize:11, fontWeight:700, textTransform:"uppercase", letterSpacing:".05em", color:"var(--faint)", margin:"14px 0 6px" }}>{children}</div>);
+  return (
+    <SoftCard hover={false} className="rise" style={{ marginBottom:22, borderLeft:"3px solid var(--t-500)" }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12 }}>
+        <div style={{ fontSize:14.5, fontWeight:800, display:"flex", alignItems:"center", gap:8 }}><Icon name="help" size={17} style={{ color:"var(--t-700)" }} />How to use this page</div>
+        <button onClick={onClose} title="Close" style={{ border:"none", background:"transparent", cursor:"pointer", color:"var(--faint)", padding:2, lineHeight:0 }}><Icon name="x" size={16} /></button>
+      </div>
+      {guide.what && <p style={{ fontSize:13.5, color:"var(--ink-2)", lineHeight:1.6, margin:"9px 0 0" }}>{guide.what}</p>}
+      {guide.setup && <div style={{ fontSize:12.5, color:"#7E5A14", background:"var(--gold-bg)", padding:"9px 12px", borderRadius:"var(--r-md)", marginTop:11, display:"flex", gap:7, alignItems:"flex-start" }}><Icon name="lock" size={13} sw={2.4} style={{ marginTop:2, flexShrink:0 }} /><span><b>Setup needed:</b> {guide.setup}</span></div>}
+      {Array.isArray(guide.how) && guide.how.length>0 && (<><Lbl>Steps</Lbl>
+        <ol style={{ margin:0, paddingLeft:18, display:"flex", flexDirection:"column", gap:5 }}>{guide.how.map((h,i)=>(<li key={i} style={{ fontSize:13, color:"var(--ink-2)", lineHeight:1.5 }}>{h}</li>))}</ol></>)}
+      {Array.isArray(guide.options) && guide.options.length>0 && (<><Lbl>Options &amp; controls</Lbl>
+        <div style={{ display:"flex", flexDirection:"column", gap:7 }}>{guide.options.map((o,i)=>(
+          <div key={i} style={{ fontSize:12.5, lineHeight:1.5 }}><span style={{ fontWeight:700, color:"var(--t-700)" }}>{o.label}</span><span style={{ color:"var(--muted)" }}> — {o.desc}</span></div>
+        ))}</div></>)}
+    </SoftCard>
+  );
+}
+
+/* Per-page help content, keyed by pageGuideKey(title). PageHead shows the
+   "How to use" toggle automatically for any page whose title matches a key. */
+const PAGE_GUIDES = {
+  "sites": {
+    what: "Connect, detect and switch between WordPress accounts. Each card shows the detected stack, scale, mu-plugin status and write-armed state.",
+    how: ["Click “Connect a site” and complete the 3-step wizard (credentials → detection → capabilities).", "Click “Set active” to scope the whole app to that site.", "Use “Re-detect” after installing/updating the mu-plugin, or “Re-authenticate” if a credential fails."],
+    options: [
+      { label: "Connect a site", desc: "Opens the add-site wizard." },
+      { label: "Set active", desc: "Makes this the active site for every other screen." },
+      { label: "Re-detect", desc: "Re-runs stack + mu-plugin detection without reconnecting." },
+      { label: "Run audit", desc: "Starts a read-only audit of the active site." },
+    ],
+    setup: "Needs a WordPress application password (least-privilege). Staging URL optional.",
+  },
+  "executive-scorecard": {
+    what: "A one-screen weekly health view — organic value, value at risk, AI share-of-voice, a composite score, anomalies, trends and a RICE “do next” worklist.",
+    how: ["Open the page — it loads automatically for a connected site.", "Click “Weekly briefing” to have the AI narrate the numbers.", "Click “Refresh” to recompute, or “Open worklist” for the ranked fixes."],
+    options: [
+      { label: "Weekly briefing", desc: "AI narrative that describes (never recomputes) the figures." },
+      { label: "Refresh", desc: "Recomputes the scorecard from your live data." },
+      { label: "Open worklist", desc: "Jumps to the RICE-ranked fix list in Audits." },
+    ],
+    setup: "Needs a connected live site. Figures degrade gracefully when GSC / DataForSEO / GEO aren't connected.",
+  },
+  "content-opportunities": {
+    what: "Builds keyword clusters from your rankings, competitors and live trends in your target market, gap-checked against your sitemap — plus trending topics and Google “People Also Ask”. Everything is pushable to your Article Writer table.",
+    how: ["Pick your target country, then click “Find opportunities”.", "Add ideas with “What's trending?” and the People-Also-Ask seed + “Find questions”.", "Filter clusters and click a “Send → Airtable” button to queue articles (set Status to “Write Article” in Airtable to generate)."],
+    options: [
+      { label: "Target country", desc: "Sets the market for opportunities, trends and briefs." },
+      { label: "Find opportunities / Re-analyze", desc: "Gathers + clusters keywords." },
+      { label: "Generate brief (per cluster)", desc: "Researches a full outline — send THIS (not the bare cluster) for the best article." },
+      { label: "Send gaps / Send N → Airtable", desc: "Pushes gap or shown clusters into the Article Writer table." },
+      { label: "Send brief → Article Writer", desc: "Sends the generated brief (real outline) into the row's Content Brief." },
+      { label: "All / Gaps / Trending / From competitors", desc: "Filters the cluster list." },
+    ],
+    setup: "Needs a connected live site; pushing needs Airtable connected (Push to Airtable screen).",
+  },
+  "content-intelligence": {
+    what: "The AI reads your published titles to map existing topic clusters, find gaps competitors fill, and propose new articles with target keywords.",
+    how: ["Choose your target country, then click “Analyze content” (~30–60s).", "Review the clusters, gaps and article suggestions.", "Click “Push to Airtable” to send the keyword set to your article writer."],
+    options: [
+      { label: "Target country", desc: "Sets the market for the analysis." },
+      { label: "Analyze content / Re-analyze", desc: "Runs the AI content-library analysis (read-only)." },
+      { label: "Push to Airtable", desc: "Pushes primary + related, gap and suggestion keywords (de-duped) to Airtable." },
+    ],
+    setup: "Needs a connected live site; pushing needs Airtable connected.",
+  },
+  "search-console": {
+    what: "First-party Google data — real clicks, impressions, CTR and position — across Top Queries, Top Pages, Quick Wins (11–20), Content Decay, Anomalies and Indexing. One Google connect re-links all your sites.",
+    how: ["Click “Connect with Google” and approve read-only access.", "Pick the matching property in the property switcher.", "Open a tab (e.g. Content Decay) and click “Refresh” to load the data."],
+    options: [
+      { label: "Connect with Google", desc: "One-click read-only Search Console OAuth." },
+      { label: "Property switcher", desc: "Maps the active site to one of your GSC properties." },
+      { label: "Tabs", desc: "Top Queries · Top Pages · Quick Wins · Content Decay · Anomalies · Indexing." },
+      { label: "Content Decay tab", desc: "Finds pages losing clicks (last 28d vs prior 28d); can auto-refresh + re-optimise them." },
+    ],
+    setup: "Connect Google Search Console first (live site required).",
+  },
+  "ai-visibility-geo": {
+    what: "Measures how often AI assistants cite your site vs competitors for real buyer-intent prompts — the GEO equivalent of rank tracking. Can also publish entity signals and an llms.txt file to improve citation.",
+    how: ["Optionally add competitor domains and a per-site AI context, then “Save context”.", "Click “Measure AI visibility” to run the scan.", "Target the uncited “Opportunities” prompts; use “Publish entity signals” / “Publish to site” to boost citation."],
+    options: [
+      { label: "Competitors", desc: "Domains benchmarked in the same AI answers." },
+      { label: "Site context / Save context", desc: "Steers prompt generation; saved per site." },
+      { label: "Measure AI visibility / Re-scan", desc: "Generates prompts, asks them with live web search, scores share-of-voice." },
+      { label: "Publish entity signals", desc: "Writes Organization/entity schema to the homepage." },
+      { label: "Preview llms.txt / Publish to site", desc: "Previews then publishes the llms.txt + AI-robots file." },
+    ],
+    setup: "Needs a connected live site; publishing needs write mode armed.",
+  },
+  "dataforseo": {
+    what: "Live search-performance data for your domain — top keywords, traffic value (clicks × CPC), striking-distance keywords, competitors, and a keyword-gap tool that pushes straight to Airtable.",
+    how: ["Pick the keyword-data market, then click “Load DataForSEO data”.", "Switch tabs (Traffic Value, Striking Distance, Keyword Gap…).", "In Keyword Gap, click “Push gaps → Airtable”."],
+    options: [
+      { label: "Market (country)", desc: "Country DataForSEO pulls rankings/volumes/competitors from." },
+      { label: "Balance chip", desc: "Remaining DataForSEO credit." },
+      { label: "Load / Refresh", desc: "Loads or reloads the dataset." },
+      { label: "Model traffic value", desc: "Estimates click/value uplift (no extra credits)." },
+      { label: "Push gaps → Airtable", desc: "Sends keyword-gap keywords to Airtable." },
+    ],
+    setup: "Needs the DataForSEO key configured; pushing needs Airtable connected.",
+  },
+  "airtable-sync": {
+    what: "Connects this site to its Airtable base and pushes content-gap keywords (one row each) into your Article Writer table, where your Airtable + n8n automation writes the articles. Includes an editable grid.",
+    how: ["Paste your Airtable Personal Access Token and click “Connect”.", "Pick the Base, Table and Keyword column.", "Click “Push content-gap keywords”; in the grid, set a row's Status to “Write Article” to trigger writing."],
+    options: [
+      { label: "Personal Access Token + Connect", desc: "Stores an encrypted token (records read/write + schema read)." },
+      { label: "Base / Table / Keyword column", desc: "Per-site destination mapping." },
+      { label: "Push keywords", desc: "Adds new gap keywords (skips ones already there)." },
+      { label: "Records grid · Status", desc: "Edit rows in-place; set Status = “Write Article” to fire the n8n flow." },
+    ],
+    setup: "Needs a connected live site and an Airtable Personal Access Token granted to the base.",
+  },
+  "on-page-fixes": {
+    what: "Generates and applies on-page improvements — internal/external links, schema, AI-citation facts, CSS, image WebP and a speed test. Every change is human-reviewed before it touches the live page.",
+    how: ["Pick a tool tab (Internal Links, Schema, etc.).", "Enter a page URL where required and click the generate button.", "Review each suggestion and click “Approve” (or “Approve & push all”)."],
+    options: [
+      { label: "Tabs", desc: "Internal Links · External Links · Schema · AI-SEO Facts · CSS · Images · Speed Test." },
+      { label: "Page URL", desc: "Target page for the active tool." },
+      { label: "Approve / Approve & push all", desc: "Writes the change live (page-builder pages are flagged “add in editor”)." },
+    ],
+    setup: "Needs a connected live site; live writes need the seo-agent-optimize mu-plugin + write mode armed.",
+  },
+  "audits-reports": {
+    what: "Read-only audits with prioritized in-app findings: per-category “Road to 100” gaps, a RICE impact × effort worklist, and a filterable findings list you can turn into fix proposals.",
+    how: ["Click “Run audit” (choose the scope).", "Click “Prioritize findings” to build the RICE worklist.", "Expand a finding and click “Propose fix”; “Export” saves the report."],
+    options: [
+      { label: "Run audit", desc: "Read-only audit (single / key / full-site)." },
+      { label: "Prioritize findings", desc: "Scores findings by RICE and plots impact × effort." },
+      { label: "Filters", desc: "All · SEO · Perf · A11y · Images." },
+      { label: "Propose fix / Mark done", desc: "Queue a fix to Review, or dismiss the finding." },
+    ],
+    setup: "Needs a connected live site; connecting GSC weights the worklist by real per-page clicks.",
+  },
+  "audit-history": {
+    what: "Every saved audit as a score-trend chart, plus a correlation matrix showing whether your Core Web Vitals / Lighthouse scores track with this site's rankings and clicks.",
+    how: ["Click “Run audit” to add a data point.", "Switch the chart range (Day / Week / Month / Year).", "Click “Analyze correlations” once you have ≥3 audits."],
+    options: [
+      { label: "Run audit", desc: "Runs a fresh audit and appends it to history." },
+      { label: "Day / Week / Month / Year", desc: "Buckets the score-trend chart." },
+      { label: "Analyze correlations", desc: "Computes rank correlations across audit + GSC history." },
+    ],
+    setup: "History is per-account; correlation needs ≥3 audits. Connecting GSC adds real ranking/click columns.",
+  },
+  "review-queue": {
+    what: "The human-in-the-loop gate: review every proposed change with before/after diffs, risk and target, then approve, edit, reject, and apply in a verified batch (snapshot + verify + rollback).",
+    how: ["Expand a proposal to see its diff and risk.", "Approve, Edit or Reject it (or “Bulk-approve low-risk”).", "Click “Apply” to push approved changes safely."],
+    options: [
+      { label: "Bulk-approve low-risk", desc: "Approves all low-risk proposals at once." },
+      { label: "Apply (N)", desc: "Applies approved changes in a safe batch (disabled when writes are blocked)." },
+      { label: "Approve / Edit / Reject", desc: "Per proposal." },
+      { label: "Roll back", desc: "Reverts a verified change." },
+    ],
+    setup: "Applying needs write mode armed and the global kill switch released.",
+  },
+  "activity": {
+    what: "A complete, exportable audit trail of every write, approval, rollback, audit, connection and failure across sites — with one-click rollback on reversible entries.",
+    how: ["Filter by type (Writes / Approvals / Rollbacks / Failures).", "Click “Roll back” on a reversible entry to open it in Review.", "Click “Export trail” to download the log."],
+    options: [
+      { label: "Filters", desc: "All · Writes · Approvals · Rollbacks · Failures." },
+      { label: "Roll back", desc: "Sends a write back to Review to reverse it." },
+      { label: "Export trail", desc: "Exports the full audit trail." },
+    ],
+    setup: null,
+  },
+  "experience-monitor": {
+    what: "A privacy-first beacon that detects UX/conversion defects (broken CTAs, dead links, mis-sized tap targets, friction) on your ranking pages, joined to GSC organic traffic so you fix what costs the most exposure first.",
+    how: ["Pick a sampling rate and click “Install beacon” (after compliance sign-off).", "Let consented sessions accumulate, then “Refresh” to load defects.", "Per defect: Apply the fix, Propose it to Review, or Ignore."],
+    options: [
+      { label: "Beacon ON/OFF", desc: "Header kill switch to arm or disable collection." },
+      { label: "Sampling rate (2/5/10%)", desc: "Share of consented sessions observed; lower = lighter footprint." },
+      { label: "Install beacon", desc: "Arms the beacon (gated on compliance sign-off)." },
+      { label: "Apply / Propose / Ignore", desc: "Per defect: push the fix, send to Review, or suppress it." },
+    ],
+    setup: "Hidden until RUM is enabled server-side; needs per-site compliance sign-off before arming. Events accrue slowly — gated on consent × sample × real traffic.",
+  },
+  "ux-activation": {
+    what: "Cross-site control room for the Experience beacon: detect each site's consent stack, wire/verify the beacon, update the mu-plugin, and arm/disarm collection per site.",
+    how: ["Click “Re-probe” to detect each site's consent + plugin state.", "Run the self-test (and “Enable banner” / “Update mu-plugin” if prompted).", "“Arm” a site (defaults 5%, gated on consent + sign-off), or “Disarm” it."],
+    options: [
+      { label: "Re-probe", desc: "Re-detects consent stack, RUM switch and mu-plugin versions across sites." },
+      { label: "Self-test", desc: "Verifies the beacon end-to-end for a site." },
+      { label: "Arm / Disarm", desc: "Turns collection on (gated on consent + sign-off) or off." },
+      { label: "Enable banner / Update mu-plugin", desc: "Turn on a first-party consent banner, or push the latest beacon plugin." },
+    ],
+    setup: "Needs RUM enabled server-side; arming needs sign-off + a detected consent cookie/CMP.",
+  },
+  "settings": {
+    what: "Per-site capabilities, safety switches and credentials — toggle agent capabilities, set brand constraints, DRY_RUN / staging / write mode, manage the app password, and use the global kill switch.",
+    how: ["Toggle the agent capabilities you want enabled.", "Set the safety switches (DRY_RUN, Staging-first, Write mode).", "Manage the credential; use the kill switch to halt all writes instantly."],
+    options: [
+      { label: "Capability toggles", desc: "Enable/disable per-site agent capabilities." },
+      { label: "Brand constraints", desc: "Things the agent must never change (colors, fonts, phrases)." },
+      { label: "DRY_RUN / Staging-first / Write mode", desc: "Simulate writes · route to staging first · arm/disarm live writes." },
+      { label: "Global kill switch", desc: "Instantly disables every write across all sites." },
+    ],
+    setup: "Staging-first needs a configured staging URL; capabilities/credentials are per-site.",
+  },
+  "admin-panel": {
+    what: "System health + integration status (API keys, runtime, market, write mode) plus an editable per-site library of every AI system prompt. Prompt edits go live on the next AI call.",
+    how: ["Use “System & Integrations” to see which services are connected (green/red dots).", "Switch to “AI Prompts” to edit a prompt for the active site.", "Use “Test” to preview, then “Save” (or “Reset” to clear the override)."],
+    options: [
+      { label: "System & Integrations / AI Prompts", desc: "Toggle health dashboard vs prompt editor." },
+      { label: "Diff / History / Test / Reset / Save", desc: "Per-prompt: compare vs default, versions, dry-run, restore, persist." },
+      { label: "Model / Temperature", desc: "Per-prompt model + temperature overrides." },
+    ],
+    setup: "Engine must be online; prompt persistence needs the Supabase prompts table.",
+  },
+  "playbook": {
+    what: "A guided, top-to-bottom checklist of the standard workflow for this site. Each step shows its status and whether it writes to the live site, off-site, or is read-only.",
+    how: ["Work the steps top to bottom.", "Click “Open” on the next incomplete step to jump to that tool.", "Watch the done counter climb as steps complete."],
+    options: [
+      { label: "Open / View", desc: "Jumps to the screen (and sub-tab) for that step." },
+      { label: "x/y done chip", desc: "Progress counter of completed steps." },
+    ],
+    setup: "Connect a live WordPress site to begin (step 1).",
+  },
+};
+if (typeof window !== "undefined") window.PAGE_GUIDES = PAGE_GUIDES;
 
 function NeoButton({ children, icon, iconR, kind="primary", size="md", onClick, disabled, full, title, style, className="" }) {
   const sz = size==="sm"?{py:9,px:14,fs:13,ic:16}: size==="lg"?{py:14,px:22,fs:15,ic:19}:{py:11,px:18,fs:14,ic:17};
@@ -344,6 +571,7 @@ function CountrySelect({ value, options, onChange, title }) {
 
 Object.assign(window, {
   Icon, SoftCard, Well, NeoButton, Chip, Toggle, Gauge, Ring, SectionHead, Glyph, CountrySelect,
+  PageGuidePanel, pageGuideKey, PAGE_GUIDES,
   SoftModal, SoftModalHead, SoftDiff, SoftRisk, SoftInput, Field,
   softDisc, softStatus, impactTone,
   tealForScore, useCountUp, prefersReduced, TT, useState, useEffect, useRef, useCallback

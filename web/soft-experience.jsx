@@ -397,7 +397,7 @@ function ExperienceScreen({ ctx }) {
           {status && (
             <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 13px", borderRadius: "var(--r-pill)", background: "var(--bg)", boxShadow: "var(--neo-in)" }}>
               <span style={{ fontSize: 12.5, fontWeight: 700, color: armed ? "var(--t-700)" : "var(--muted)" }}>
-                Beacon: {armed ? "ON" : "OFF"}
+                Beacon: {armed ? "ON" : "OFF"}{armed && status.eventCount ? ` · ${expNum(status.eventCount)} events` : ""}
               </span>
               <Toggle on={armed} disabled={toggling} onChange={(v) => toggleBeacon(v)} size={42} />
             </div>
