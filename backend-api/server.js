@@ -2435,6 +2435,42 @@ const routes = {
       await push('geo_opportunities', cfg.table_geo_opportunities, oppRows, airtable.SCHEMAS.geo_opportunities);
     }
 
+    // 6) Content brief → the EXISTING "Article Writer" table (the n8n-watched table,
+    //    stored as table_gaps). One rich row — Title + Keyword + meta + the full plan
+    //    in a "Content Brief" column — so the article writer has the dashboard's brief
+    //    as context instead of a bare keyword. We do NOT set the triggering Status:
+    //    the user flips it to "Write Article" in the grid (the existing trigger), so a
+    //    button click never auto-fires generation/publish (which costs API credits).
+    if (kinds.includes('article_brief')) {
+      const tref = cfg.table_gaps;  // the keyword/article table the n8n flow watches
+      if (!tref) { out.article_brief = { error: 'No Article Writer table configured for this site.' }; }
+      else {
+        let tableId = tref, briefField = 'Content Brief', fieldSet = null;
+        try {
+          const tables = await airtable.listTables(pat, baseId).catch(() => []);
+          const tbl = tables.find((t) => t.id === tref || t.name === tref);
+          if (tbl) {
+            tableId = tbl.id;
+            const names = new Set((tbl.fields || []).map((f) => f.name));
+            if (!names.has('Content Brief')) {
+              briefField = await airtable.ensureField(pat, baseId, tbl.id, 'Content Brief', 'multilineText'); // null if no schema:write
+            }
+            if (briefField) names.add(briefField);
+            fieldSet = names;
+          }
+        } catch (e) { /* fall back to bare push below */ }
+        const row = airtable.mapArticleBrief(body.cluster || {}, body.brief || null, briefField, fieldSet);
+        if (!row) { out.article_brief = { pushed: 0, note: 'no brief' }; }
+        else {
+          try {
+            const rec = await airtable.createRecord(pat, baseId, tableId, row);
+            out.article_brief = { pushed: 1, recordId: rec.id, briefField: briefField || 'Description' };
+            await db.logAirtableSync({ site_id: siteId, kind: 'article_brief', records_pushed: 1, status: 'ok' });
+          } catch (e) { out.article_brief = { error: e.message }; }
+        }
+      }
+    }
+
     await db.upsertAirtableConfig(siteId, { last_sync: now });
     return { ok: true, synced: out, at: now };
   },

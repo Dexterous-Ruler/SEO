@@ -299,6 +299,41 @@ export function mapOpportunities(clusters, now) {
     Status: 'To Do', 'Synced At': now,
   }));
 }
+// Map a dashboard content brief (+ its source cluster) into ONE row for the
+// EXISTING "Article Writer" table — the table the n8n article workflow watches.
+// This is Karim's ask: push the full plan (not a bare keyword) into the one
+// existing flow so generation has the dashboard's context. We populate the
+// content fields only; the workflow-control Status is left for the user to flip
+// to "Write Article" (the existing trigger) so a button click never auto-fires
+// generation/publish. `briefField` = the long-text column for the full plan
+// ('Content Brief' if it exists/was created, else folded into Description).
+// `fieldSet` (optional) = Set of field names that exist on the target table;
+// when given, the row is filtered to known fields so a differing per-site schema
+// can never cause an UNKNOWN_FIELD_NAME error.
+export function mapArticleBrief(cluster, brief, briefField, fieldSet) {
+  const c = cluster || {};
+  const b = (brief && typeof brief === 'object') ? brief : {};
+  const title = b.title || c.suggestedTitle || c.label || c.primaryKeyword || c.keyword || '';
+  const keyword = c.primaryKeyword || c.keyword || b.title || title;
+  if (!title && !keyword) return null;
+  const planText = briefToText(b);
+  const row = {
+    Title: title,
+    Keyword: keyword,
+    'Primary Keyword': c.primaryKeyword || keyword,
+    Category: 'Blog',  // drives the n8n Category switch (Blog branch); user can change
+  };
+  if (b.angle) row['Goal of Article'] = b.angle;
+  if (b.metaDescription) row.Description = b.metaDescription;
+  if (planText) {
+    if (briefField && briefField !== 'Description') row[briefField] = planText;
+    else row.Description = (row.Description ? row.Description + '\n\n' : '') + planText;
+  }
+  if (fieldSet && fieldSet.size) {
+    for (const k of Object.keys(row)) if (!fieldSet.has(k)) delete row[k];
+  }
+  return Object.keys(row).length ? row : null;
+}
 // Flatten a structured brief object into readable text for Airtable.
 function briefToText(b) {
   if (!b) return '';
@@ -313,4 +348,4 @@ function briefToText(b) {
   return lines.join('\n');
 }
 
-export default { listBases, listTables, ensureTable, ensureField, createRecords, listRecords, updateRecord, createRecord, listFieldValues, pushKeywords, SCHEMAS, mapGaps, mapContent, mapGeo, mapCompetitors, mapGeoOpportunities, mapOpportunities };
+export default { listBases, listTables, ensureTable, ensureField, createRecords, listRecords, updateRecord, createRecord, listFieldValues, pushKeywords, SCHEMAS, mapGaps, mapContent, mapGeo, mapCompetitors, mapGeoOpportunities, mapOpportunities, mapArticleBrief };

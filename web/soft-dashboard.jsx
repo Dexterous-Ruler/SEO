@@ -1413,6 +1413,20 @@ function OpportunitiesScreen({ ctx }) {
       ctx.toast(n+" opportunit"+(n===1?"y":"ies")+" sent to Airtable","teal");
     }).catch(e=>ctx.toast("Airtable: "+e.message,"clay")).finally(()=>setPushing(""));
   };
+  // Push a generated brief into the EXISTING Article Writer table (the one n8n flow),
+  // so generation runs with the full plan as context. We don't trigger it — the user
+  // flips Status to "Write Article" in the grid (the existing trigger) when ready.
+  const pushBriefToWriter = (c,i)=>{
+    const b = briefs[i];
+    if(!b || !b.brief){ ctx.toast("Generate the brief first","gold"); return; }
+    setPushing("writer"+i);
+    API.airtableSync(s.id,{kinds:["article_brief"], cluster:c, brief:b.brief}).then(r=>{
+      if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
+      const res = r.synced && r.synced.article_brief;
+      if(res && res.error){ ctx.toast("Article Writer: "+res.error,"clay"); return; }
+      ctx.toast("Brief → Article Writer ✓ — set Status to “Write Article” in Airtable to generate","teal");
+    }).catch(e=>ctx.toast("Airtable: "+e.message,"clay")).finally(()=>setPushing(""));
+  };
 
   const clusters = (data&&data.clusters||[]).filter(c=> filter==="all" || (filter==="gap"&&c.isGap) || (filter==="trending"&&c.trending) || (filter==="competitor"&&c.fromCompetitor));
   const FILTERS=[["all","All"],["gap","Gaps"],["trending","Trending"],["competitor","From competitors"]];
@@ -1531,6 +1545,7 @@ function OpportunitiesScreen({ ctx }) {
                       <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
                         <NeoButton kind="primary" size="sm" icon={briefBusy===i?undefined:"sparkles"} disabled={briefBusy===i} onClick={()=>genBrief(c,i)}>{briefBusy===i&&<Icon name="cog" size={14} className="audit-spin" />}{briefBusy===i?"Researching…":briefs[i]?"Regenerate brief":`Generate brief (${cName})`}</NeoButton>
                         <NeoButton kind="soft" size="sm" icon="layers" onClick={()=>pushAirtable([c],"one"+i)} disabled={pushing==="one"+i}>{pushing==="one"+i&&<Icon name="cog" size={14} className="audit-spin" />}Send to Airtable</NeoButton>
+                        {briefs[i] && briefs[i].brief && !briefs[i].brief.error && <NeoButton kind="soft" size="sm" icon="upload" onClick={()=>pushBriefToWriter(c,i)} disabled={pushing==="writer"+i}>{pushing==="writer"+i&&<Icon name="cog" size={14} className="audit-spin" />}Send brief → Article Writer</NeoButton>}
                       </div>
                       {briefs[i] && (()=>{ const b=briefs[i].brief||{}; return (
                         <div style={{ marginTop:12, padding:"14px 16px", background:"var(--surface)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)" }}>
