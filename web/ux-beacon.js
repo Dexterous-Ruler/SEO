@@ -325,23 +325,19 @@
     } catch (e) {}
   }
 
-  // ---- Event 6: broken_cta (single idle DOM scan) ----
+  // ---- broken_cta classification (now click-confirmed — see dead_click below) ----
+  // A CTA-looking anchor with a "dead" href ('#', '', javascript:void(0)) is NOT, on
+  // its own, proof of breakage: Elementor popups, app-store / "Download Free" buttons
+  // and consent-CMP controls (Complianz "View preferences") all legitimately pair a
+  // dead href with a JS click handler and work fine. The old static idle DOM scan
+  // flagged every such anchor, producing false "broken_cta" defects (observed live on
+  // goodfor.app). That scan is removed. Instead, the runtime dead_click detector below
+  // watches an ACTUAL click: a dead-href CTA is reported as 'broken_cta' ONLY when a
+  // real click on it produced NO navigation AND NO DOM mutation — i.e. it genuinely did
+  // nothing. A JS-handled button mutates/navigates, so it never reaches that branch.
+  // (There is no DOM API to detect addEventListener-attached handlers, so a static
+  //  scan can't tell a working JS button from a broken one — only effect can.)
   var DEAD_HREF = { '#': 1, '': 1, 'javascript:void(0)': 1 };
-  function scanBrokenCtas() {
-    try {
-      var anchors = document.getElementsByTagName('a');
-      var found = 0;
-      for (var i = 0; i < anchors.length && found < 10; i++) {
-        var a = anchors[i];
-        var href = (a.getAttribute('href') || '').trim();
-        if (!DEAD_HREF[href.toLowerCase()]) { continue; }
-        if (!looksLikeCta(a)) { continue; }
-        var label = scrubText((a.textContent || '').replace(/\s+/g, ' ').trim());
-        capture({ type: 'broken_cta', selector: stableSelector(a), label: label });
-        found++;
-      }
-    } catch (e) {}
-  }
 
   function looksLikeCta(a) {
     try {
@@ -350,6 +346,19 @@
       var hay = (cls + ' ' + role).toLowerCase();
       if (/button|cta|btn/.test(hay)) { return true; }
       if (a.closest && a.closest('.elementor-button')) { return true; }
+    } catch (e) {}
+    return false;
+  }
+
+  // The "broken_cta" sub-case of a confirmed dead_click: an <a> whose href is dead and
+  // which looks like a CTA. Kept distinct so a genuinely-dead CTA still carries the
+  // actionable "set the CTA href" remediation downstream (vs a generic dead_click).
+  function isDeadHrefCta(el) {
+    try {
+      if (!el || (el.tagName || '').toLowerCase() !== 'a') { return false; }
+      var href = (el.getAttribute('href') || '').trim();
+      if (!DEAD_HREF[href.toLowerCase()]) { return false; }
+      return looksLikeCta(el);
     } catch (e) {}
     return false;
   }
@@ -452,10 +461,13 @@
     } catch (err) {}
   }
 
-  // ---- Phase-2 #2: dead_click ----
+  // ---- Phase-2 #2: dead_click (+ click-confirmed broken_cta) ----
   // On click/pointerup of an interactive-looking element, open a ~700ms
   // transient MutationObserver + snapshot location.href. After the window, if
-  // NO navigation and NO relevant DOM mutation happened => dead_click.
+  // NO navigation and NO relevant DOM mutation happened => the click did nothing.
+  // A dead-href CTA in that state is the real, click-confirmed 'broken_cta'; any
+  // other dead element is a generic 'dead_click'. This is now the SOLE source of
+  // broken_cta (the static href scan was removed — it false-flagged JS buttons).
   // Conservative (low false-positive); observer always disconnected after.
   var deadCount = 0;
   var deadPending = false;
@@ -490,7 +502,10 @@
           var navigated = (location.href !== hrefBefore);
           if (!navigated && !mutated) {
             deadCount++;
-            capture({ type: 'dead_click', selector: sel, label: label });
+            // A genuinely-dead CTA (dead href, no nav, no mutation) is the real
+            // broken_cta and carries the "set the CTA href" remediation downstream;
+            // anything else that did nothing is a generic dead_click symptom.
+            capture({ type: isDeadHrefCta(anchor) ? 'broken_cta' : 'dead_click', selector: sel, label: label });
           }
         } catch (z) { deadPending = false; }
       }, 700);
@@ -638,13 +653,13 @@
     // load-time work
     var onReady = function () {
       checkDest404();
-      // Idle DOM scans only when NOT sampled out (skip for always-only mode).
+      // Sampled-in path only (skipped in always-only mode): the pageview denominator
+      // plus the Phase-2 heuristic signals — which now include the click-confirmed
+      // broken_cta (the old static idle DOM scan that flagged dead-href CTAs is gone).
       if (SAMPLED) {
         // Pageview denominator: one per sampled-in page view, shares the
-        // sampling denominator with the idle DOM-scan defects below.
+        // sampling denominator with the sampled-basis defects below.
         capture({ type: 'pageview' });
-        var ric = window.requestIdleCallback || function (cb) { return setTimeout(cb, 1); };
-        ric(function () { scanBrokenCtas(); });
 
         // Phase-2 HEURISTIC signals — sampled-in only, self-protected, bounded.
         try { document.addEventListener('click', safe(onRageClick), true); } catch (e) {}
