@@ -2402,23 +2402,38 @@ const routes = {
     }
     // Push rows into the Article Writer table, field-set-filtered (so a differing
     // schema can't 422) and de-duped (case-insensitive) by `dedupeField`.
-    async function pushToArticleWriter(kind, rows, dedupeField) {
+    async function pushToArticleWriter(kind, rows, dedupeField, opts) {
+      const upsert = !!(opts && opts.upsert);
       const aw = await articleWriterTarget();
       if (!aw) return false;   // not resolvable → caller falls back to legacy behaviour
       let r = (rows || []).filter(Boolean);
       if (aw.fieldSet) r = r.map((row) => { const o = {}; for (const k of Object.keys(row)) if (aw.fieldSet.has(k)) o[k] = row[k]; return o; }).filter((o) => Object.keys(o).length);
-      const total = r.length;
+      // Map existing dedupeField value → recordId (paginated), so we can either skip
+      // dupes or (upsert) PATCH them to backfill new fields like Content Brief.
+      const existing = new Map();
       if (dedupeField && r.length) {
         try {
-          const seen = await airtable.listFieldValues(pat, baseId, aw.tableId, dedupeField);
-          const batch = new Set();
-          r = r.filter((row) => { const k = String(row[dedupeField] || '').trim().toLowerCase(); if (!k) return true; if (seen.has(k) || batch.has(k)) return false; batch.add(k); return true; });
-        } catch (e) { /* read failed → push all */ }
+          let offset;
+          do {
+            const page = await airtable.listRecords(pat, baseId, aw.tableId, { pageSize: 100, offset, fields: [dedupeField] });
+            for (const rec of (page.records || [])) { const v = String((rec.fields || {})[dedupeField] || '').trim().toLowerCase(); if (v && !existing.has(v)) existing.set(v, rec.id); }
+            offset = page.offset;
+          } while (offset);
+        } catch (e) { /* read failed → treat as none existing */ }
       }
-      let pushed = 0;
-      if (r.length) pushed = await airtable.createRecords(pat, baseId, aw.tableId, r);
-      out[kind] = { pushed, table: aw.tableName, skipped: total - pushed };
-      await db.logAirtableSync({ site_id: siteId, kind, records_pushed: pushed, status: 'ok' });
+      let created = 0, updated = 0, skipped = 0;
+      const toCreate = [], batch = new Set();
+      for (const row of r) {
+        const key = dedupeField ? String(row[dedupeField] || '').trim().toLowerCase() : '';
+        if (key && existing.has(key)) {
+          if (upsert) { try { await airtable.updateRecord(pat, baseId, aw.tableId, existing.get(key), row); updated++; } catch (e) { skipped++; } }
+          else skipped++;
+        } else if (key && batch.has(key)) { skipped++; }
+        else { if (key) batch.add(key); toCreate.push(row); }
+      }
+      if (toCreate.length) created = await airtable.createRecords(pat, baseId, aw.tableId, toCreate);
+      out[kind] = { pushed: created, updated, skipped, table: aw.tableName };
+      await db.logAirtableSync({ site_id: siteId, kind, records_pushed: created + updated, status: 'ok' });
       return true;
     }
 
@@ -2471,7 +2486,7 @@ const routes = {
       const clusters = body.clusters || [];
       if (aw) {
         const rows = clusters.map((c) => airtable.mapArticleBrief(c, c.brief || null, aw.briefField, null));
-        await pushToArticleWriter('opportunities', rows, 'Title');
+        await pushToArticleWriter('opportunities', rows, 'Title', { upsert: true });
       } else {
         await push('opportunities', cfg.table_opportunities, airtable.mapOpportunities(clusters, now), airtable.SCHEMAS.opportunities);
       }
@@ -2503,7 +2518,7 @@ const routes = {
       else {
         const row = airtable.mapArticleBrief(body.cluster || {}, body.brief || null, aw.briefField, null);
         if (!row) { out.article_brief = { pushed: 0, note: 'no brief' }; }
-        else { await pushToArticleWriter('article_brief', [row], 'Title'); }
+        else { await pushToArticleWriter('article_brief', [row], 'Title', { upsert: true }); }
       }
     }
 

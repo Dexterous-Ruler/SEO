@@ -316,7 +316,11 @@ export function mapArticleBrief(cluster, brief, briefField, fieldSet) {
   const title = b.title || c.suggestedTitle || c.label || c.primaryKeyword || c.keyword || '';
   const keyword = c.primaryKeyword || c.keyword || b.title || title;
   if (!title && !keyword) return null;
-  const planText = briefToText(b);
+  // Prefer the full generated brief; otherwise fall back to the cluster's own
+  // detail (keywords, cluster, intent, format, volume — the "content opportunity"
+  // data) so Content Brief is never empty and the writer always gets context.
+  let planText = briefToText(b);
+  if (!planText) planText = clusterBriefText(c);
   const row = {
     Title: title,
     Keyword: keyword,
@@ -346,6 +350,32 @@ function briefToText(b) {
   if (Array.isArray(b.faqs) && b.faqs.length) { lines.push('\nFAQ:'); b.faqs.forEach((f) => lines.push(`Q: ${f.q}\nA: ${f.a}`)); }
   if (b.wordCount) lines.push('\nTarget length: ~' + b.wordCount + ' words');
   return lines.join('\n');
+}
+// Build a Content Brief from a keyword cluster when no full brief was generated —
+// captures the same detail the old "Content Opportunities" table held (cluster,
+// format, intent, volume, the keyword list, gap/coverage) so the writer has real
+// context to target, not just a title.
+function clusterBriefText(c) {
+  if (!c || typeof c !== 'object') return '';
+  const lines = [];
+  const meta = [];
+  if (c.label) meta.push('Cluster: ' + c.label);
+  if (c.primaryKeyword) meta.push('Primary keyword: ' + c.primaryKeyword);
+  if (c.format) meta.push('Format: ' + c.format);
+  if (c.intent) meta.push('Intent: ' + c.intent);
+  if (c.totalVolume) meta.push('~' + Number(c.totalVolume).toLocaleString() + ' searches/mo');
+  if (meta.length) lines.push(meta.join(' · '));
+  const kws = Array.isArray(c.keywords) ? c.keywords : [];
+  if (kws.length) {
+    lines.push('\nTARGET KEYWORDS (cover these):');
+    kws.forEach((k) => {
+      if (k && typeof k === 'object') lines.push('• ' + (k.keyword || '') + (k.volume != null ? ' (' + Number(k.volume).toLocaleString() + ')' : '') + (k.position != null ? ' — currently #' + Math.round(k.position) : ''));
+      else if (k) lines.push('• ' + k);
+    });
+  }
+  if (c.isGap) lines.push('\n(Content gap — no page covers this yet.)');
+  else if (c.coveringUrl) lines.push('\n(Currently covered by ' + c.coveringUrl + ' — expand/refresh rather than duplicate.)');
+  return lines.join('\n').trim();
 }
 
 export default { listBases, listTables, ensureTable, ensureField, createRecords, listRecords, updateRecord, createRecord, listFieldValues, pushKeywords, SCHEMAS, mapGaps, mapContent, mapGeo, mapCompetitors, mapGeoOpportunities, mapOpportunities, mapArticleBrief };

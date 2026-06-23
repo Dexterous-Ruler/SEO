@@ -1411,8 +1411,9 @@ function OpportunitiesScreen({ ctx }) {
       if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
       const res=(r.synced&&r.synced.opportunities)||{};
       if(res.error){ ctx.toast("Airtable: "+res.error,"clay"); return; }
-      const n=res.pushed||0, sk=res.skipped||0;
-      ctx.toast(n+" → "+(res.table||"Article Writer")+(sk?(" · "+sk+" already there"):"")+" — set Status to “Write Article” to generate","teal");
+      const n=res.pushed||0, u=res.updated||0;
+      const parts=[]; if(n)parts.push(n+" added"); if(u)parts.push(u+" updated");
+      ctx.toast((parts.join(", ")||"0 rows")+" → "+(res.table||"Article Writer")+" — set Status to “Write Article” to generate","teal");
     }).catch(e=>ctx.toast("Airtable: "+e.message,"clay")).finally(()=>setPushing(""));
   };
   // Push a generated brief into the EXISTING Article Writer table (the one n8n flow),
