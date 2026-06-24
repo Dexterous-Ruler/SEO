@@ -30,7 +30,7 @@ const SNAV_GROUPS = [
   { group:"Connect Data", items:[
     { k:"gsc",      label:"Search Console", icon:"search" },
     { k:"semrush",  label:"Keyword Research", icon:"bolt" },
-    { k:"airtable", label:"Push to Airtable", icon:"layers" },
+    { k:"airtable", label:"Airtable", icon:"layers" },
   ]},
   { group:"Assistant", items:[
     { k:"chat",     label:"Ask AI", icon:"sparkles" },
