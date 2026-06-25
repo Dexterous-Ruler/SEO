@@ -1277,7 +1277,12 @@ function AdminScreen({ ctx }) {
                             <option value="">default</option><option value="fast">sonar (fast)</option><option value="pro">sonar-pro</option><option value="reason">sonar-reasoning</option>
                           </select>
                         ) : (
-                          <input value={mdl(p)} onChange={e=>setCfg(c=>({...c,[p.key]:{...(c[p.key]||{}),model:e.target.value}}))} placeholder="default (Sonnet)" style={{ fontSize:11.5, padding:"4px 8px", borderRadius:8, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", width:200, fontFamily:"var(--mono)", color:"var(--ink)", outline:"none" }} />
+                          (()=>{ const cur=mdl(p); const OPTS=[["","default (Sonnet)"],["claude-opus-4-8","Opus 4.8 — top quality"],["claude-sonnet-4-6","Sonnet 4.6 — balanced"],["claude-haiku-4-5-20251001","Haiku 4.5 — fast & low-cost"]]; const known=OPTS.some(o=>o[0]===cur); return (
+                          <select value={cur} onChange={e=>setCfg(c=>({...c,[p.key]:{...(c[p.key]||{}),model:e.target.value}}))} className="neo-btn" style={{ fontSize:11.5, padding:"4px 8px", borderRadius:8, background:"var(--bg)", boxShadow:"var(--neo-in)", color:"var(--ink)", maxWidth:220 }}>
+                            {OPTS.map(o=><option key={o[0]} value={o[0]}>{o[1]}</option>)}
+                            {!known && cur && <option value={cur}>{cur} (custom)</option>}
+                          </select>
+                          ); })()
                         )}
                       </label>
                       <label style={{ fontSize:11.5, color:"var(--muted)", display:"flex", alignItems:"center", gap:6 }}>Temp
