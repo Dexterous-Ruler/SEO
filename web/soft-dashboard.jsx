@@ -3652,16 +3652,26 @@ function AirtableGrid({ ctx, siteId }) {
   // user is editing (modal open / focused field) or has loaded extra pages.
   useEffect(()=>{
     if(!d) return;
-    const iv = setInterval(()=>{
-      if(typeof document!=="undefined" && document.hidden) return;   // tab not visible
-      if(expanded) return;                                           // editing a record in the modal
-      if(saving>0) return;                                           // a save is in flight — don't clobber it
+    const canPoll=()=>{
+      if(typeof document!=="undefined" && document.hidden) return false;   // tab not visible
+      if(expanded) return false;                                           // editing a record in the modal
+      if(saving>0) return false;                                           // a save is in flight — don't clobber it
       const ae = typeof document!=="undefined" && document.activeElement;
-      if(ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName||"")) return;  // mid cell-edit
-      if((d.records||[]).length>50) return;                          // user loaded more pages — don't reset them
-      load(undefined, true);
-    }, 12000);
-    return ()=>clearInterval(iv);
+      if(ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName||"")) return false;  // mid cell-edit
+      if((d.records||[]).length>50) return false;                          // user loaded more pages — don't reset them
+      return true;
+    };
+    const tick=()=>{ if(canPoll()) load(undefined, true); };
+    const iv = setInterval(tick, 12000);
+    // re-pull the instant the user returns to the tab/window (e.g. after editing in Airtable)
+    const onWake=()=>{ if(typeof document==="undefined" || !document.hidden) tick(); };
+    if(typeof document!=="undefined") document.addEventListener("visibilitychange", onWake);
+    if(typeof window!=="undefined") window.addEventListener("focus", onWake);
+    return ()=>{
+      clearInterval(iv);
+      if(typeof document!=="undefined") document.removeEventListener("visibilitychange", onWake);
+      if(typeof window!=="undefined") window.removeEventListener("focus", onWake);
+    };
   },[d, expanded, saving, table, siteId]);
   const saveCell=(recId, fieldName, value)=>{
     setD(p=>({ ...p, records:p.records.map(r=>r.id===recId?{ ...r, fields:{ ...r.fields, [fieldName]:value } }:r) }));
