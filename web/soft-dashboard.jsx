@@ -3643,6 +3643,10 @@ function AirtableGrid({ ctx, siteId }) {
   const [table,setTable] = useState(null);  // selected table id (null → backend default = keyword table)
   const [q,setQ] = useState("");            // client-side record search
   const [expanded,setExpanded] = useState(null);  // record open in the expand modal
+  const [freshIds,setFreshIds] = useState(()=>new Set());  // rows to briefly highlight (just pushed / added / synced in)
+  const prevIds = useRef(null);      // record ids from the previous data load (to detect new arrivals)
+  const flashed = useRef(new Set()); // ids already flashed once (so each row highlights at most once)
+  const gridScroll = useRef(null);   // the grid's scroll container (to surface fresh rows at the top)
   const load = (offset, silent)=>{
     if(!silent){ setLoading(true); setErr(null); }
     API.airtableRecords(siteId,{ offset, pageSize:50, table }).then(r=>{
@@ -3678,6 +3682,31 @@ function AirtableGrid({ ctx, siteId }) {
       if(typeof window!=="undefined") window.removeEventListener("focus", onWake);
     };
   },[d, expanded, saving, table, siteId]);
+  // Surface freshly-arrived rows — ones that appear via Add row / a chat or dashboard
+  // push / a live-sync poll, plus any created in the last 2 min on first load (e.g. you
+  // just pushed a brief then opened this screen). Each row highlights at most once.
+  useEffect(()=>{
+    if(!d) return;
+    const recs = d.records||[];
+    const idSet = new Set(recs.map(r=>r.id));
+    const now = Date.now();
+    const fresh = new Set();
+    for(const r of recs){
+      if(flashed.current.has(r.id)) continue;
+      const appeared = prevIds.current && !prevIds.current.has(r.id);
+      let recent = false;
+      if(r.createdTime){ const t = new Date(r.createdTime).getTime(); recent = !isNaN(t) && (now - t) < 120000; }
+      if(appeared || recent){ fresh.add(r.id); flashed.current.add(r.id); }
+    }
+    prevIds.current = idSet;
+    if(fresh.size){
+      setFreshIds(new Set(fresh));
+      // newest-first puts them at the top — surface them, but don't yank a user browsing deeper down
+      if(gridScroll.current && gridScroll.current.scrollTop < 220) gridScroll.current.scrollTop = 0;
+      const t = setTimeout(()=>setFreshIds(new Set()), 4200);
+      return ()=>clearTimeout(t);
+    }
+  },[d]);
   const saveCell=(recId, fieldName, value)=>{
     setD(p=>({ ...p, records:p.records.map(r=>r.id===recId?{ ...r, fields:{ ...r.fields, [fieldName]:value } }:r) }));
     setExpanded(x=> (x&&x.id===recId) ? { ...x, fields:{ ...x.fields, [fieldName]:value } } : x);  // keep the open modal in sync
@@ -3694,9 +3723,10 @@ function AirtableGrid({ ctx, siteId }) {
   if(!d) return <SoftCard hover={false}><div style={{ padding:"14px 4px", color:"var(--muted)", fontSize:13.5, display:"flex", alignItems:"center", gap:10 }}><Icon name="cog" size={16} className="audit-spin" />Loading records…</div></SoftCard>;
   const fields = d.fields||[];
   const ql = q.trim().toLowerCase();
-  // mirror Airtable's default grid order (creation order — newest rows at the bottom);
-  // records without a createdTime (just-added, pre-refresh) fall to the end.
-  const sorted = (d.records||[]).slice().sort((a,b)=>{ const ca=a.createdTime||"￿", cb=b.createdTime||"￿"; return ca<cb?-1:ca>cb?1:0; });
+  // newest first — so a row you just pushed (from chat / the dashboard) or added shows at
+  // the TOP, immediately visible; records without a createdTime (just-added, pre-refresh)
+  // are treated as newest so they surface at the top too.
+  const sorted = (d.records||[]).slice().sort((a,b)=>{ const ca=a.createdTime||"￿", cb=b.createdTime||"￿"; return ca<cb?1:ca>cb?-1:0; });
   const rows = ql ? sorted.filter(r=>fields.some(f=>{ const val=r.fields[f.name]; const s=Array.isArray(val)?val.join(" "):String(val==null?"":val); return s.toLowerCase().includes(ql); })) : sorted;
   const HCELL = { textAlign:"left", padding:"8px 10px", fontSize:11, fontWeight:700, letterSpacing:".02em", color:"var(--muted)", background:"var(--bg-2)", borderBottom:"2px solid var(--line)", borderRight:"1px solid var(--line-soft)", whiteSpace:"nowrap" };
   return (
@@ -3724,7 +3754,7 @@ function AirtableGrid({ ctx, siteId }) {
         </div>
       </div>
       {/* grid */}
-      <div className="scroll" style={{ overflowX:"auto", maxHeight:600, overflowY:"auto", background:"var(--surface)" }}>
+      <div ref={gridScroll} className="scroll" style={{ overflowX:"auto", maxHeight:600, overflowY:"auto", background:"var(--surface)" }}>
         <table style={{ borderCollapse:"separate", borderSpacing:0, width:"max-content", minWidth:"100%" }}>
           <thead><tr style={{ position:"sticky", top:0, zIndex:2 }}>
             <th style={{ ...HCELL, position:"sticky", left:0, zIndex:3, width:46, minWidth:46, textAlign:"center" }}>#</th>
@@ -3735,16 +3765,16 @@ function AirtableGrid({ ctx, siteId }) {
             ))}
           </tr></thead>
           <tbody>
-            {rows.map((rec,ri)=>(
+            {rows.map((rec,ri)=>{ const fresh = freshIds.has(rec.id); return (
               <tr key={rec.id} className="row-link">
-                <td onClick={()=>setExpanded(rec)} title="Expand record — edit every field" style={{ position:"sticky", left:0, zIndex:1, width:46, minWidth:46, textAlign:"center", borderBottom:"1px solid var(--line-soft)", borderRight:"2px solid var(--line)", background:"var(--bg)", color:"var(--faint)", fontSize:11.5, fontWeight:600, cursor:"pointer" }}>{ri+1}</td>
+                <td onClick={()=>setExpanded(rec)} title="Expand record — edit every field" style={{ position:"sticky", left:0, zIndex:1, width:46, minWidth:46, textAlign:"center", borderBottom:"1px solid var(--line-soft)", borderRight:"2px solid var(--line)", background:fresh?"var(--t-100)":"var(--bg)", color:fresh?"var(--t-700)":"var(--faint)", fontSize:11.5, fontWeight:fresh?800:600, cursor:"pointer", transition:"background 1.4s ease, color 1.4s ease" }}>{fresh?"●":ri+1}</td>
                 {fields.map(f=>(
-                  <td key={f.name} style={{ borderBottom:"1px solid var(--line-soft)", borderRight:"1px solid var(--line-soft)", verticalAlign:"middle", maxWidth:340 }}>
+                  <td key={f.name} style={{ borderBottom:"1px solid var(--line-soft)", borderRight:"1px solid var(--line-soft)", verticalAlign:"middle", maxWidth:340, background:fresh?"var(--t-50)":undefined, transition:"background 1.4s ease" }}>
                     <GridCell field={f} value={rec.fields[f.name]} onSave={(val)=>saveCell(rec.id, f.name, val)} />
                   </td>
                 ))}
               </tr>
-            ))}
+            ); })}
             {rows.length===0 && <tr><td colSpan={fields.length+1} style={{ padding:"24px", textAlign:"center", color:"var(--muted)", fontSize:13 }}>{ql?"No records match your search.":"No records yet — click “Add row”."}</td></tr>}
           </tbody>
         </table>
