@@ -59,10 +59,11 @@ export async function ensureField(pat, baseId, tableId, name, type = 'multilineT
 }
 
 // ── Embedded grid: read/write individual records ───────────────────────────
-export async function listRecords(pat, baseId, table, { pageSize = 50, offset, fields } = {}) {
+export async function listRecords(pat, baseId, table, { pageSize = 50, offset, fields, filterByFormula } = {}) {
   const enc = encodeURIComponent(table);
   const params = new URLSearchParams({ pageSize: String(Math.min(pageSize, 100)) });
   if (offset) params.set('offset', offset);
+  if (filterByFormula) params.set('filterByFormula', filterByFormula);
   (fields || []).forEach((f) => params.append('fields[]', f));
   const data = await at(pat, `${API}/${baseId}/${enc}?${params.toString()}`);
   return { records: (data.records || []).map((r) => ({ id: r.id, createdTime: r.createdTime || null, fields: r.fields || {} })), offset: data.offset || null };

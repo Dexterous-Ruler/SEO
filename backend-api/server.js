@@ -2202,7 +2202,20 @@ const routes = {
       if (body.table) target = tables.find((t) => t.id === body.table || t.name === body.table);
       if (!target && cfg.table_gaps) target = tables.find((t) => t.id === cfg.table_gaps || t.name === cfg.table_gaps);
       if (!target) target = tables[0];
-      const page = await airtable.listRecords(pat, cfg.base_id, target.id, { pageSize: body.pageSize || 50, offset: body.offset });
+      // Server-side search across the WHOLE table (not just the loaded page) — essential
+      // when a table holds thousands of rows. Build a case-insensitive substring match
+      // over the table's text-like fields; the term is sanitised so it can't break the
+      // formula. Falls back to no filter (normal paging) when there's no search.
+      let filterByFormula;
+      if (body.search != null && String(body.search).trim()) {
+        const term = String(body.search).toLowerCase().replace(/[^a-z0-9 _\-&.]/g, ' ').trim();
+        if (term) {
+          const SEARCHABLE = new Set(['singleLineText', 'multilineText', 'richText', 'singleSelect', 'multipleSelects', 'url', 'email', 'phoneNumber', 'formula', 'autoNumber', 'barcode']);
+          const cols = (target.fields || []).filter((f) => SEARCHABLE.has(f.type) && !/[{}]/.test(f.name)).map((f) => `FIND("${term}",LOWER({${f.name}}&""))`);
+          if (cols.length) filterByFormula = `OR(${cols.join(',')})`;
+        }
+      }
+      const page = await airtable.listRecords(pat, cfg.base_id, target.id, { pageSize: body.pageSize || 50, offset: body.offset, filterByFormula });
       return {
         fields: target.fields || [], tableName: target.name, tableId: target.id,
         records: page.records, offset: page.offset,
