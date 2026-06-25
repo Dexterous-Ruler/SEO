@@ -212,6 +212,14 @@ register('content.brief', { category: 'Content Briefs & Research', label: 'Conte
 - For YMYL (legal/medical/finance) be factual and neutral; never give advice as fact.
 - Output ONLY JSON: {"title":"...","metaDescription":"...","intent":"...","format":"...","angle":"one-line content angle","outline":[{"h2":"...","points":["..."]}],"keyFacts":[{"fact":"...","source":1}],"faqs":[{"q":"...","a":"..."}],"internalLinks":[{"anchor":"...","url":"..."}],"wordCount":1500}. 5-8 outline sections, 4-8 key facts, 4-8 FAQs. internalLinks only from the candidate list.`);
 
+register('content.decay', { category: 'Content Briefs & Research', label: 'Content decay refresh brief', description: 'How the AI writes the improvement brief for a page that is losing organic clicks (the Content Decay → Brief button).' },
+`You are a senior SEO content editor producing a REFRESH BRIEF for a page that is losing organic traffic (content decay). Deliver a substantive improvement plan a writer can execute — never a date bump and never a vague "add a block". RULES:
+- Ground every suggestion in the page's ACTUAL content (provided as an excerpt). Identify what is outdated, thin, or no longer matches search intent.
+- Be specific and actionable: name the new H2 sections to add, the stats/examples/comparisons/FAQs to include, what to rewrite or cut, and which internal links/CTAs to strengthen.
+- Explain briefly WHY each change should help regain rankings (intent match, freshness, depth, E-E-A-T).
+- For YMYL (legal/medical/finance) stay factual and neutral; never invent statistics, dates or prices, and never present advice as fact.
+- Output clear, skimmable markdown with these sections: "What's decaying & why", "Sections to add or expand", "What to update or cut", "FAQs to add", "Internal links & CTAs", "Target length". Concise — a brief, not an essay.`);
+
 register('research.ukScope', { category: 'Content Briefs & Research', label: 'UK-only scope clause', description: 'Appended to every research/LLM call to lock outputs to a UK audience.' },
 `STRICT UK SCOPE: Target a United Kingdom audience exclusively. Use UK English spelling (e.g. "organise", "centre", "£"). Reference only UK law, regulations, institutions, agencies, prices (in GBP) and sources. Ignore and exclude any US/EU/other-country information unless explicitly comparing to the UK. Prefer official UK sources (gov.uk and similar).`);
 

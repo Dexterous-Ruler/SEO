@@ -1915,10 +1915,7 @@ const routes = {
       const html = await res.text();
       pageText = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
     } catch (e) {}
-    const brief = await claude.draftFix({
-      finding: { title: 'Content refresh for a decaying page', detail: `This page lost ${page.clicksLost} clicks (${page.pctDrop}% drop), position drifted ${page.positionDrift > 0 ? '+' : ''}${page.positionDrift}. Write a SUBSTANTIVE refresh brief: what new sections/stats/examples to add, what's outdated, how to regain rankings. NOT a date bump.`, page: page.page },
-      pageContext: { excerpt: pageText }, siteId: body.siteId,
-    });
+    const brief = await claude.decayBrief({ page, pageContext: { excerpt: pageText }, siteId: body.siteId });
     return { brief };
   },
 

@@ -3564,25 +3564,69 @@ function SemrushScreen({ ctx }) {
    One editable cell. Text commits on blur/Enter; singleSelect (e.g. Status →
    triggers the n8n workflow) commits immediately. Read-only for computed types. */
 const GRID_EDITABLE = new Set(["singleLineText","multilineText","richText","number","currency","percent","url","email","phoneNumber","date","dateTime","singleSelect"]);
-function GridCell({ field, value, onSave }) {
+/* Airtable color-name → [bg, fg] for select pills (approximate Airtable palette). */
+function atColor(c){
+  const m={ blue:["#cfdfff","#2750ae"], cyan:["#d0f0fd","#0b76b7"], teal:["#c3f0e9","#067a76"], green:["#d2f7c2","#2d7a16"], yellow:["#ffeab6","#9c6f00"], orange:["#fee2d5","#cc4d26"], red:["#ffdce5","#b21e2c"], pink:["#ffdaf4","#b2158b"], purple:["#ede2fe","#6b1cb0"], gray:["#e5e9f0","#3d4757"] };
+  const s=String(c||"").toLowerCase();
+  const key=Object.keys(m).find(k=>s.includes(k));
+  if(key) return m[key];
+  const fams=Object.keys(m); let h=0; for(let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))>>>0;
+  return m[fams[h%fams.length]];
+}
+function GridPill({ label, color }){ const [bg,fg]=atColor(color); return <span style={{ display:"inline-block", padding:"2px 9px", borderRadius:11, fontSize:11.5, fontWeight:600, lineHeight:1.6, background:bg, color:fg, whiteSpace:"nowrap", maxWidth:"100%", overflow:"hidden", textOverflow:"ellipsis", verticalAlign:"middle" }}>{label}</span>; }
+const GRID_ICON={ singleSelect:"chevD", multipleSelects:"layers", checkbox:"check", url:"link", number:"trend", currency:"trend", percent:"trend", multilineText:"doc", richText:"doc", date:"doc", dateTime:"doc" };
+function gridFieldIcon(t){ return GRID_ICON[t]||"doc"; }
+
+/* One editable cell. `big` = inside the expanded-record modal (taller, textarea for long text). */
+function GridCell({ field, value, onSave, big }){
   const init = value==null?"":(Array.isArray(value)?value.join(", "):String(value));
   const [v,setV] = useState(init);
   useEffect(()=>{ setV(init); },[init]);
   const base = { width:"100%", border:"none", outline:"none", background:"transparent", font:"inherit", fontSize:12.5, color:"var(--ink)", padding:"7px 9px" };
+  if(field.type==="checkbox") return <div style={{ padding:"6px 9px", textAlign: big?"left":"center" }}><input type="checkbox" checked={value===true||value==="true"} onChange={e=>onSave(e.target.checked)} style={{ cursor:"pointer", width:15, height:15, accentColor:"var(--t-600)" }} /></div>;
   if(field.type==="singleSelect"){
-    const isStatus=/status/i.test(field.name);
+    const opt=(field.options||[]).find(o=>o.name===v)||{};
     return (
-      <select value={v||""} onChange={e=>{ setV(e.target.value); onSave(e.target.value||null); }}
-        style={{ ...base, cursor:"pointer", fontWeight:isStatus?700:500, color:isStatus&&v?"var(--t-700)":"var(--ink)", appearance:"auto" }}>
-        <option value="">—</option>
-        {(field.options||[]).map(o=><option key={o.name} value={o.name}>{o.name}</option>)}
-      </select>
+      <div style={{ position:"relative", padding:"4px 7px", minHeight:28, display:"flex", alignItems:"center" }}>
+        <select value={v||""} onChange={e=>{ setV(e.target.value); onSave(e.target.value||null); }} style={{ position:"absolute", inset:0, width:"100%", height:"100%", opacity:0, cursor:"pointer", border:"none" }}>
+          <option value="">—</option>{(field.options||[]).map(o=><option key={o.name} value={o.name}>{o.name}</option>)}
+        </select>
+        {v ? <GridPill label={v} color={opt.color} /> : <span style={{ fontSize:12.5, color:"var(--faint)" }}>Set…</span>}
+      </div>
     );
   }
-  if(!GRID_EDITABLE.has(field.type)) return <span style={{ ...base, display:"block", color:"var(--muted)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }} title={init}>{init}</span>;
+  if(field.type==="multipleSelects" && Array.isArray(value)) return <div style={{ display:"flex", gap:4, flexWrap:"wrap", padding:"5px 7px" }}>{value.length?value.map((x,i)=><GridPill key={i} label={x} color={((field.options||[]).find(o=>o.name===x)||{}).color} />):<span style={{ fontSize:12.5, color:"var(--faint)" }}>—</span>}</div>;
+  if(field.type==="multilineText" || field.type==="richText"){
+    if(big){ const commit=()=>{ if(v!==init) onSave(v===""?null:v); }; return <textarea value={v} onChange={e=>setV(e.target.value)} onBlur={commit} rows={5} placeholder="—" style={{ ...base, resize:"vertical", lineHeight:1.55, padding:"9px 11px", fontFamily:"var(--ff)" }} />; }
+    return <span style={{ ...base, display:"block", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", color: init?"var(--ink)":"var(--faint)" }} title={init}>{init||"—"}</span>;
+  }
+  if(field.type==="url" && init) return <a href={init} target="_blank" rel="noopener" onClick={e=>e.stopPropagation()} title={init} style={{ ...base, display:"block", color:"var(--t-700)", textDecoration:"none", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{init.replace(/^https?:\/\//,"")}</a>;
+  if(!GRID_EDITABLE.has(field.type)) return <span style={{ ...base, display:"block", color:"var(--muted)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }} title={init}>{init||"—"}</span>;
   const commit=()=>{ if(v!==init) onSave(v===""?null:v); };
-  return <input value={v} onChange={e=>setV(e.target.value)} onBlur={commit} onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); if(e.key==="Escape"){ setV(init); e.target.blur(); } }}
-    style={base} title={v} />;
+  return <input value={v} onChange={e=>setV(e.target.value)} onBlur={commit} onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); if(e.key==="Escape"){ setV(init); e.target.blur(); } }} style={base} placeholder="—" title={v} />;
+}
+
+/* Airtable-style expanded record — edit every field of one row in a form (no need to open Airtable). */
+function RecordModal({ rec, fields, onSave, onClose }){
+  if(!rec) return null;
+  const primary=fields[0];
+  const t=primary?rec.fields[primary.name]:null;
+  const title=String(Array.isArray(t)?t.join(", "):(t||"Untitled record")).slice(0,90)||"Untitled record";
+  return (
+    <SoftModal open onClose={onClose} w={660}>
+      <SoftModalHead icon="doc" tone="teal" title={title} sub="Edit this record — every change saves live to Airtable" onClose={onClose} />
+      <div className="scroll" style={{ padding:"14px 20px 20px", maxHeight:"68vh", display:"flex", flexDirection:"column", gap:13 }}>
+        {fields.map(f=>(
+          <div key={f.name}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:".03em", textTransform:"uppercase", color:/status/i.test(f.name)?"var(--t-700)":"var(--muted)", marginBottom:5, display:"flex", alignItems:"center", gap:6 }}><Icon name={gridFieldIcon(f.type)} size={12} />{f.name}</div>
+            <div style={{ background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)" }}>
+              <GridCell field={f} value={rec.fields[f.name]} onSave={(val)=>onSave(rec.id, f.name, val)} big />
+            </div>
+          </div>
+        ))}
+      </div>
+    </SoftModal>
+  );
 }
 
 function AirtableGrid({ ctx, siteId }) {
@@ -3592,6 +3636,8 @@ function AirtableGrid({ ctx, siteId }) {
   const [err,setErr] = useState(null);
   const [saving,setSaving] = useState(0);
   const [table,setTable] = useState(null);  // selected table id (null → backend default = keyword table)
+  const [q,setQ] = useState("");            // client-side record search
+  const [expanded,setExpanded] = useState(null);  // record open in the expand modal
   const load = (offset)=>{
     setLoading(true); setErr(null);
     API.airtableRecords(siteId,{ offset, pageSize:50, table }).then(r=>{
@@ -3599,56 +3645,72 @@ function AirtableGrid({ ctx, siteId }) {
       setD(prev=> (offset&&prev) ? { ...r, records:[...prev.records, ...r.records] } : r);
     }).catch(e=>setErr(e.message)).finally(()=>setLoading(false));
   };
-  useEffect(()=>{ setD(null); },[siteId]);          // blank on site switch (different base)
+  useEffect(()=>{ setD(null); setQ(""); setExpanded(null); },[siteId]);  // blank on site switch (different base)
   useEffect(()=>{ load(); },[siteId, table]);       // (re)load on site OR table switch (no blank → smooth)
   const saveCell=(recId, fieldName, value)=>{
     setD(p=>({ ...p, records:p.records.map(r=>r.id===recId?{ ...r, fields:{ ...r.fields, [fieldName]:value } }:r) }));
+    setExpanded(x=> (x&&x.id===recId) ? { ...x, fields:{ ...x.fields, [fieldName]:value } } : x);  // keep the open modal in sync
     setSaving(c=>c+1);
     API.airtableUpdateRecord(siteId, recId, { [fieldName]:value }, d&&d.tableId)
       .then(r=>{ if(r.error) ctx.toast("Save failed: "+r.error,"clay"); })
       .catch(e=>ctx.toast("Save failed: "+e.message,"clay")).finally(()=>setSaving(c=>c-1));
   };
   const addRow=()=>{
-    API.airtableCreateRecord(siteId,{}, d&&d.tableId).then(r=>{ if(r.error){ ctx.toast("Add failed: "+r.error,"clay"); return; } setD(p=>({ ...p, records:[r.record, ...p.records] })); ctx.toast("Row added — fill it in","teal"); }).catch(e=>ctx.toast(e.message,"clay"));
+    API.airtableCreateRecord(siteId,{}, d&&d.tableId).then(r=>{ if(r.error){ ctx.toast("Add failed: "+r.error,"clay"); return; } setD(p=>({ ...p, records:[r.record, ...p.records] })); setExpanded(r.record); ctx.toast("Row added — fill it in","teal"); }).catch(e=>ctx.toast(e.message,"clay"));
   };
 
   if(err) return <SoftCard hover={false}><ErrBanner msg={err} onRetry={()=>{ setErr(null); load(); }} /></SoftCard>;
   if(!d) return <SoftCard hover={false}><div style={{ padding:"14px 4px", color:"var(--muted)", fontSize:13.5, display:"flex", alignItems:"center", gap:10 }}><Icon name="cog" size={16} className="audit-spin" />Loading records…</div></SoftCard>;
   const fields = d.fields||[];
+  const ql = q.trim().toLowerCase();
+  const rows = ql ? d.records.filter(r=>fields.some(f=>{ const val=r.fields[f.name]; const s=Array.isArray(val)?val.join(" "):String(val==null?"":val); return s.toLowerCase().includes(ql); })) : d.records;
+  const HCELL = { textAlign:"left", padding:"8px 10px", fontSize:11, fontWeight:700, letterSpacing:".02em", color:"var(--muted)", background:"var(--bg-2)", borderBottom:"2px solid var(--line)", borderRight:"1px solid var(--line-soft)", whiteSpace:"nowrap" };
   return (
     <SoftCard hover={false} style={{ padding:0, overflow:"hidden" }}>
-      <div style={{ display:"flex", alignItems:"center", gap:12, padding:"15px 18px", borderBottom:"1px solid var(--line-soft)", flexWrap:"wrap" }}>
-        <div style={{ flex:1, minWidth:160 }}>
-          {(d.tables && d.tables.length>1) ? (
-            <select value={d.tableId||""} onChange={e=>setTable(e.target.value)}
-              style={{ fontSize:15, fontWeight:800, padding:"6px 10px", borderRadius:"var(--r-md)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", color:"var(--ink)", outline:"none", maxWidth:340, cursor:"pointer" }}>
-              {d.tables.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
-          ) : (
-            <div style={{ fontSize:15.5, fontWeight:800 }}>{d.tableName||"Records"}</div>
-          )}
-          <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:3 }}>{d.records.length} loaded{d.offset?" · more available":""} · edits save live to Airtable</div>
+      {/* table tabs (Airtable-style) */}
+      {(d.tables && d.tables.length>1) && (
+        <div className="scroll" style={{ display:"flex", gap:2, padding:"7px 10px 0", borderBottom:"1px solid var(--line-soft)", overflowX:"auto" }}>
+          {d.tables.map(t=>{ const on=(d.tableId===t.id); return (
+            <button key={t.id} onClick={()=>{ if(!on){ setTable(t.id); setQ(""); } }} style={{ padding:"8px 14px", fontSize:13, fontWeight:on?800:600, border:"none", borderRadius:"9px 9px 0 0", cursor:"pointer", whiteSpace:"nowrap", color:on?"var(--t-700)":"var(--muted)", background:on?"var(--surface)":"transparent", boxShadow:on?"inset 0 -2px 0 var(--t-500)":"none" }}>{t.name}</button>
+          ); })}
         </div>
-        {(saving>0||loading) && <Chip tone="gold" size="sm"><Icon name="cog" size={11} className="audit-spin" />{saving>0?"Saving…":"Loading…"}</Chip>}
-        <NeoButton kind="primary" size="sm" icon="plus" onClick={addRow}>Add row</NeoButton>
+      )}
+      {/* toolbar */}
+      <div style={{ display:"flex", alignItems:"center", gap:11, padding:"12px 16px", borderBottom:"1px solid var(--line-soft)", flexWrap:"wrap" }}>
+        <div style={{ fontSize:15, fontWeight:800 }}>{d.tableName||"Records"}</div>
+        <span style={{ fontSize:11.5, color:"var(--muted)" }}>{rows.length}{ql?(" of "+d.records.length):""} record{rows.length===1?"":"s"}{d.offset?" · more available":""} · click a row’s # to expand</span>
+        {(saving>0||loading) && <Chip tone="gold" size="sm"><Icon name="cog" size={11} className="audit-spin" />{saving>0?"Saving":"Loading"}</Chip>}
+        <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:8 }}>
+          <div style={{ position:"relative" }}>
+            <Icon name="search" size={13} style={{ position:"absolute", left:11, top:9, color:"var(--faint)" }} />
+            <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search records…" style={{ padding:"7px 12px 7px 31px", borderRadius:"var(--r-pill)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5, color:"var(--ink)", outline:"none", width:170 }} />
+          </div>
+          <NeoButton kind="primary" size="sm" icon="plus" onClick={addRow}>Add row</NeoButton>
+        </div>
       </div>
-      <div className="scroll" style={{ overflowX:"auto", maxHeight:560, overflowY:"auto" }}>
-        <table style={{ borderCollapse:"collapse", width:"max-content", minWidth:"100%" }}>
-          <thead><tr style={{ position:"sticky", top:0, zIndex:1 }}>
+      {/* grid */}
+      <div className="scroll" style={{ overflowX:"auto", maxHeight:600, overflowY:"auto", background:"var(--surface)" }}>
+        <table style={{ borderCollapse:"separate", borderSpacing:0, width:"max-content", minWidth:"100%" }}>
+          <thead><tr style={{ position:"sticky", top:0, zIndex:2 }}>
+            <th style={{ ...HCELL, position:"sticky", left:0, zIndex:3, width:46, minWidth:46, textAlign:"center" }}>#</th>
             {fields.map(f=>(
-              <th key={f.name} style={{ textAlign:"left", padding:"9px 9px", fontSize:11, fontWeight:800, letterSpacing:".02em", textTransform:"uppercase", color: /status/i.test(f.name)?"var(--t-700)":"var(--muted)", background:"var(--bg-2)", borderBottom:"1px solid var(--line)", borderRight:"1px solid var(--line-soft)", whiteSpace:"nowrap", minWidth: f.type==="multilineText"?220:130 }}>{f.name}</th>
+              <th key={f.name} style={{ ...HCELL, color:/status/i.test(f.name)?"var(--t-700)":"var(--muted)", minWidth: (f.type==="multilineText"||f.type==="richText")?240:140 }}>
+                <span style={{ display:"inline-flex", alignItems:"center", gap:5 }}><Icon name={gridFieldIcon(f.type)} size={11} style={{ opacity:.55 }} />{f.name}</span>
+              </th>
             ))}
           </tr></thead>
           <tbody>
-            {d.records.map((rec,ri)=>(
-              <tr key={rec.id} style={{ background: ri%2?"var(--surface)":"var(--bg)" }}>
+            {rows.map((rec,ri)=>(
+              <tr key={rec.id} className="row-link">
+                <td onClick={()=>setExpanded(rec)} title="Expand record — edit every field" style={{ position:"sticky", left:0, zIndex:1, width:46, minWidth:46, textAlign:"center", borderBottom:"1px solid var(--line-soft)", borderRight:"2px solid var(--line)", background:"var(--bg)", color:"var(--faint)", fontSize:11.5, fontWeight:600, cursor:"pointer" }}>{ri+1}</td>
                 {fields.map(f=>(
-                  <td key={f.name} style={{ borderBottom:"1px solid var(--line-soft)", borderRight:"1px solid var(--line-soft)", verticalAlign:"middle", maxWidth:320 }}>
+                  <td key={f.name} style={{ borderBottom:"1px solid var(--line-soft)", borderRight:"1px solid var(--line-soft)", verticalAlign:"middle", maxWidth:340 }}>
                     <GridCell field={f} value={rec.fields[f.name]} onSave={(val)=>saveCell(rec.id, f.name, val)} />
                   </td>
                 ))}
               </tr>
             ))}
+            {rows.length===0 && <tr><td colSpan={fields.length+1} style={{ padding:"24px", textAlign:"center", color:"var(--muted)", fontSize:13 }}>{ql?"No records match your search.":"No records yet — click “Add row”."}</td></tr>}
           </tbody>
         </table>
       </div>
@@ -3657,6 +3719,7 @@ function AirtableGrid({ ctx, siteId }) {
           <NeoButton kind="soft" size="sm" icon={loading?undefined:"chevD"} disabled={loading} onClick={()=>load(d.offset)}>{loading&&<Icon name="cog" size={14} className="audit-spin" />}{loading?"Loading…":"Load 50 more"}</NeoButton>
         </div>
       )}
+      {expanded && <RecordModal rec={expanded} fields={fields} onSave={saveCell} onClose={()=>setExpanded(null)} />}
     </SoftCard>
   );
 }

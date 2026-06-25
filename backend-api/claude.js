@@ -215,6 +215,26 @@ Output only the proposed fix (the value to apply), nothing else.`,
 }
 
 // Content-decay REFRESH (not a redraft). Produces a conservative "freshness"
+// Substantive content-refresh brief for a decaying page (editable prompt: content.decay).
+// Returns markdown text — a real improvement plan a writer can execute, not a date bump.
+export async function decayBrief({ page, pageContext, siteId }) {
+  const p = page || {};
+  const txt = await complete({
+    system: sys('content.decay', siteId), promptKey: 'content.decay',
+    maxTokens: 1200, temperature: 0.4,
+    messages: [{
+      role: 'user',
+      content: `Write a content-refresh brief for this decaying page.
+URL: ${p.url || p.page || ''}
+Decline: lost ${p.clicksLost} clicks (${p.pctDrop}% drop); average position drifted ${p.positionDrift > 0 ? '+' + p.positionDrift + ' (worse)' : p.positionDrift}.
+
+Current page content (excerpt — base the plan on THIS, do not invent facts):
+${(pageContext && pageContext.excerpt) || '(could not fetch the live page)'}`,
+    }],
+  });
+  return txt;
+}
+
 // block to PREPEND to a decaying page: an updated lede + a few targeted points
 // that re-establish relevance for the queries it's losing. Grounded strictly in
 // the existing page content — no invented facts (critical for YMYL/legal).
@@ -400,4 +420,4 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
   } catch (e) { return { title: keyword, error: 'brief synthesis parse failed', sources: research.sources || [], _raw: txt.slice(0, 400) }; }
 }
 
-export default { metaDescription, titleRewrite, altText, draftFix, narrate, internalLinkSuggestions, extractCitableFacts, projectPlan, clusterKeywords, synthesizeContentBrief, complete };
+export default { metaDescription, titleRewrite, altText, draftFix, narrate, internalLinkSuggestions, extractCitableFacts, projectPlan, clusterKeywords, synthesizeContentBrief, decayBrief, complete };
