@@ -3638,15 +3638,31 @@ function AirtableGrid({ ctx, siteId }) {
   const [table,setTable] = useState(null);  // selected table id (null → backend default = keyword table)
   const [q,setQ] = useState("");            // client-side record search
   const [expanded,setExpanded] = useState(null);  // record open in the expand modal
-  const load = (offset)=>{
-    setLoading(true); setErr(null);
+  const load = (offset, silent)=>{
+    if(!silent){ setLoading(true); setErr(null); }
     API.airtableRecords(siteId,{ offset, pageSize:50, table }).then(r=>{
-      if(r.error){ setErr(r.error); return; }
+      if(r.error){ if(!silent) setErr(r.error); return; }
       setD(prev=> (offset&&prev) ? { ...r, records:[...prev.records, ...r.records] } : r);
-    }).catch(e=>setErr(e.message)).finally(()=>setLoading(false));
+    }).catch(e=>{ if(!silent) setErr(e.message); }).finally(()=>{ if(!silent) setLoading(false); });
   };
   useEffect(()=>{ setD(null); setQ(""); setExpanded(null); },[siteId]);  // blank on site switch (different base)
   useEffect(()=>{ load(); },[siteId, table]);       // (re)load on site OR table switch (no blank → smooth)
+  // Live sync — silently re-pull the current table so new rows + status changes
+  // (incl. ones n8n writes back) appear without a manual reload. Paused while the
+  // user is editing (modal open / focused field) or has loaded extra pages.
+  useEffect(()=>{
+    if(!d) return;
+    const iv = setInterval(()=>{
+      if(typeof document!=="undefined" && document.hidden) return;   // tab not visible
+      if(expanded) return;                                           // editing a record in the modal
+      if(saving>0) return;                                           // a save is in flight — don't clobber it
+      const ae = typeof document!=="undefined" && document.activeElement;
+      if(ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName||"")) return;  // mid cell-edit
+      if((d.records||[]).length>50) return;                          // user loaded more pages — don't reset them
+      load(undefined, true);
+    }, 12000);
+    return ()=>clearInterval(iv);
+  },[d, expanded, saving, table, siteId]);
   const saveCell=(recId, fieldName, value)=>{
     setD(p=>({ ...p, records:p.records.map(r=>r.id===recId?{ ...r, fields:{ ...r.fields, [fieldName]:value } }:r) }));
     setExpanded(x=> (x&&x.id===recId) ? { ...x, fields:{ ...x.fields, [fieldName]:value } } : x);  // keep the open modal in sync
@@ -3663,7 +3679,10 @@ function AirtableGrid({ ctx, siteId }) {
   if(!d) return <SoftCard hover={false}><div style={{ padding:"14px 4px", color:"var(--muted)", fontSize:13.5, display:"flex", alignItems:"center", gap:10 }}><Icon name="cog" size={16} className="audit-spin" />Loading records…</div></SoftCard>;
   const fields = d.fields||[];
   const ql = q.trim().toLowerCase();
-  const rows = ql ? d.records.filter(r=>fields.some(f=>{ const val=r.fields[f.name]; const s=Array.isArray(val)?val.join(" "):String(val==null?"":val); return s.toLowerCase().includes(ql); })) : d.records;
+  // mirror Airtable's default grid order (creation order — newest rows at the bottom);
+  // records without a createdTime (just-added, pre-refresh) fall to the end.
+  const sorted = (d.records||[]).slice().sort((a,b)=>{ const ca=a.createdTime||"￿", cb=b.createdTime||"￿"; return ca<cb?-1:ca>cb?1:0; });
+  const rows = ql ? sorted.filter(r=>fields.some(f=>{ const val=r.fields[f.name]; const s=Array.isArray(val)?val.join(" "):String(val==null?"":val); return s.toLowerCase().includes(ql); })) : sorted;
   const HCELL = { textAlign:"left", padding:"8px 10px", fontSize:11, fontWeight:700, letterSpacing:".02em", color:"var(--muted)", background:"var(--bg-2)", borderBottom:"2px solid var(--line)", borderRight:"1px solid var(--line-soft)", whiteSpace:"nowrap" };
   return (
     <SoftCard hover={false} style={{ padding:0, overflow:"hidden" }}>
@@ -3678,13 +3697,14 @@ function AirtableGrid({ ctx, siteId }) {
       {/* toolbar */}
       <div style={{ display:"flex", alignItems:"center", gap:11, padding:"12px 16px", borderBottom:"1px solid var(--line-soft)", flexWrap:"wrap" }}>
         <div style={{ fontSize:15, fontWeight:800 }}>{d.tableName||"Records"}</div>
-        <span style={{ fontSize:11.5, color:"var(--muted)" }}>{rows.length}{ql?(" of "+d.records.length):""} record{rows.length===1?"":"s"}{d.offset?" · more available":""} · click a row’s # to expand</span>
+        <span style={{ fontSize:11.5, color:"var(--muted)" }}>{rows.length}{ql?(" of "+d.records.length):""} record{rows.length===1?"":"s"}{d.offset?" · more available":""} · live-synced · click a row’s # to expand</span>
         {(saving>0||loading) && <Chip tone="gold" size="sm"><Icon name="cog" size={11} className="audit-spin" />{saving>0?"Saving":"Loading"}</Chip>}
         <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:8 }}>
           <div style={{ position:"relative" }}>
             <Icon name="search" size={13} style={{ position:"absolute", left:11, top:9, color:"var(--faint)" }} />
             <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search records…" style={{ padding:"7px 12px 7px 31px", borderRadius:"var(--r-pill)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5, color:"var(--ink)", outline:"none", width:170 }} />
           </div>
+          <NeoButton kind="soft" size="sm" icon="refresh" disabled={loading} onClick={()=>load()} title="Re-pull from Airtable now (also auto-syncs every few seconds)">Refresh</NeoButton>
           <NeoButton kind="primary" size="sm" icon="plus" onClick={addRow}>Add row</NeoButton>
         </div>
       </div>

@@ -65,7 +65,7 @@ export async function listRecords(pat, baseId, table, { pageSize = 50, offset, f
   if (offset) params.set('offset', offset);
   (fields || []).forEach((f) => params.append('fields[]', f));
   const data = await at(pat, `${API}/${baseId}/${enc}?${params.toString()}`);
-  return { records: (data.records || []).map((r) => ({ id: r.id, fields: r.fields || {} })), offset: data.offset || null };
+  return { records: (data.records || []).map((r) => ({ id: r.id, createdTime: r.createdTime || null, fields: r.fields || {} })), offset: data.offset || null };
 }
 
 export async function updateRecord(pat, baseId, table, recordId, fields) {
@@ -78,7 +78,7 @@ export async function createRecord(pat, baseId, table, fields) {
   const enc = encodeURIComponent(table);
   const data = await at(pat, `${API}/${baseId}/${enc}`, { method: 'POST', body: { records: [{ fields }], typecast: true } });
   const r = (data.records || [])[0] || {};
-  return { id: r.id, fields: r.fields || {} };
+  return { id: r.id, createdTime: r.createdTime || null, fields: r.fields || {} };
 }
 
 // Ensure a table exists with the given fields; create it if missing. Returns table.
