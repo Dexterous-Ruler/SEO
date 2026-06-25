@@ -98,6 +98,7 @@ const TOOLS = [
   { name: 'fetch_url', description: 'Fetch any web page and return its title + main text (e.g. a competitor or a reference article the user links).', input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
   // ── ACTION (write) tools — perform REAL changes on the live site when the user asks ──
   { name: 'push_keywords_to_airtable', description: "ACTION: push keywords into the site's configured Airtable keyword column — this feeds the n8n article writer and creates real rows. Use ONLY when the user explicitly asks to push/add keywords or topics to Airtable (or 'send these to the writer'). Pass `keywords` to push specific ones; omit to auto-derive the site's content-gap keywords. De-dupes against existing rows.", input_schema: { type: 'object', properties: { keywords: { type: 'array', items: { type: 'string' }, description: 'optional explicit keywords; omit to auto-derive content gaps' } } } },
+  { name: 'push_article_brief', description: "ACTION: create a FULL article brief as a row in the site's Article Writer table (the n8n-watched table) — Title + Keyword + the whole content plan in the Content Brief column, so the writer builds the article from the plan, not a bare keyword. Use when the user wants to turn a content plan (e.g. one you built from a link they pasted) into a real article. Pass `title`, `keyword`, and `brief` (the full plan as markdown/text: angle, outline, sections, FAQs, target length); optional `description` (meta) and `goal` (one-line angle). De-dupes by Title (re-pushing the same title updates the brief). Set `startWriting:true` ONLY when the user explicitly says to write/publish it now — that sets Status='Write Article' and n8n generates + publishes a LIVE article to WordPress (costs API credits, writes live); it requires the site to be write-armed. Default leaves Status blank so the user flips it themselves.", input_schema: { type: 'object', properties: { title: { type: 'string', description: 'the article title' }, keyword: { type: 'string', description: 'the primary target keyword' }, brief: { type: 'string', description: 'the full content plan / brief as markdown or text (angle, outline, sections, FAQs, target length)' }, description: { type: 'string', description: 'optional meta description / summary' }, goal: { type: 'string', description: 'optional one-line goal / angle of the article' }, startWriting: { type: 'boolean', description: "set true ONLY if the user explicitly asked to write/publish now — triggers n8n to generate + publish live to WordPress" } }, required: ['title', 'keyword', 'brief'] } },
   { name: 'apply_page_meta', description: "ACTION: write an SEO meta field to a LIVE page/post and verify it stuck (read-back). Use when the user approves a title / meta-description / canonical change and asks you to push/apply/make it live. `url` = the page to change; `field` = title | meta_description | canonical; `value` = the new text. The site must be write-armed. This is a real, reversible change.", input_schema: { type: 'object', properties: { url: { type: 'string', description: 'the live page URL to update' }, field: { type: 'string', enum: ['title', 'meta_description', 'canonical'], description: 'which meta field' }, value: { type: 'string', description: 'the new value to write' } }, required: ['url', 'field', 'value'] } },
   { name: 'apply_schema_to_page', description: "ACTION: inject JSON-LD structured data (e.g. a FAQPage / Article / Organization schema) into a LIVE page via the seo-agent-optimize plugin. Use after extract_citable_facts produces a FAQPage, or when the user asks to add/push schema to a page. `url` = the page; `jsonld` = the JSON-LD object or string. The site must be write-armed.", input_schema: { type: 'object', properties: { url: { type: 'string', description: 'the live page URL' }, jsonld: { type: 'string', description: 'the JSON-LD as a string (or object)' } }, required: ['url', 'jsonld'] } },
   { name: 'apply_site_css', description: "ACTION: apply site-wide custom CSS to the LIVE site via the seo-agent-optimize plugin (e.g. an accessibility/contrast fix). Use only when the user explicitly approves a CSS change. The site must be write-armed.", input_schema: { type: 'object', properties: { css: { type: 'string', description: 'the CSS to inject site-wide' } }, required: ['css'] } },
@@ -300,6 +301,66 @@ async function runTool(name, input, siteId) {
       await db.logAirtableSync({ site_id: siteId, kind: 'keywords', records_pushed: res.pushed, status: 'ok' }).catch(() => {});
       await db.upsertAirtableConfig(siteId, { last_sync: new Date().toISOString() }).catch(() => {});
       return JSON.stringify({ done: true, pushed: res.pushed, skippedAlreadyThere: res.skipped, candidates: keywords.length });
+    }
+    if (name === 'push_article_brief') {
+      const pat = await db.getAirtablePat(siteId).catch(() => null);
+      if (!pat) return 'Airtable is not connected. Tell the user to connect it on the Airtable screen first.';
+      const cfg = await db.getAirtableConfig(siteId).catch(() => null);
+      if (!cfg || !cfg.base_id || !cfg.table_gaps) return 'The Airtable base / Article Writer table is not configured for this site yet. Tell the user to set it on the Airtable screen.';
+      const base = cfg.base_id;
+      const title = String(input.title || '').trim();
+      const keyword = String(input.keyword || '').trim();
+      const brief = String(input.brief || '').trim();
+      if (!title || !keyword) return 'I need at least a title and a keyword to create the brief.';
+      // Resolve the Article Writer table (stored as table_gaps) + ensure the Content Brief column exists.
+      let tables = [];
+      try { tables = await airtable.listTables(pat, base); } catch (e) { return 'Could not read the Airtable base: ' + e.message; }
+      const tbl = tables.find((t) => t.id === cfg.table_gaps || t.name === cfg.table_gaps);
+      if (!tbl) return 'The configured Article Writer table no longer exists in this base. Ask the user to re-pick it on the Airtable screen.';
+      const names = new Set((tbl.fields || []).map((f) => f.name));
+      let briefField = 'Content Brief';
+      if (!names.has('Content Brief')) { try { briefField = await airtable.ensureField(pat, base, tbl.id, 'Content Brief', 'multilineText'); names.add(briefField); } catch (e) { briefField = null; } }
+      // Build the content row (Status left OUT — set separately below only if writing now),
+      // field-set-filtered so a differing per-site schema can never 422.
+      const row = { Title: title, Keyword: keyword, 'Primary Keyword': keyword, Category: 'Blog' };
+      if (input.goal) row['Goal of Article'] = String(input.goal);
+      if (input.description) row.Description = String(input.description);
+      if (brief) { if (briefField && briefField !== 'Description') row[briefField] = brief; else row.Description = (row.Description ? row.Description + '\n\n' : '') + brief; }
+      for (const k of Object.keys(row)) if (!names.has(k)) delete row[k];
+      // De-dupe by Title (case-insensitive) → upsert so re-pushing updates the brief.
+      let existingId = null;
+      try {
+        let offset;
+        do {
+          const page = await airtable.listRecords(pat, base, tbl.id, { pageSize: 100, offset, fields: ['Title'] });
+          for (const rec of (page.records || [])) { if (String((rec.fields || {}).Title || '').trim().toLowerCase() === title.toLowerCase()) { existingId = rec.id; break; } }
+          offset = existingId ? null : page.offset;
+        } while (offset);
+      } catch (e) { /* read failed → treat as new */ }
+      const action = existingId ? 'updated' : 'created';
+      let recId = existingId;
+      try {
+        if (recId) await airtable.updateRecord(pat, base, tbl.id, recId, row);
+        else { const r = await airtable.createRecord(pat, base, tbl.id, row); recId = r && r.id; }
+      } catch (e) { return 'Could not write the brief to Airtable: ' + e.message; }
+      // Optionally start the writer — a deliberate, write-armed-gated trigger. We set
+      // Status via a SEPARATE update (a field CHANGE) so the n8n automation reliably fires.
+      let triggered = false, blocked = null;
+      if (input.startWriting) {
+        if (site.write_armed === false) blocked = `"${site.name || 'this site'}" is READ-ONLY (write not armed) — n8n would publish a LIVE article. Ask the user to arm writes (top bar / Sites screen), then set Status to "Write Article".`;
+        else if (!names.has('Status')) blocked = 'the Article Writer table has no Status field, so n8n can’t be triggered automatically — ask the user to flip the trigger manually.';
+        else { try { await airtable.updateRecord(pat, base, tbl.id, recId, { Status: 'Write Article' }); triggered = true; } catch (e) { blocked = 'setting Status failed: ' + e.message; } }
+      }
+      await db.logAirtableSync({ site_id: siteId, kind: 'article_brief', records_pushed: 1, status: 'ok' }).catch(() => {});
+      await db.upsertAirtableConfig(siteId, { last_sync: new Date().toISOString() }).catch(() => {});
+      return JSON.stringify({
+        done: true, action, table: tbl.name, title, writingStarted: triggered,
+        note: triggered
+          ? "Status set to 'Write Article' — n8n is now generating the article and will publish it to WordPress."
+          : blocked
+            ? `Brief ${action} in ${tbl.name}, but writing did NOT start: ${blocked}`
+            : `Brief ${action} in ${tbl.name}. To create the article, set this row's Status to 'Write Article' (in the Airtable grid) and n8n will write + publish it.`,
+      });
     }
     if (name === 'apply_page_meta') {
       const field = META_FIELD_MAP[input.field];
