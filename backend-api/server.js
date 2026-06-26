@@ -1439,7 +1439,15 @@ const routes = {
     const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
     // The site's geo_context describes WHAT it does + WHO it serves — the real niche signal
     // (there is no `niche` column; stack.type is empty + name is just a domain → generic news).
-    const context = body.context || (site && site.geo_context) || '';
+    // Focus on the niche-defining sections (ground truth / audience / services) and DROP the
+    // platform-Role/Precedence/compliance boilerplate, which otherwise drowns the niche signal.
+    const gc = body.context || (site && site.geo_context) || '';
+    let context = '';
+    if (gc) {
+      const wanted = /ground truth|canonical|audience|scope|what we|services|about|brand|positioning|specialis|we provide|we offer|cover/i;
+      const secs = gc.split(/\n(?=#{1,3}\s)/).filter((s) => wanted.test((s.split('\n')[0] || '')));
+      context = (secs.join('\n\n') || gc).slice(0, 6000);
+    }
     const niche = body.niche || (site && site.stack && site.stack.type) || (site && site.name) || 'this site';
     if (!context && !niche) return { error: 'No niche to research.' };
     try { return await research.trendingIntel({ niche, context, db: body.db || (site && site.semrush_db), now: Date.now() }); }
