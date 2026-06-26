@@ -77,10 +77,17 @@ export async function complete({ system, messages, maxTokens = 1024, temperature
 
 // System prompts are sourced from the editable registry (admin panel → Supabase).
 // SYSTEM() is the shared content-rules block, cached.
-import { P, modelFor, tempFor } from './prompts.js';
+import { P, modelFor, tempFor, geoFor } from './prompts.js';
 // siteId (optional) → use that site's per-site prompt override when one is set.
-const SYSTEM = (siteId) => [{ type: 'text', text: P('content.rules', siteId), cache_control: { type: 'ephemeral' } }];
-const sys = (key, siteId) => [{ type: 'text', text: P(key, siteId) }];
+// geoBlock = the site's niche/context (geo_context), prepended as a CACHED system
+// block so every site-scoped call is niche-aware. Cached → cheap on repeat within a
+// site's batch. Empty array when the site has no geo_context (no-op).
+const geoBlock = (siteId) => {
+  const g = geoFor(siteId);
+  return g ? [{ type: 'text', text: `=== THIS SITE'S NICHE & CONTEXT (author strictly for this site; do NOT drift to generic/national topics) ===\n${g}`, cache_control: { type: 'ephemeral' } }] : [];
+};
+const SYSTEM = (siteId) => [...geoBlock(siteId), { type: 'text', text: P('content.rules', siteId), cache_control: { type: 'ephemeral' } }];
+const sys = (key, siteId) => [...geoBlock(siteId), { type: 'text', text: P(key, siteId) }];
 
 // ---- task helpers ---------------------------------------------------------
 

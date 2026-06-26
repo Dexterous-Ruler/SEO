@@ -1833,7 +1833,7 @@ const routes = {
     // on-page facts reflect today's reality, not just what's already on the page.
     let grounded = null;
     if (research.status().perplexity) {
-      try { const g = await research.citableFactsGrounded({ topic: title || url, niche, db: site && site.semrush_db, now: Date.now() }); if (!g.error) grounded = { summary: g.summary, sources: g.sources }; } catch (e) {}
+      try { const g = await research.citableFactsGrounded({ topic: title || url, niche, db: site && site.semrush_db, siteId: body.siteId, now: Date.now() }); if (!g.error) grounded = { summary: g.summary, sources: g.sources }; } catch (e) {}
     }
     // Build a FAQPage schema from the extracted Q&A (ready to publish).
     const { buildFaqPage } = await import('./schema-gen.js');

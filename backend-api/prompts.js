@@ -88,6 +88,30 @@ async function loadOverrides() {
   return rows.length;
 }
 
+// ---- Per-site geo_context (the site's niche) ------------------------------
+// The sites table has NO `niche` column — each site's niche/business context
+// lives in geo_context (a long "global system prompt"). We cache only its
+// niche-DEFINING sections (dropping the platform/compliance preamble that
+// drowns the signal) so EVERY site-scoped AI call can be niche-aware. This is
+// the durable fix for the off-niche / "prompts not applied" generic output.
+const GEO = new Map();   // siteId -> concise niche context (already section-trimmed)
+const NICHE_HEAD = /ground truth|canonical|audience|scope|what we|services|about|brand|positioning|specialis|we provide|we offer|cover/i;
+export function nicheContext(gc) {
+  if (!gc) return '';
+  const s = String(gc);
+  const secs = s.split(/\n(?=#{1,3}\s)/).filter((x) => NICHE_HEAD.test((x.split('\n')[0] || '')));
+  return (secs.join('\n\n') || s).slice(0, 4500);
+}
+export function geoFor(siteId) { return (siteId && GEO.get(siteId)) || ''; }
+async function loadGeo() {
+  const res = await fetch(`${SB}/rest/v1/sites?select=id,geo_context`, { headers: headers() });
+  if (!res.ok) throw new Error(`sites geo read ${res.status}`);
+  const rows = await res.json();
+  GEO.clear();
+  for (const r of (rows || [])) { const c = nicheContext(r.geo_context); if (c) GEO.set(r.id, c); }
+  return GEO.size;
+}
+
 // Upsert rows into Supabase (on conflict by key → merge).
 async function upsert(rows) {
   const res = await fetch(`${SB}/rest/v1/prompts?on_conflict=key`, {
@@ -179,8 +203,9 @@ export async function init() {
   try { await loadOverrides(); ready = true; }
   catch (e) { ready = false; console.warn('[prompts] table not reachable yet — using in-code defaults. Run supabase/prompts-table.sql. (' + e.message + ')'); return; }
   try { await seed(); } catch (e) { /* seeding best-effort */ }
+  try { await loadGeo(); } catch (e) { /* geo best-effort — calls just run without the niche block */ }
   // Near-real-time: pick up edits made directly in Supabase.
-  setInterval(() => { loadOverrides().catch(() => {}); }, 45000).unref?.();
+  setInterval(() => { loadOverrides().catch(() => {}); loadGeo().catch(() => {}); }, 45000).unref?.();
 }
 
 // ===========================================================================

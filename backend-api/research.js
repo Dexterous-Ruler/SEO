@@ -14,7 +14,10 @@ import * as perplexity from './perplexity.js';
 import * as claude from './claude.js';
 import { UK } from './uk.js';
 import { marketFor } from './market.js';
-import { P, modelFor, tempFor } from './prompts.js';
+import { P, modelFor, tempFor, geoFor } from './prompts.js';
+// Prepend the site's niche/context to a Perplexity system prompt so grounded
+// research stays on-niche (the same off-niche fix applied to trending).
+const withNiche = (base, ctx) => (ctx ? `=== THIS SITE'S NICHE & CONTEXT (keep findings strictly relevant to this) ===\n${ctx}\n\n${base}` : base);
 const mt = (key, fallbackModel) => ({ model: modelFor(key) || fallbackModel, temperature: tempFor(key) != null ? tempFor(key) : undefined });
 
 // ---- source hygiene --------------------------------------------------------
@@ -48,9 +51,10 @@ function cacheSet(k, v, now) { CACHE.set(k, { v, t: now }); if (CACHE.size > 200
 
 // Core: gather UK web material on a topic from both engines. Returns
 // { summary, material, sources[], cost }.
-export async function gather(topic, { recency = 'month', excludeDomains, now = 0, ttlMs = 0, market } = {}) {
+export async function gather(topic, { recency = 'month', excludeDomains, now = 0, ttlMs = 0, market, context } = {}) {
   const mk = market || marketFor('uk');
-  const cacheKey = `g:${mk.db}:${topic}:${recency}`;   // cache per market (UK ≠ US results)
+  const ctx = (context || '').toString().slice(0, 4500);   // site niche → keep research on-topic
+  const cacheKey = `g:${mk.db}:${ctx.slice(0, 40)}:${topic}:${recency}`;   // cache per market+niche (UK ≠ US, niche ≠ niche)
   if (ttlMs && now) { const c = cacheGet(cacheKey, now, ttlMs); if (c) return c; }
 
   const out = { summary: '', material: '', sources: [], cost: 0, engines: {} };
@@ -65,7 +69,7 @@ export async function gather(topic, { recency = 'month', excludeDomains, now = 0
   if (perplexity.hasKey()) {
     try {
       pp = await perplexity.ask({
-        system: P('research.gather'),
+        system: withNiche(P('research.gather'), ctx),
         user: `Topic: ${topic}\n\nGive the key current facts, recent changes, and the main questions ${mk.country} readers ask — for content planning.`,
         ...mt('research.gather', 'pro'), recency, domains: mk.preferDomains, scope: mk.scope, geo: mk.geo,
       });
@@ -92,7 +96,7 @@ export async function gather(topic, { recency = 'month', excludeDomains, now = 0
 export async function contentBrief({ keyword, intent, siteName, niche, excludeDomain, internalLinkCandidates, siteId, db, now = 0 }) {
   if (!perplexity.hasKey() && !tavily.hasKey()) return { error: 'No research engine configured — add PERPLEXITY_API_KEY and/or TAVILY_API_KEY.' };
   const market = marketFor(db);
-  const research = await gather(keyword, { recency: 'month', excludeDomains: excludeDomain ? [excludeDomain] : undefined, now, ttlMs: 6 * 60 * 60 * 1000, market });
+  const research = await gather(keyword, { recency: 'month', excludeDomains: excludeDomain ? [excludeDomain] : undefined, now, ttlMs: 6 * 60 * 60 * 1000, market, context: geoFor(siteId) });
   if (!research.summary && !research.material) return { error: 'Research returned nothing for this keyword.', engines: research.engines };
   const brief = await claude.synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market });
   return { keyword, intent, brief, country: market.country, sources: research.sources, engines: research.engines, researchCost: research.cost };
@@ -138,11 +142,11 @@ export async function trendingIntel({ niche, context, db, now = 0 }) {
 }
 
 // Grounded, cited current facts on a topic for the market (YMYL accuracy / citable facts).
-export async function citableFactsGrounded({ topic, niche, db, now = 0 }) {
+export async function citableFactsGrounded({ topic, niche, db, siteId, now = 0 }) {
   if (!perplexity.hasKey()) return { error: 'Perplexity not configured — needed for grounded facts.' };
   const mk = marketFor(db);
   const pp = await perplexity.ask({
-    system: P('research.facts'),
+    system: withNiche(P('research.facts'), geoFor(siteId)),
     user: `Topic: ${topic}${niche ? ` (niche: ${niche})` : ''}. List the current ${mk.country} facts most useful to cite in an article.`,
     ...mt('research.facts', 'pro'), recency: 'month', domains: mk.preferDomains, scope: mk.scope, geo: mk.geo, maxTokens: 900,
   });
