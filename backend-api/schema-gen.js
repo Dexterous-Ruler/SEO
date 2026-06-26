@@ -523,12 +523,14 @@ function extractNap(text) {
       locality = locality.replace(/\s+[A-Z]{1,2}\d[A-Z\d]?$/i, '').trim();
       out.locality = locality;
       if (segs.length >= 2) {
-        const street = segs[segs.length - 2];
-        // Only treat as a street if it looks address-like (has a number or a
-        // street keyword) so we don't grab a sentence fragment.
-        if (/\d|\b(?:Road|Rd|Street|St|Avenue|Ave|Lane|Ln|Way|Close|Court|Square|Sq|Place|Pl|Drive|Dr|Hill|Gardens|Terrace|Walk|Wharf|Row|Crescent)\b/i.test(street)) {
-          out.streetAddress = street;
-        }
+        const seg = segs[segs.length - 2];
+        // Pull JUST the street line — a house number within ~30 chars of a street
+        // keyword — out of the segment, dropping any leading prose like
+        // "… SRA number 8006057. Registered & main office:" (the 7-digit SRA number
+        // is too far from the keyword to match, so only "128 City Road" is kept).
+        const KW = 'Road|Rd|Street|St|Avenue|Ave|Lane|Ln|Way|Close|Court|Square|Sq|Place|Pl|Drive|Dr|Hill|Gardens|Terrace|Walk|Wharf|Row|Crescent';
+        const sm = seg.match(new RegExp("\\b\\d{1,4}[\\w\\s'.&-]{0,30}?\\b(?:" + KW + ")\\b", 'ig'));
+        if (sm) out.streetAddress = sm[sm.length - 1].replace(/\s+/g, ' ').trim();
       }
       // If the locality itself begins with a number (no comma between street and
       // town, e.g. "128 City Road London"), split it.
