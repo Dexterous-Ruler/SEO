@@ -118,10 +118,14 @@ export async function trendingIntel({ niche, context, db, now = 0 }) {
       try {
         const a = String(pp.answer || ''); const s = a.indexOf('['); const e = a.lastIndexOf(']');
         const arr = (s >= 0 && e > s) ? JSON.parse(a.slice(s, e + 1)) : [];
-        out.ideas = (Array.isArray(arr) ? arr : []).filter((x) => x && x.title).map((x) => ({
-          title: String(x.title).slice(0, 160), keyword: String(x.keyword || x.title).slice(0, 120),
-          whyNow: String(x.whyNow || x.why || '').slice(0, 400), angle: String(x.angle || x.plan || '').slice(0, 900),
-        })).slice(0, 10);
+        out.ideas = (Array.isArray(arr) ? arr : []).map((x) => {
+          if (typeof x === 'string') { const t = x.trim(); return t ? { title: t.slice(0, 160), keyword: t.slice(0, 120), whyNow: '', angle: '' } : null; }
+          if (x && x.title) return {
+            title: String(x.title).slice(0, 160), keyword: String(x.keyword || x.title).slice(0, 120),
+            whyNow: String(x.whyNow || x.why || '').slice(0, 400), angle: String(x.angle || x.plan || x.content_plan || x.description || '').slice(0, 900),
+          };
+          return null;
+        }).filter(Boolean).slice(0, 10);
       } catch (e) { /* fall back to the prose summary */ }
     } catch (e) { out.engines.perplexityError = String(e.message || e); }
   }

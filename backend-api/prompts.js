@@ -240,8 +240,9 @@ register('research.trending', { category: 'Content Briefs & Research', label: 'T
 - Stay strictly INSIDE the site's niche and target market. EXCLUDE broad national news (weather, politics, immigration, sport, celebrity) unless it DIRECTLY affects the site's specific services.
 - Every idea must be something this site could authoritatively publish and that a real user in its audience would search for.
 - For YMYL niches (legal/medical/finance) keep it factual; never invent statistics, dates, prices, laws or case names.
-- Output ONLY a JSON array of 6-8 items and nothing else — no prose, no markdown, no commentary:
-[{"title":"a specific, click-worthy article title","keyword":"the primary search keyword","whyNow":"one sentence on why it is timely this week","angle":"2-3 sentences on what the article should cover and the angle for this site"}]`);
+- Output ONLY a JSON array of 6-8 items and nothing else — no prose, no markdown fences, no commentary. Each item MUST be a JSON OBJECT with EXACTLY these four string keys (NEVER a bare string): "title", "keyword", "whyNow", "angle". Example of ONE item:
+{"title":"a specific, click-worthy article title","keyword":"the primary search keyword","whyNow":"one sentence on why it is timely this week","angle":"2-3 sentences on what the article should cover and the angle for this site"}
+Return the array of such objects.`);
 
 register('research.facts', { category: 'Content Briefs & Research', label: 'Grounded citable facts', description: 'Extracts current, cited facts for the target market (YMYL accuracy).' },
 `Extract concrete, current, citable facts for the target market in the scope clause (figures, local-currency fees, dates, rules, named bodies). Each fact one line. No advice, no fluff.`);
