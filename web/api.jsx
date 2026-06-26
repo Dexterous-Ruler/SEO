@@ -125,6 +125,8 @@
     geoTrack(siteId, targetDomain, prompts, competitors) { return engine("/geo-track", { siteId, targetDomain, prompts, competitors }); },
     geoEnable(siteId, opts) { return engine("/geo-enable", Object.assign({ siteId }, opts || {})); },
     geoHistory(siteId) { return engine("/geo-history", { siteId }); },
+    // AI-citation share-of-voice over time. notProvisioned until supabase/citation-snapshots.sql is run.
+    geoCitationTrend(siteId) { return engine("/geo-citation-trend", { siteId }); },
     // Experience Monitor (UX/conversion defects) — inert until RUM_ENABLED + site armed.
     beaconStatus(siteId) { return engine("/beacon-status", { siteId }); },
     uxDefects(siteId, opts) { return engine("/ux-defects", Object.assign({ siteId }, opts || {})); },

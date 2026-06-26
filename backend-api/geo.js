@@ -20,6 +20,25 @@ function key() {
   return k;
 }
 
+// ---- Supabase (PostgREST, graceful) ---------------------------------------
+// GEO citation snapshots are a time-series of each tracking pass. They live in
+// Supabase (citation_snapshots) via PostgREST — there is NO direct Postgres
+// connection, so the table is created by a manual migration
+// (supabase/citation-snapshots.sql). Every DB call degrades gracefully: if the
+// table is absent (404 / PGRST205 / any non-2xx) we return { notProvisioned }
+// and never throw. Mirrors the backend-api/drift.js pattern exactly.
+const SB = process.env.SUPABASE_URL;
+const SRV = process.env.SUPABASE_SERVICE_ROLE;
+function sbHeaders(extra) {
+  return Object.assign({ apikey: SRV, Authorization: 'Bearer ' + SRV, 'Content-Type': 'application/json' }, extra || {});
+}
+const CITATION_NOT_PROVISIONED = { error: 'citation_snapshots table not provisioned — run supabase/citation-snapshots.sql', notProvisioned: true };
+function isMissingTable(status, body) {
+  if (status === 404) return true;
+  const b = (typeof body === 'string' ? body : JSON.stringify(body || '')) || '';
+  return /PGRST205|PGRST202|could not find the table|relation .*citation_snapshots.* does not exist/i.test(b);
+}
+
 // Ask Claude one buyer-intent question WITH web search enabled, then inspect
 // whether the answer cites the target domain. Returns structured result.
 // Bounded by a per-call timeout so a single slow/hung web search can't stall the
@@ -100,7 +119,7 @@ async function mapLimit(items, limit, fn) {
 // timeout (a serial loop over ~18 prompts blew past it → 504 "gateway time-out").
 const GEO_MAX_PROMPTS = 16;   // bound total work — keeps the pass under the gateway timeout
 const GEO_CONCURRENCY = 8;    // parallel web-search calls (gentle on Anthropic rate limits)
-export async function runCitationTracking({ targetDomain, prompts, competitors = [], onResult }) {
+export async function runCitationTracking({ siteId, targetDomain, prompts, competitors = [], onResult }) {
   const target = domainOf(targetDomain);
   const compDomains = competitors.map(domainOf);
 
@@ -148,7 +167,15 @@ export async function runCitationTracking({ targetDomain, prompts, competitors =
   const total = list.length;
   const shareOfVoice = total ? Math.round((cited / total) * 100) : 0;
   const competitorScores = compDomains.map((d) => ({ domain: d, cited: compCites[d] || 0, share: total ? Math.round(((compCites[d] || 0) / total) * 100) : 0 }));
-  return { targetDomain: target, shareOfVoice, promptsTotal: total, promptsCited: cited, competitors: competitorScores, results };
+  const result = { targetDomain: target, shareOfVoice, promptsTotal: total, promptsCited: cited, competitors: competitorScores, results };
+
+  // Best-effort time-series snapshot. A snapshot failure (missing table, network)
+  // must NEVER break the live tracking result the caller is awaiting.
+  if (siteId) {
+    try { await saveCitationSnapshot(siteId, result); } catch (e) { /* best-effort persist */ }
+  }
+
+  return result;
 }
 
 // Generate a default buyer-intent prompt set for a site/niche using Claude.
@@ -254,4 +281,87 @@ export async function summarizeForLlms({ siteName, tagline, pages = [] }) {
   } catch (e) { return { summary: tagline || '', notes: {} }; }
 }
 
-export default { runCitationTracking, suggestPrompts, buildAiRobots, buildLlmsTxt };
+// ---- GEO citation time-series (PostgREST, graceful) ------------------------
+// Persist one snapshot per tracking pass so we can chart AI share-of-voice over
+// time. Extracts an overall SoV (0-100), a per-platform breakdown, and whether
+// the site was cited at all, from a runCitationTracking() result.
+export async function saveCitationSnapshot(siteId, result) {
+  if (!SB || !SRV) return { ...CITATION_NOT_PROVISIONED, error: 'Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE missing).' };
+  const r = result || {};
+
+  // Overall share-of-voice (0-100). runCitationTracking returns shareOfVoice.
+  const sov = Number.isFinite(Number(r.shareOfVoice)) ? Number(r.shareOfVoice) : 0;
+
+  // Was the target cited in ANY prompt this pass?
+  const cited = (Number(r.promptsCited) || 0) > 0;
+
+  // Per-platform breakdown. The current pass runs through Claude+web-search, so
+  // we attribute this run's SoV to the engine that produced it (defaults to
+  // 'claude'); the column is jsonb so future multi-engine passes can populate
+  // ChatGPT/Gemini/Perplexity without a schema change.
+  const engine = r.engine || 'claude';
+  const perPlatform = (r.perPlatform && typeof r.perPlatform === 'object')
+    ? r.perPlatform
+    : { [engine]: { sov, cited, promptsCited: Number(r.promptsCited) || 0, promptsTotal: Number(r.promptsTotal) || 0 } };
+
+  const row = {
+    site_id: siteId || null,
+    captured_at: new Date().toISOString(),
+    sov,
+    cited,
+    per_platform: perPlatform,
+    result: r,
+  };
+  try {
+    const res = await fetch(`${SB}/rest/v1/citation_snapshots`, {
+      method: 'POST',
+      headers: sbHeaders({ Prefer: 'return=representation' }),
+      body: JSON.stringify([row]),
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      if (isMissingTable(res.status, text)) return CITATION_NOT_PROVISIONED;
+      return { error: `citation_snapshots insert → ${res.status} ${text.slice(0, 200)}` };
+    }
+    let data; try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+    return { saved: true, snapshot: Array.isArray(data) ? data[0] : data };
+  } catch (e) {
+    return { error: String(e.message || e) };
+  }
+}
+
+// Read back the last `limit` snapshots for a site (newest first internally),
+// returned oldest→newest as points for charting, plus the latest/previous pair
+// and the SoV delta + direction. Degrades gracefully when the table is absent.
+export async function citationTrend(siteId, { limit = 30 } = {}) {
+  if (!SB || !SRV) return { ...CITATION_NOT_PROVISIONED, error: 'Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE missing).' };
+  const sidFilter = siteId ? `site_id=eq.${encodeURIComponent(siteId)}` : 'site_id=is.null';
+  const lim = Math.max(1, Math.min(Number(limit) || 30, 365));
+  try {
+    const res = await fetch(`${SB}/rest/v1/citation_snapshots?${sidFilter}&select=captured_at,sov,cited,per_platform&order=captured_at.desc&limit=${lim}`, { headers: sbHeaders() });
+    const text = await res.text();
+    if (!res.ok) {
+      if (isMissingTable(res.status, text)) return CITATION_NOT_PROVISIONED;
+      return { error: `citation_snapshots read → ${res.status} ${text.slice(0, 200)}` };
+    }
+    let data; try { data = text ? JSON.parse(text) : []; } catch { data = []; }
+    const rows = Array.isArray(data) ? data : [];
+    // Oldest → newest for a left-to-right chart.
+    const points = rows.slice().reverse().map((x) => ({
+      at: x.captured_at,
+      sov: Number(x.sov) || 0,
+      cited: !!x.cited,
+      per_platform: x.per_platform || null,
+    }));
+    const latest = points.length ? points[points.length - 1] : null;
+    const previous = points.length > 1 ? points[points.length - 2] : null;
+    const deltaSov = latest && previous ? (latest.sov - previous.sov) : 0;
+    const THRESH = 1; // SoV is an integer percentage — sub-1pt moves read as flat.
+    const direction = deltaSov > THRESH ? 'improving' : (deltaSov < -THRESH ? 'declining' : 'flat');
+    return { points, latest, previous, deltaSov, direction, count: points.length };
+  } catch (e) {
+    return { error: String(e.message || e) };
+  }
+}
+
+export default { runCitationTracking, suggestPrompts, buildAiRobots, buildLlmsTxt, saveCitationSnapshot, citationTrend };

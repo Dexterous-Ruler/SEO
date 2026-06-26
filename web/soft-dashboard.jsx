@@ -2567,11 +2567,16 @@ function GeoScreen({ ctx }) {
   const [publishing, setPublishing] = useState(false);
   const [pushingOpps, setPushingOpps] = useState(false);
   const [geoHist, setGeoHist] = useState(null);
+  const [citTrend, setCitTrend] = useState(null);
   const [ctxText, setCtxText] = useState(s.geo_context || "");
   const [savingCtx, setSavingCtx] = useState(false);
   const API = window.SentinelAPI;
-  // Load scan history (for the trend) + reset the per-site context on site change.
-  useEffect(()=>{ setCtxText(s.geo_context||""); if(API&&API.geoHistory) API.geoHistory(s.id).then(r=>setGeoHist((r&&r.runs)||[])).catch(()=>{}); },[s.id, d]);
+  // Load scan history (for the trend) + citation SoV time-series + reset the per-site context on site change.
+  useEffect(()=>{
+    setCtxText(s.geo_context||"");
+    if(API&&API.geoHistory) API.geoHistory(s.id).then(r=>setGeoHist((r&&r.runs)||[])).catch(()=>{});
+    if(API&&API.geoCitationTrend) API.geoCitationTrend(s.id).then(r=>setCitTrend(r||null)).catch(()=>{});
+  },[s.id, d]);
   // Push the current scan's prompt/citation results to Airtable (de-duped server-side).
   const pushAirtable = ()=>{
     if(!d || d.error || !((d.results||[]).length)){ ctx.toast("Run a scan first","gold"); return; }
@@ -2767,6 +2772,65 @@ function GeoScreen({ ctx }) {
                   );
                 })}
               </div>
+            </SoftCard>
+          )}
+
+          {/* citation trend — AI share-of-voice time-series (Supabase-backed) */}
+          {citTrend && (
+            <SoftCard hover={false}>
+              <SectionHead sub="AI-citation share-of-voice tracked over time, per scan">Citation trend</SectionHead>
+              {citTrend.notProvisioned ? (
+                <div style={{ display:"flex", alignItems:"flex-start", gap:11, padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", boxShadow:"var(--neo-in)" }}>
+                  <Icon name="globe" size={16} style={{ color:"var(--gold)", marginTop:1, flexShrink:0 }} />
+                  <div style={{ fontSize:13, color:"var(--ink-2)", lineHeight:1.55 }}>Run <code style={{ fontFamily:"var(--mono)", fontSize:12.5 }}>supabase/citation-snapshots.sql</code> in Supabase to start tracking AI-citation share-of-voice over time.</div>
+                </div>
+              ) : citTrend.error ? (
+                <div style={{ fontSize:13, color:"var(--muted)", padding:"4px 2px" }}>Couldn’t load the citation trend right now.</div>
+              ) : (citTrend.count||0) < 2 ? (
+                <div style={{ fontSize:13.5, color:"var(--muted)", padding:"6px 2px", lineHeight:1.55 }}>Only {citTrend.count||0} snapshot{(citTrend.count||0)===1?"":"s"} so far — run citation tracking a few times to see the trend.</div>
+              ) : (() => {
+                const dir = citTrend.direction;
+                const latest = citTrend.latest||{};
+                const dlt = Number(citTrend.deltaSov)||0;
+                const dirTone = dir==="improving"?"teal":dir==="declining"?"clay":"gray";
+                const dirIcon = dir==="improving"?"▲":dir==="declining"?"▼":"–";
+                const pts = (citTrend.points||[]).slice(-12);
+                const maxSov = Math.max(1, ...pts.map(p=>Number(p.sov)||0));
+                const pp = latest.per_platform && typeof latest.per_platform==="object" ? Object.keys(latest.per_platform) : [];
+                return (
+                  <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+                    {/* latest SoV + direction */}
+                    <div style={{ display:"flex", alignItems:"center", gap:14, flexWrap:"wrap" }}>
+                      <div style={{ display:"flex", alignItems:"baseline", gap:4 }}>
+                        <span style={{ fontSize:34, fontWeight:800, color:tealForScore(Number(latest.sov)||0), lineHeight:1 }}>{Number(latest.sov)||0}</span>
+                        <span style={{ fontSize:13, color:"var(--muted)", fontWeight:700 }}>% SoV</span>
+                      </div>
+                      <Chip tone={dirTone} size="sm">{dirIcon} {dir}</Chip>
+                      <span style={{ fontSize:12.5, fontWeight:700, color: dlt>0?"var(--t-700)":dlt<0?"var(--clay)":"var(--muted)" }}>
+                        {dlt>0?("+"+dlt):dlt<0?String(dlt):"0"} pts vs previous
+                      </span>
+                    </div>
+                    {/* inline sparkline of the last points */}
+                    <div style={{ display:"flex", alignItems:"flex-end", gap:4, height:54, padding:"0 2px" }}>
+                      {pts.map((p,i)=>{
+                        const v=Number(p.sov)||0; const h=Math.max(3,Math.round((v/maxSov)*52));
+                        let when=""; try{ if(p.at) when=new Date(p.at).toLocaleDateString(undefined,{day:"numeric",month:"short"})+" · "+v+"%"; }catch(e){}
+                        const isLast=i===pts.length-1;
+                        return <div key={i} title={when} style={{ flex:1, minWidth:4, height:h, borderRadius:4, background:isLast?"var(--t-700)":"var(--t-100)" }} />;
+                      })}
+                    </div>
+                    {/* per-platform breakdown of the latest snapshot */}
+                    {pp.length>0 && (
+                      <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+                        {pp.map((eng,i)=>{
+                          const v=latest.per_platform[eng]||{}; const sov=Number(v.sov);
+                          return <Chip key={i} tone={v.cited?"teal":"gray"} size="sm" icon={v.cited?"check":"x"}>{eng}{Number.isFinite(sov)?" · "+sov+"%":""}</Chip>;
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </SoftCard>
           )}
 

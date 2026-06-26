@@ -601,6 +601,7 @@ const routes = {
   // whether the domain is cited, compute share-of-AI-voice vs competitors.
   'POST /geo-track': async (body) => {
     const out = await geo.runCitationTracking({
+      siteId: body.siteId,
       targetDomain: body.targetDomain,
       prompts: body.prompts || [],
       competitors: body.competitors || [],
@@ -633,6 +634,11 @@ const routes = {
       return { runs: (rows || []).map((x) => ({ shareOfVoice: x.share_of_voice, promptsCited: x.prompts_cited, promptsTotal: x.prompts_total, at: x.created_at })) };
     } catch (e) { return { runs: [], error: e.message }; }
   },
+
+  // AI share-of-voice time-series (citation_snapshots): points oldest→newest +
+  // latest/previous SoV delta + direction. Degrades gracefully ({ notProvisioned })
+  // when the snapshots table hasn't been migrated yet.
+  'POST /geo-citation-trend': async (body) => geo.citationTrend(body.siteId),
 
   // GEO enablement: generate llms.txt + AI-bot robots, and (when apply:true) PUBLISH
   // them to the live site via the mu-plugin (serves /llms.txt + merges robots.txt).
