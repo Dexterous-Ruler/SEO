@@ -265,7 +265,8 @@ register('research.trending', { category: 'Content Briefs & Research', label: 'T
 - Stay strictly INSIDE the site's niche and target market. EXCLUDE broad national news (weather, politics, immigration, sport, celebrity) unless it DIRECTLY affects the site's specific services.
 - Every idea must be something this site could authoritatively publish and that a real user in its audience would search for.
 - For YMYL niches (legal/medical/finance) keep it factual; never invent statistics, dates, prices, laws or case names.
-- Output ONLY a JSON array of 6-8 items and nothing else — no prose, no markdown fences, no commentary. Each item MUST be a JSON OBJECT with EXACTLY these four string keys (NEVER a bare string): "title", "keyword", "whyNow", "angle". Example of ONE item:
+- NEVER return an empty array. If there is little genuinely fresh news this week for this niche, propose EVERGREEN, high-search-intent questions and topics this site's audience searches for year-round instead. Always return 6-8 ideas.
+- Output ONLY a JSON array of 6-8 items and nothing else — no prose, no markdown fences, no commentary, no trailing text. Each item MUST be a JSON OBJECT with EXACTLY these four string keys (NEVER a bare string, NEVER extra keys): "title", "keyword" (ONE short search phrase as a plain string — NOT a list/array), "whyNow", "angle". Keep every value concise so the whole array fits comfortably in one response. Example of ONE item:
 {"title":"a specific, click-worthy article title","keyword":"the primary search keyword","whyNow":"one sentence on why it is timely this week","angle":"2-3 sentences on what the article should cover and the angle for this site"}
 Return the array of such objects.`);
 

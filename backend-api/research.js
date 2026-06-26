@@ -116,18 +116,30 @@ export async function trendingIntel({ niche, context, db, now = 0 }) {
       const pp = await perplexity.ask({
         system: (ctx ? `=== SITE CONTEXT (propose ideas strictly for THIS site's niche & audience) ===\n${ctx}\n\n` : '') + P('research.trending'),
         user: `${ctx ? '' : `Niche: ${niche}. `}Propose 6-8 timely, niche-specific article ideas for this site's ${mk.country} audience for THIS week. Return ONLY the JSON array described above.`,
-        ...mt('research.trending', 'fast'), recency: 'week', domains: mk.preferDomains, scope: mk.scope, geo: mk.geo, maxTokens: 1100,
+        ...mt('research.trending', 'fast'), recency: 'week', domains: mk.preferDomains, scope: mk.scope, geo: mk.geo, maxTokens: 2000,
       });
       out.summary = pp.answer; out.sources = rankSources(pp.sources); out.engines.perplexity = (pp.sources || []).length; if (pp.cost) out.cost += pp.cost;
       try {
-        const a = String(pp.answer || ''); const s = a.indexOf('['); const e = a.lastIndexOf(']');
-        const arr = (s >= 0 && e > s) ? JSON.parse(a.slice(s, e + 1)) : [];
+        const a = String(pp.answer || '');
+        let arr = [];
+        const s = a.indexOf('['); const e = a.lastIndexOf(']');
+        if (s >= 0 && e > s) { try { arr = JSON.parse(a.slice(s, e + 1)); } catch (_) { arr = []; } }
+        if (!Array.isArray(arr) || !arr.length) {
+          // Salvage: parse each COMPLETE top-level {...} object on its own. Survives a
+          // truncated array (token cap) and nested "keywords":[...] arrays the full parse chokes on.
+          arr = [];
+          const re = /\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g; let m;
+          while ((m = re.exec(a))) { try { const o = JSON.parse(m[0]); if (o && o.title) arr.push(o); } catch (_) {} }
+        }
         out.ideas = (Array.isArray(arr) ? arr : []).map((x) => {
           if (typeof x === 'string') { const t = x.trim(); return t ? { title: t.slice(0, 160), keyword: t.slice(0, 120), whyNow: '', angle: '' } : null; }
-          if (x && x.title) return {
-            title: String(x.title).slice(0, 160), keyword: String(x.keyword || x.title).slice(0, 120),
-            whyNow: String(x.whyNow || x.why || '').slice(0, 400), angle: String(x.angle || x.plan || x.content_plan || x.description || '').slice(0, 900),
-          };
+          if (x && x.title) {
+            const kw = Array.isArray(x.keywords) ? x.keywords[0] : (x.keyword || x.keywords);
+            return {
+              title: String(x.title).slice(0, 160), keyword: String(kw || x.title).slice(0, 120),
+              whyNow: String(x.whyNow || x.why || '').slice(0, 400), angle: String(x.angle || x.plan || x.content_plan || x.description || '').slice(0, 900),
+            };
+          }
           return null;
         }).filter(Boolean).slice(0, 10);
       } catch (e) { /* fall back to the prose summary */ }
