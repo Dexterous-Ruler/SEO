@@ -1429,6 +1429,19 @@ function OpportunitiesScreen({ ctx }) {
       ctx.toast(r.pushed>0?("Pushed "+r.pushed+" question(s) → Airtable ✓"+(r.skipped?" ("+r.skipped+" already there)":"")):"All questions already in Airtable", r.pushed>0?"teal":"gold");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(""));
   };
+  // "Push to writer": re-run PAA with push:true → each question becomes an Article Writer brief
+  // (carries pattern→intent, snippetFormat→format). Toasts the synced count from the airtable result.
+  const pushPaaToWriter = ()=>{
+    const seed=(paaSeed||"").trim(); if(!seed){ ctx.toast("Find questions first","gold"); return; }
+    const n=((paa&&paa.questions)||[]).length;
+    setPushing("paa-writer"); ctx.toast("Sending "+n+" question(s) to the Article Writer…","teal");
+    API.peopleAlsoAskPush(s.id, seed).then(r=>{
+      const at=(r&&r.airtable)||{};
+      if(r.error||at.error){ ctx.toast("Push to writer: "+(r.error||at.error),"clay"); return; }
+      const synced=at.synced!=null?at.synced:n;
+      ctx.toast(synced>0?("Pushed "+synced+" question(s) → Article Writer ✓ — set Status to “Write Article” to generate"):"All questions already in the writer","teal");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(""));
+  };
   const genBrief = (c,i)=>{
     setBriefBusy(i);
     API.contentBrief(s.id, c.primaryKeyword||c.suggestedTitle, c.intent).then(r=>{
@@ -1537,7 +1550,12 @@ function OpportunitiesScreen({ ctx }) {
       {live && (
         <SoftCard hover={false} style={{ marginBottom:18 }}>
           <SectionHead sub={`Real Google "People Also Ask" questions in ${cName} for any seed keyword — push them as content briefs (one article answers each).`} right={
-            (paa && !paa.error && (paa.questions||[]).length>0) ? <NeoButton kind="soft" size="sm" icon={pushing==="paa"?undefined:"upload"} disabled={pushing==="paa"} onClick={pushPaa}>{pushing==="paa"&&<Icon name="cog" size={14} className="audit-spin" />}Push questions → Airtable</NeoButton> : null
+            (paa && !paa.error && (paa.questions||[]).length>0) ? (
+              <span style={{ display:"inline-flex", gap:8 }}>
+                <NeoButton kind="soft" size="sm" icon={pushing==="paa"?undefined:"upload"} disabled={!!pushing} onClick={pushPaa}>{pushing==="paa"&&<Icon name="cog" size={14} className="audit-spin" />}Push questions → Airtable</NeoButton>
+                <NeoButton kind="primary" size="sm" icon={pushing==="paa-writer"?undefined:"doc"} disabled={!!pushing} onClick={pushPaaToWriter} title="Send each question to the Article Writer as a brief (carries its intent & snippet format)">{pushing==="paa-writer"&&<Icon name="cog" size={14} className="audit-spin" />}Push to writer</NeoButton>
+              </span>
+            ) : null
           }>People Also Ask</SectionHead>
           <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:(paa&&!paa.error&&(paa.questions||[]).length)?14:0 }}>
             <input value={paaSeed} onChange={e=>setPaaSeed(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")findPaa();}} placeholder="Seed keyword (e.g. uk skilled worker visa)" style={{ flex:1, minWidth:220, padding:"10px 14px", borderRadius:"var(--r-pill)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none" }} />
@@ -1548,7 +1566,7 @@ function OpportunitiesScreen({ ctx }) {
             <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
               {(paa.questions||[]).map((q,i)=>(
                 <div key={i} style={{ padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
-                  <div style={{ fontSize:13, fontWeight:700, color:"var(--ink)", display:"flex", gap:8 }}><Icon name="search" size={14} style={{ color:"var(--t-600)", flexShrink:0, marginTop:2 }} /><span>{q.question}</span></div>
+                  <div style={{ fontSize:13, fontWeight:700, color:"var(--ink)", display:"flex", gap:8, alignItems:"flex-start" }}><Icon name="search" size={14} style={{ color:"var(--t-600)", flexShrink:0, marginTop:2 }} /><span style={{ flex:1 }}>{q.question}</span>{q.pattern && <Chip tone="plum" size="sm">{q.pattern}</Chip>}{q.snippetFormat && <Chip tone="teal" size="sm">{q.snippetFormat}</Chip>}</div>
                   {q.answer && <div style={{ fontSize:12, color:"var(--muted)", marginTop:4, lineHeight:1.5 }}>{q.answer}{q.domain && <a href={q.url} target="_blank" style={{ color:"var(--t-600)", marginLeft:6 }}>— {q.domain}</a>}</div>}
                 </div>
               ))}
@@ -2295,6 +2313,16 @@ function ContentScreen({ ctx }) {
     setAeoBusy(true); setAeo(null);
     API.contentScore("", url).then(r=>{ if(r.error){ ctx.toast("AEO score: "+r.error,"clay"); setAeo({ error:r.error }); return; } setAeo(r); }).catch(e=>{ ctx.toast(e.message,"clay"); setAeo({ error:e.message }); }).finally(()=>setAeoBusy(false));
   };
+  // Humanize — paste a draft, strip robotic AI tells. Returns { out, changes, changed }.
+  const [humText,setHumText] = useState("");
+  const [humBusy,setHumBusy] = useState(false);
+  const [hum,setHum] = useState(null);
+  const runHumanize = ()=>{
+    const text=(humText||"").trim();
+    if(!text){ ctx.toast("Paste some draft text to humanize","gold"); return; }
+    setHumBusy(true); setHum(null);
+    API.contentHumanize(text).then(r=>{ if(r.error){ ctx.toast("Humanize: "+r.error,"clay"); setHum({ error:r.error }); return; } setHum(r); ctx.toast(r.changes>0?(r.changes+" robotic tell(s) cleaned ✓"):"Already clean — no AI tells found", r.changes>0?"teal":"gold"); }).catch(e=>{ ctx.toast(e.message,"clay"); setHum({ error:e.message }); }).finally(()=>setHumBusy(false));
+  };
   useEffect(()=>{ setDbVal(s.semrush_db||"uk"); },[s.id]);
   useEffect(()=>{ if(live&&!dbList) API.siteDatabase(s.id).then(r=>{ if(r&&r.countries) setDbList(r.countries); }).catch(()=>{}); },[live]);
   const changeCountry = (db)=>{
@@ -2374,6 +2402,26 @@ function ContentScreen({ ctx }) {
             )}
           </div>
         ); })()}
+        {/* Humanize — de-AI a draft/answer block before publishing. */}
+        <div style={{ marginTop:16, paddingTop:16, borderTop:"1px solid var(--line-soft)" }}>
+          <div style={{ fontSize:12.5, fontWeight:800, color:"var(--ink-2)", marginBottom:3 }}>Humanize a draft</div>
+          <div style={{ fontSize:12, color:"var(--muted)", marginBottom:9 }}>Paste AI-written copy to strip robotic tells (em-dash spam, "delve", "in today's world", hedge words) before it goes live.</div>
+          <textarea value={humText} onChange={e=>setHumText(e.target.value)} rows={4} placeholder="Paste a draft, intro, or answer block…" style={{ width:"100%", boxSizing:"border-box", padding:"10px 13px", borderRadius:"var(--r-md)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, lineHeight:1.55, color:"var(--ink)", outline:"none", resize:"vertical", fontFamily:"inherit" }} />
+          <div style={{ display:"flex", alignItems:"center", gap:10, marginTop:9, flexWrap:"wrap" }}>
+            <NeoButton kind="primary" size="sm" icon={humBusy?undefined:"sparkles"} disabled={humBusy} onClick={runHumanize}>{humBusy&&<Icon name="cog" size={15} className="audit-spin" />}{humBusy?"Humanizing…":"Humanize"}</NeoButton>
+            {hum && !hum.error && <Chip tone={hum.changes>0?"teal":"gray"} size="sm">{hum.changes||0} change(s)</Chip>}
+          </div>
+          {hum && hum.error && <div style={{ marginTop:10, fontSize:12.5, color:"var(--clay)" }}>{hum.error}</div>}
+          {hum && !hum.error && hum.out!=null && (
+            <div style={{ marginTop:11 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
+                <span style={{ fontSize:11, fontWeight:800, color:"var(--muted)", textTransform:"uppercase", letterSpacing:.4 }}>Cleaned text</span>
+                <NeoButton kind="ghost" size="sm" icon="copy" style={{ marginLeft:"auto" }} onClick={()=>{ try{ navigator.clipboard.writeText(hum.out||""); ctx.toast("Cleaned text copied","teal"); }catch(e){ ctx.toast("Select & copy below","gold"); } }}>Copy</NeoButton>
+              </div>
+              <div className="scroll" style={{ maxHeight:240, overflow:"auto", fontSize:12.5, lineHeight:1.6, color:"var(--ink)", background:"var(--bg)", padding:"11px 13px", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", whiteSpace:"pre-wrap" }}>{hum.out}</div>
+            </div>
+          )}
+        </div>
       </SoftCard>
 
       {!d && !loading && (
@@ -2836,6 +2884,7 @@ function GscScreen({ ctx }) {
   const [steal,setSteal] = useState(null);
   const [stealBusy,setStealBusy] = useState(false);
   const [answerFor,setAnswerFor] = useState(null);  // { query, loading?|block?|error? }
+  const [blockSchema,setBlockSchema] = useState(null);  // { query, loading?|applying?, graph?|validation?|error?, applied? }
   const autoPickedRef = useRef(new Set());   // sites we've already auto-mapped this session
 
   useEffect(()=>{ setData(null); setProps([]); setSaText(""); setErr(null); setDecay(null); setAnom(null); setIdxHealth(null); setDrops(null); setPropMenu(false); if(live) API.gscStatus(s.id).then(setStatus).catch(()=>{}); },[s.id]);
@@ -2852,11 +2901,29 @@ function GscScreen({ ctx }) {
   };
   // One-click: generate a featured-snippet "answer block" for a query (Claude, preview only).
   const genAnswer = (row)=>{
+    setBlockSchema(null);   // stale to the previous block
     setAnswerFor({ query:row.query, loading:true });
     API.aeoAnswerBlock(s.id, row.page||"", row.query).then(r=>{
       if(r.error){ setAnswerFor({ query:row.query, error:r.error }); ctx.toast("Answer block: "+r.error,"clay"); return; }
       setAnswerFor({ query:row.query, block:r });
     }).catch(e=>{ setAnswerFor({ query:row.query, error:e.message }); ctx.toast(e.message,"clay"); });
+  };
+  // Build the JSON-LD @graph for the active answer block (preview), then optionally write it live.
+  const genBlockSchema = (row, block)=>{
+    setBlockSchema({ query:row.query, loading:true });
+    API.aeoBlockSchema(s.id, row.page||"", block).then(r=>{
+      if(r.error){ setBlockSchema({ query:row.query, error:r.error }); ctx.toast("Schema: "+r.error,"clay"); return; }
+      setBlockSchema({ query:row.query, graph:r.graph, validation:r.validation });
+    }).catch(e=>{ setBlockSchema({ query:row.query, error:e.message }); ctx.toast(e.message,"clay"); });
+  };
+  const applyBlockSchema = (row, block)=>{
+    setBlockSchema(f=>({ ...(f||{ query:row.query }), applying:true }));
+    API.aeoApplyBlockSchema(s.id, row.page||"", block).then(r=>{
+      if(r.error){ ctx.toast("Apply schema: "+r.error,"clay"); setBlockSchema(f=>({ ...(f||{}), applying:false })); return; }
+      if(r.status==="blocked"){ ctx.toast(r.reason||"Site is read-only — arm writes first","gold"); setBlockSchema(f=>({ ...(f||{}), applying:false })); return; }
+      setBlockSchema(f=>({ ...(f||{ query:row.query }), applying:false, applied:true, validation:r.validation||(f&&f.validation) }));
+      ctx.toast("Answer-block schema applied to the live page ✓","teal");
+    }).catch(e=>{ ctx.toast(e.message,"clay"); setBlockSchema(f=>({ ...(f||{}), applying:false })); });
   };
   const loadDecay = ()=>{
     setDecayBusy(true); setErr(null);
@@ -3207,6 +3274,8 @@ function GscScreen({ ctx }) {
                             <span style={{ fontSize:13, fontWeight:800 }}>{b.heading}</span>
                             {b.format && <Chip tone="gray" size="sm">{b.format}</Chip>}
                             <NeoButton kind="ghost" size="sm" icon="copy" style={{ marginLeft:"auto" }} onClick={()=>{ try{ navigator.clipboard.writeText(b.html||b.answer||""); ctx.toast("Answer block copied — paste it high on the page","teal"); }catch(e){ ctx.toast("Select & copy the block below","gold"); } }}>Copy</NeoButton>
+                            <NeoButton kind="soft" size="sm" icon={(blockSchema&&blockSchema.query===row.query&&blockSchema.loading)?undefined:"doc"} disabled={blockSchema&&blockSchema.query===row.query&&blockSchema.loading} onClick={()=>genBlockSchema(row,b)} title="Build the JSON-LD @graph (FAQPage / QAPage) for this answer block">{blockSchema&&blockSchema.query===row.query&&blockSchema.loading&&<Icon name="cog" size={14} className="audit-spin" />}{blockSchema&&blockSchema.query===row.query&&blockSchema.loading?"Building…":"Schema"}</NeoButton>
+                            <NeoButton kind="primary" size="sm" icon={(blockSchema&&blockSchema.query===row.query&&blockSchema.applying)?undefined:"check"} disabled={blockSchema&&blockSchema.query===row.query&&blockSchema.applying} onClick={()=>applyBlockSchema(row,b)} title="Write this answer block's schema to the live page (needs writes armed)">{blockSchema&&blockSchema.query===row.query&&blockSchema.applying&&<Icon name="cog" size={14} className="audit-spin" />}{blockSchema&&blockSchema.query===row.query&&blockSchema.applying?"Applying…":"Apply schema"}</NeoButton>
                           </div>
                           {b.answer && <div style={{ fontSize:12.5, color:"var(--ink)", lineHeight:1.5, marginBottom:8 }}>{b.answer}</div>}
                           {b.html && <div className="scroll md" style={{ maxHeight:280, overflow:"auto", fontSize:12.5, lineHeight:1.5, background:"var(--bg)", padding:"10px 13px", borderRadius:8, boxShadow:"var(--neo-in)" }} dangerouslySetInnerHTML={{ __html: b.html }} />}
@@ -3221,6 +3290,22 @@ function GscScreen({ ctx }) {
                               ))}
                             </div>
                           )}
+                          {/* JSON-LD @graph for this answer block — preview, validation, and live-apply state. */}
+                          {blockSchema && blockSchema.query===row.query && (blockSchema.graph||blockSchema.error||blockSchema.applied) && (()=>{ const v=blockSchema.validation||{}; return (
+                            <div style={{ marginTop:10, paddingTop:10, borderTop:"1px solid var(--line-soft)" }}>
+                              {blockSchema.error && <div style={{ fontSize:12, color:"var(--clay)" }}>{blockSchema.error}</div>}
+                              {v.ok!=null && (
+                                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:7, flexWrap:"wrap" }}>
+                                  <Chip tone={v.ok?"teal":"clay"} size="sm" icon={v.ok?"check":"alert"}>{v.ok?"Valid JSON-LD":((v.errors||[]).length+" error(s)")}</Chip>
+                                  {(v.warnings||[]).length>0 && <Chip tone="gold" size="sm">{(v.warnings||[]).length} warning(s)</Chip>}
+                                  {blockSchema.applied && <Chip tone="teal" size="sm" icon="check">applied live</Chip>}
+                                </div>
+                              )}
+                              {(v.errors||[]).map((e,ei)=><div key={"e"+ei} style={{ fontSize:11.5, color:"var(--clay)", marginBottom:3 }}>• {e}</div>)}
+                              {(v.warnings||[]).map((w,wi)=><div key={"w"+wi} style={{ fontSize:11.5, color:"var(--gold)", marginBottom:3 }}>• {w}</div>)}
+                              {blockSchema.graph && <pre className="scroll" style={{ margin:"4px 0 0", padding:"10px 13px", background:"var(--bg)", borderRadius:8, boxShadow:"var(--neo-in)", fontSize:11, fontFamily:"var(--mono)", color:"var(--ink)", overflowX:"auto", maxHeight:260, lineHeight:1.5, whiteSpace:"pre-wrap" }}>{JSON.stringify(blockSchema.graph,null,2)}</pre>}
+                            </div>
+                          ); })()}
                         </>); })()}
                       </div>
                     )}

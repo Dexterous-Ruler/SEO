@@ -42,7 +42,7 @@ import { detectGscDaily, detectAuditHistory } from './anomaly.js';
 import * as tv from './traffic-value.js';
 import { correlationMatrix } from './correlation.js';
 import { suggestForSite as suggestInternalLinks, editablePageContent, insertableIn, normText, resolveSourceByUrl, linkedAnchorTexts, alreadyLinked } from './internal-links.js';
-import { generatePageSchema, validateSchema } from './schema-gen.js';
+import { generatePageSchema, validateSchema, schemaForAnswerBlock } from './schema-gen.js';
 import { scoreContent, verifyClaims, humanize } from './content-quality.js';
 import { generateCssFixes } from './css-fixes.js';
 import { findOpportunities } from './content-opportunities.js';
@@ -1542,9 +1542,28 @@ const routes = {
     const seed = String(body.keyword || '').trim();
     if (!seed) return { error: 'A seed keyword is required.' };
     const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    let res;
     try {
-      return await semrush.peopleAlsoAsk(seed, { db: (site && site.semrush_db) || body.db || 'uk', depth: body.depth || 2 });
+      res = await semrush.peopleAlsoAsk(seed, { db: (site && site.semrush_db) || body.db || 'uk', depth: body.depth || 2 });
     } catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted — top up at app.dataforseo.com' : ('People Also Ask lookup failed: ' + e.message) }; }
+    // Optional: push each PAA question to the Airtable Article Writer table as a brief,
+    // reusing the EXISTING airtable-sync brief path (mapArticleBrief → the n8n-watched
+    // table). The question becomes the suggested title; its pattern rides along so the
+    // writer knows the best snippet format. Default (no push) returns the data unchanged.
+    if (body.push && body.siteId) {
+      const clusters = (res.questions || []).map((q) => ({
+        suggestedTitle: q.question,
+        primaryKeyword: q.seed || seed,
+        keyword: q.seed || seed,
+        label: q.question,
+        intent: q.pattern,
+        format: q.snippetFormat,
+      }));
+      try {
+        res.airtable = await routes['POST /airtable-sync']({ siteId: body.siteId, kinds: ['opportunities'], clusters });
+      } catch (e) { res.airtable = { error: 'Airtable push failed: ' + e.message }; }
+    }
+    return res;
   },
 
   // Internal-links engine: propose contextual in-content links across the site's
@@ -2740,6 +2759,53 @@ const routes = {
     } catch (e) { return { error: 'Snippet-format classification failed: ' + e.message }; }
   },
 
+  // Build the JSON-LD @graph for an AEO answer block (WebPage [+Speakable], FAQPage?,
+  // HowTo?) from a generated block. NOT heavy — pure/sync, no network/LLM. Derives
+  // siteName/baseUrl from the site row (same as /generate-schema). Returns the graph +
+  // its validation so the UI can preview before applying.
+  'POST /aeo-block-schema': async (body) => {
+    const block = body.block;
+    if (!block || typeof block !== 'object') return { error: 'A block object is required.' };
+    const url = body.url || (block && block.url) || '';
+    if (!url) return { error: 'A page url is required.' };
+    const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    let baseUrl;
+    try { baseUrl = (site && site.url) ? site.url.replace(/\/+$/, '') : new URL(url).origin; }
+    catch (e) { return { error: 'Invalid url.' }; }
+    const siteName = (site && site.name) || baseUrl;
+    const org = { name: siteName, url: baseUrl, logo: site && site.logo };
+    const { graph, validation } = schemaForAnswerBlock(url, block, { org, baseUrl, siteName });
+    return { graph, validation };
+  },
+
+  // Apply an AEO answer-block schema to the live page. HEAVY (writes via the mu-plugin).
+  // Builds the graph with schemaForAnswerBlock, then publishes through the SAME path as
+  // /apply-schema (write-armed gating, page resolution, validation, mu-plugin /schema
+  // write) — no second writer. Returns what /apply-schema returns + the block validation.
+  'POST /aeo-apply-block-schema': async (body) => {
+    const block = body.block;
+    if (!block || typeof block !== 'object') return { error: 'A block object is required.' };
+    const url = body.url || (block && block.url) || '';
+    if (!url) return { error: 'A page url is required.' };
+    const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    let baseUrl;
+    try { baseUrl = (site && site.url) ? site.url.replace(/\/+$/, '') : new URL(url).origin; }
+    catch (e) { return { error: 'Invalid url.' }; }
+    const siteName = (site && site.name) || baseUrl;
+    const org = { name: siteName, url: baseUrl, logo: site && site.logo };
+    const { graph, validation } = schemaForAnswerBlock(url, block, { org, baseUrl, siteName });
+    // Reuse the existing apply-schema writer (single source of truth for the write).
+    const applied = await routes['POST /apply-schema']({ siteId: body.siteId, creds: body.creds, url, jsonld: JSON.stringify(graph), force: body.force });
+    return { ...applied, validation };
+  },
+
+  // Humanize text — strip AI-tell phrasing/cadence (content-quality.js). NOT heavy —
+  // pure/sync, no network/LLM.
+  'POST /content-humanize': async (body) => {
+    if (!body.text) return { error: 'Pass text to humanize.' };
+    return humanize(body.text);
+  },
+
   // Offline content quality score + claim verification. NOT heavy — pure/sync, no
   // network/LLM. Accepts raw html or a url (fetched + stripped the existing way).
   'POST /content-score': async (body) => {
@@ -2795,7 +2861,7 @@ const HEAVY_ROUTES = new Set([
   'POST /narrate', 'POST /scorecard', 'POST /weekly-briefing', 'POST /research', 'POST /auditPage',
   'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
   'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',
-  'POST /aeo-answer-block', 'POST /aeo-snippet-format',
+  'POST /aeo-answer-block', 'POST /aeo-snippet-format', 'POST /aeo-apply-block-schema',
 ]);
 
 // ── Experience Monitor — UX beacon ingest (the high-volume hot path) ─────────

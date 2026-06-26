@@ -168,11 +168,32 @@ export async function competitors(domain, { db = 'uk', limit = 10 } = {}) {
   });
 }
 
+// Deterministic question-intent classifier (no AI). Returns one of
+// 'definitional' | 'procedural' | 'comparative' | 'evaluative' | 'other'.
+// Order matters: definitional → procedural → comparative → evaluative → other.
+// Case-insensitive, word-boundary aware so "is" never matches inside "this".
+export function classifyQuestion(q) {
+  const s = String(q || '').toLowerCase().trim();
+  if (!s) return 'other';
+  if (/\b(what\s+is|what\s+are|what\s+does|define|meaning\s+of)\b/.test(s)) return 'definitional';
+  if (/\b(how\s+to|how\s+do|how\s+can|how\s+does|steps\s+to|guide)\b/.test(s)) return 'procedural';
+  if (/\b(vs|versus|or|compare|better)\b|\bdifference\s+between\b/.test(s)) return 'comparative';
+  if (/\b(is|are|should|can\s+i|worth|best|which|do\s+i\s+need|cost\s+of|how\s+much)\b/.test(s)) return 'evaluative';
+  return 'other';
+}
+
+// Pattern → recommended featured-snippet format. Definitional/evaluative answers
+// read best as a tight paragraph; procedural as an ordered list; comparative as a table.
+const SNIPPET_FORMAT_BY_PATTERN = { definitional: 'paragraph', procedural: 'list', comparative: 'table', evaluative: 'paragraph' };
+const snippetFormatFor = (pattern) => SNIPPET_FORMAT_BY_PATTERN[pattern] || 'paragraph';
+
 // People Also Ask: real Google PAA *questions* (+ related searches) for a seed
 // keyword, in the site's market. This is the ONLY source that returns true PAA
 // questions — Labs endpoints return related keywords, not questions. Uses the
 // existing DataForSEO account (SERP organic live/advanced, ~$0.002/seed). The UI
 // pushes these questions to Airtable so the writer answers one per article.
+// Each question additionally carries `pattern` (intent class) + `snippetFormat`
+// (the structure most likely to win the featured snippet for that intent).
 export async function peopleAlsoAsk(keyword, { db = 'uk', depth = 2 } = {}) {
   const items = await call('/serp/google/organic/live/advanced', {
     keyword: String(keyword || '').trim(),
@@ -186,7 +207,7 @@ export async function peopleAlsoAsk(keyword, { db = 'uk', depth = 2 } = {}) {
       for (const pa of (el.items || [])) {
         const q = (pa && pa.title) || '';
         const ex = (pa && pa.expanded_element && pa.expanded_element[0]) || {};
-        if (q) questions.push({ question: q, answer: String(ex.description || '').slice(0, 400), url: ex.url || '', domain: ex.domain || '', seed: pa.seed_question || keyword });
+        if (q) { const pattern = classifyQuestion(q); questions.push({ question: q, answer: String(ex.description || '').slice(0, 400), url: ex.url || '', domain: ex.domain || '', seed: pa.seed_question || keyword, pattern, snippetFormat: snippetFormatFor(pattern) }); }
       }
     } else if (el && el.type === 'related_searches') {
       for (const r of (el.items || [])) { const t = typeof r === 'string' ? r : (r && r.title); if (t) related.push(t); }
@@ -440,4 +461,4 @@ export async function domainIntersection(site, competitors, { limit = 100 } = {}
 
 export function hasKey() { return Boolean(process.env.DATAFORSEO_LOGIN && process.env.DATAFORSEO_PASSWORD); }
 
-export default { domainOverview, organicKeywords, competitors, backlinks, keywordGap, fullSnapshot, strikingDistance, keywordIdeas, relatedKeywords, apiUnits, hasKey, backlinksSummary, referringDomains, backlinkAnchors, domainIntersection };
+export default { domainOverview, organicKeywords, competitors, backlinks, keywordGap, fullSnapshot, strikingDistance, keywordIdeas, relatedKeywords, peopleAlsoAsk, classifyQuestion, apiUnits, hasKey, backlinksSummary, referringDomains, backlinkAnchors, domainIntersection };

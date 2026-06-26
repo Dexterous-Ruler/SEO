@@ -221,6 +221,84 @@ function generatePageSchema(page, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// schemaForAnswerBlock — turn a claude.answerBlock result into the best @graph
+// for answer surfaces (AI Overviews, voice, featured snippets). Mirrors the
+// generatePageSchema output shape: { '@context', '@graph' }.
+//   url:   the page the answer block lives on.
+//   block: { heading, format:'paragraph'|'list'|'table'|'video', answer, html, faq:[{q,a}] }
+//   opts:  { org, baseUrl, siteName }
+// Always emits a WebPage. When block.answer exists, attaches a Speakable that
+// targets ['h1','h2','.aeo-answer'] — best-effort: the publisher should wrap the
+// rendered answer in an element with class "aeo-answer" so voice assistants read
+// the right text. Adds a FAQPage when block.faq has >=2 items, and a HowTo when
+// the block is a list (format==='list' or the html contains <ol>/<li> steps),
+// with steps parsed from the html <li> items (text only). Skips VideoObject
+// (the block carries no video metadata fields).
+// Returns { graph, validation } where validation is validateSchema(graph).
+// ---------------------------------------------------------------------------
+
+// Extract <li> inner text (tags stripped, entities/whitespace tidied) from html.
+function parseListItems(html) {
+  if (!html || typeof html !== 'string') return [];
+  const out = [];
+  const re = /<li\b[^>]*>([\s\S]*?)<\/li>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const text = m[1]
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (text) out.push(text);
+  }
+  return out;
+}
+
+function schemaForAnswerBlock(url, block, { org, baseUrl, siteName } = {}) {
+  const b = block || {};
+  const graph = [];
+
+  // Page node — reuse buildWebPage style (title/description from the block heading).
+  graph.push(buildWebPage(
+    { url, title: b.heading, description: b.answer, lang: undefined },
+    org || {},
+    baseUrl || ''
+  ));
+
+  // Speakable — attach to the WebPage @id when there's an answer to read aloud.
+  if (b.answer) {
+    const speak = buildSpeakable(url, { cssSelectors: ['h1', 'h2', '.aeo-answer'] });
+    if (speak) graph.push(speak);
+  }
+
+  // FAQPage — only worth it with 2+ Q&A pairs.
+  if (Array.isArray(b.faq) && b.faq.filter((f) => f && f.q && f.a).length >= 2) {
+    const faq = buildFaqPage(url, b.faq);
+    if (faq) graph.push(faq);
+  }
+
+  // HowTo — list-format blocks (or html carrying <ol>/<li>) become step-by-step.
+  const htmlHasSteps = typeof b.html === 'string' && /<ol\b|<li\b/i.test(b.html);
+  if (b.format === 'list' || htmlHasSteps) {
+    const items = parseListItems(b.html);
+    const howto = buildHowTo(url, {
+      name: b.heading,
+      description: b.answer,
+      steps: items.map((text) => ({ text })),
+    });
+    if (howto) graph.push(howto);
+  }
+
+  const graphDoc = { '@context': 'https://schema.org', '@graph': graph.map(clean) };
+  return { graph: graphDoc, validation: validateSchema(graphDoc) };
+}
+
+// ---------------------------------------------------------------------------
 // validateSchema — lint a JSON-LD object / @graph array / JSON string before it
 // ships. Returns { ok, errors, warnings }. Catches placeholder leftovers and
 // missing required fields (hard errors), and flags deprecated/retired types as
@@ -348,5 +426,5 @@ function validateSchema(input) {
   return { ok: errors.length === 0, errors, warnings };
 }
 
-export { generatePageSchema, validateSchema, buildOrganization, buildLegalService, buildPerson, buildWebPage, buildArticle, buildBreadcrumb, buildFaqPage, buildHowTo, buildSpeakable, buildVideoObject };
-export default { generatePageSchema, validateSchema, buildHowTo, buildSpeakable, buildVideoObject };
+export { generatePageSchema, validateSchema, buildOrganization, buildLegalService, buildPerson, buildWebPage, buildArticle, buildBreadcrumb, buildFaqPage, buildHowTo, buildSpeakable, buildVideoObject, schemaForAnswerBlock };
+export default { generatePageSchema, validateSchema, buildHowTo, buildSpeakable, buildVideoObject, schemaForAnswerBlock };

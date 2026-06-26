@@ -112,6 +112,8 @@
     contentBrief(siteId, keyword, intent) { return engine("/content-brief", { siteId, keyword, intent }); },
     trendingIntel(siteId, niche, db) { return engine("/trending-intel", { siteId, niche, db }); },
     peopleAlsoAsk(siteId, keyword, depth) { return engine("/people-also-ask", { siteId, keyword, depth }); },
+    // Same route with push:true → sends each PAA question to the Airtable Article Writer; returns { ..., airtable }.
+    peopleAlsoAskPush(siteId, keyword, depth) { return engine("/people-also-ask", { siteId, keyword, depth, push: true }); },
     researchStatus() { return engine("/research-status", {}); },
     adminStatus(siteId) { return engine("/admin-status", { siteId }); },
     promptsList(siteId) { return engine("/prompts-list", { siteId }); },
@@ -162,6 +164,11 @@
     // AEO / answer-engine optimisation (snippet-steal + answer blocks + readiness scoring)
     gscSnippetSteal(siteId) { return engine("/gsc-snippet-steal", { siteId }); },
     aeoAnswerBlock(siteId, url, query, format) { return engine("/aeo-answer-block", { siteId, url, query, format }); },
+    // Build the JSON-LD @graph for a generated answer block (preview) and apply it live (write-armed gated server-side).
+    aeoBlockSchema(siteId, url, block) { return engine("/aeo-block-schema", { siteId, url, block }); },
+    aeoApplyBlockSchema(siteId, url, block) { return engine("/aeo-apply-block-schema", { siteId, url, block }); },
+    // De-AI a draft/block of text — strips robotic tells, returns { out, changes, changed }.
+    contentHumanize(text) { return engine("/content-humanize", { text }); },
     contentScore(html, url) { return engine("/content-score", { html, url }); },
     validateSchema(schema) { return engine("/validate-schema", { schema }); },
     auditAnomalies(history) { return engine("/audit-anomalies", { history }); },
