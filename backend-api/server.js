@@ -2124,14 +2124,15 @@ const routes = {
       if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'You', icon: 'sparkles', text: `Rewrote & refreshed “${page.title || pageUrl}”`, meta: 'reviewed full rewrite + re-indexed (WordPress revision saved)' }).catch(() => {});
       return { status: 'applied', postId: found.id, url: pageUrl, indexed, modified: after && after.modified, reversible: 'WordPress keeps a revision — restore the previous version from the post’s Revisions if needed.' };
     }
+    // Decide rewritability per-PAGE by its actual editable content, NOT the site's builder
+    // flag: classic/Gutenberg blog posts on an Elementor/Divi site still have editable
+    // post_content (rewrite works + renders), whereas a true page-builder layout returns
+    // little/no post_content → we fall back to manual below.
     const builder = (site && site.stack && site.stack.builder) || '';
-    if (/elementor|beaver|divi|bricks|wpbakery/i.test(builder)) {
-      return { status: 'manual', builder, reason: `This is a ${builder} page — a full rewrite can't be written into page-builder content automatically. Use the Brief and edit in ${builder}.` };
-    }
     const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content,title`).catch(() => null);
     const rawHtml = (post && post.content && (post.content.raw != null ? post.content.raw : '')) || '';
     const rawText = rawHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    if (rawText.length < 60) return { status: 'manual', reason: 'This page has too little editable content to rewrite automatically (likely a page-builder layout) — use the Brief and edit it directly.' };
+    if (rawText.length < 60) return { status: 'manual', builder, reason: `This page has no editable post content to auto-rewrite${builder ? ` (it’s built with ${builder})` : ''} — generate the Brief and edit it directly in your builder.` };
     const title = (post && post.title && (post.title.raw || post.title.rendered)) || page.title || '';
     let brief = body.brief;
     if (!brief) { try { brief = await claude.decayBrief({ page, pageContext: { excerpt: rawText.slice(0, 4000) }, siteId: body.siteId }); } catch (e) { brief = ''; } }
