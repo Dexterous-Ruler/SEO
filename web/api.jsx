@@ -167,6 +167,13 @@
     // Build the JSON-LD @graph for a generated answer block (preview) and apply it live (write-armed gated server-side).
     aeoBlockSchema(siteId, url, block) { return engine("/aeo-block-schema", { siteId, url, block }); },
     aeoApplyBlockSchema(siteId, url, block) { return engine("/aeo-apply-block-schema", { siteId, url, block }); },
+    // Drift — diff a live page against its stored baseline (SEO/meta/structure regressions).
+    // notProvisioned until supabase/drift-baselines.sql is run; updateBaseline=true (re)captures.
+    driftCheck(siteId, url, updateBaseline) { return engine("/drift-check", { siteId, url, updateBaseline: !!updateBaseline }); },
+    driftSnapshot(url) { return engine("/drift-snapshot", { url }); },
+    // IndexNow — instant-index ping. Get a deterministic key + publish instruction, then submit URLs.
+    indexnowKey(siteId, seed) { return engine("/indexnow-key", { siteId, seed }); },
+    indexnowSubmit(siteId, key, urls) { return engine("/indexnow-submit", { siteId, key, urls }); },
     // De-AI a draft/block of text — strips robotic tells, returns { out, changes, changed }.
     contentHumanize(text) { return engine("/content-humanize", { text }); },
     contentScore(html, url) { return engine("/content-score", { html, url }); },

@@ -52,6 +52,8 @@ import * as prompts from './prompts.js';
 import * as perplexity from './perplexity.js';
 import { limiters, infraStats, withTimeout, HEAVY_MAX_QUEUE, Limiter, TTLCache } from './infra.js';
 import * as jobs from './jobs.js';
+import * as drift from './drift.js';
+import * as indexnow from './indexnow.js';
 
 // Resolve credentials for an operation: prefer a stored siteId (secure — secret
 // decrypted server-side), fall back to creds in the body (initial connect only).
@@ -2847,6 +2849,51 @@ const routes = {
   // shipping. NOT heavy — pure/sync. Returns { ok, errors, warnings }.
   'POST /validate-schema': async (body) => {
     return validateSchema(body.schema);
+  },
+
+  // ── Drift ("git for SEO") ──────────────────────────────────────────────────
+  // Snapshot a page's SEO-critical surface (title/canonical/robots/schema/word
+  // count/content hash). NOT heavy — a single fetch + regex parse, no LLM/WP.
+  // Returns the snapshot object (carries { error } on fetch failure).
+  'POST /drift-snapshot': async (body) => {
+    if (!body.url) return { error: 'A page url is required.' };
+    return drift.snapshotPage(body.url);
+  },
+
+  // Diff a fresh snapshot against the stored baseline. First run for a (site,url)
+  // sets the baseline; later runs return { drift:{ severity, changes } }. Passes
+  // notProvisioned / baselineSet / drift straight through from the module. The
+  // baseline lives in Supabase (drift_baselines) — degrades gracefully to a
+  // "not provisioned" message until supabase/drift-baselines.sql is run.
+  'POST /drift-check': async (body) => {
+    if (!body.url) return { error: 'A page url is required.' };
+    return drift.checkDrift(body.siteId || null, body.url, { updateBaseline: !!body.updateBaseline });
+  },
+
+  // ── IndexNow (instant re-crawl: Bing / Yandex / Seznam / Naver …) ───────────
+  // Derive the deterministic IndexNow key for a site + the text-file the operator
+  // must publish at the host root. NOT heavy. Host is derived from the site url.
+  'POST /indexnow-key': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    if (!site) return { error: 'site not found' };
+    const host = indexnow.normalizeHost(site.url || site._rawUrl || '');
+    if (!host) return { error: 'This site has no usable URL to derive a host from.' };
+    const key = indexnow.keyFromSeed(body.seed || body.siteId || host);
+    return { key, host, keyFile: indexnow.keyFileContent(key), publishAt: 'https://' + host + '/' + key + '.txt' };
+  },
+
+  // Submit changed URLs to the IndexNow network. Host is derived from the site
+  // url; pass the key from /indexnow-key (and publish its key file first). Returns
+  // the submit result incl. keyMissing:true when the key file isn't published.
+  'POST /indexnow-submit': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    if (!body.key) return { error: 'A key is required — call /indexnow-key first and publish its key file.' };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    if (!site) return { error: 'site not found' };
+    const host = indexnow.normalizeHost(site.url || site._rawUrl || '');
+    if (!host) return { error: 'This site has no usable URL to derive a host from.' };
+    return indexnow.submit(host, body.key, body.urls || []);
   },
 };
 

@@ -2852,6 +2852,174 @@ function SemrushPanel({ ctx }) {
   );
 }
 
+/* ---------------- Drift panel (Audits / Search Console area) ----------------
+   Diffs a live page against its stored baseline and surfaces SEO/meta/structure
+   regressions, colour-coded by severity. Baseline history needs the
+   supabase/drift-baselines.sql migration — degrades to an amber notice until then. */
+function DriftPanel({ ctx }) {
+  const s = ctx.site;
+  const API = window.SentinelAPI;
+  const [url,setUrl] = useState((s._rawUrl||s.url||"").replace(/\/$/,"")+"/");
+  const [busy,setBusy] = useState(false);
+  const [res,setRes] = useState(null);
+  useEffect(()=>{ setRes(null); setUrl((s._rawUrl||s.url||"").replace(/\/$/,"")+"/"); },[s.id]);
+  const run = (updateBaseline)=>{
+    const u=(url||"").trim();
+    if(!u){ ctx.toast("Enter a page URL to check","gold"); return; }
+    setBusy(true);
+    API.driftCheck(s.id, u, !!updateBaseline).then(r=>{
+      setRes(r);
+      if(r && r.error && !r.notProvisioned) ctx.toast("Drift: "+r.error,"clay");
+      else if(r && r.rebaselined) ctx.toast("Baseline updated for this page ✓","teal");
+      else if(r && r.baselineSet) ctx.toast("Baseline captured ✓","teal");
+    }).catch(e=>{ setRes({ error:e.message }); ctx.toast(e.message,"clay"); }).finally(()=>setBusy(false));
+  };
+  const SEV = { critical:"clay", warning:"gold", info:"gray" };
+  return (
+    <div>
+      <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:12, flexWrap:"wrap" }}>
+        <div style={{ flex:1, minWidth:220 }}>
+          <div style={{ fontSize:13.5, fontWeight:700 }}>Drift — catch silent SEO regressions</div>
+          <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Snapshots a page (title, meta, canonical, robots, headings, schema, word count) and diffs it against a saved baseline — so a CMS edit that drops your title or adds <code>noindex</code> doesn't slip through.</div>
+        </div>
+      </div>
+      <div style={{ display:"flex", gap:10, marginBottom:12, flexWrap:"wrap" }}>
+        <input value={url} onChange={e=>setUrl(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter"&&!busy) run(false); }} placeholder="https://your-site.com/page-to-check"
+          style={{ flex:1, minWidth:220, padding:"11px 14px", fontSize:13.5, fontFamily:"var(--mono)", border:"none", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", color:"var(--ink)" }} />
+        <NeoButton kind="primary" icon={busy?undefined:"radar"} disabled={busy} onClick={()=>run(false)}>{busy&&<Icon name="cog" size={16} className="audit-spin" />}{busy?"Checking…":"Check drift"}</NeoButton>
+      </div>
+
+      {res && res.notProvisioned && (
+        <div style={{ display:"flex", alignItems:"flex-start", gap:10, padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", boxShadow:"var(--neo-in)", borderLeft:"3px solid var(--gold)" }}>
+          <Icon name="alert" size={16} style={{ color:"var(--gold)", flexShrink:0, marginTop:1 }} />
+          <div style={{ fontSize:12.5, color:"var(--ink)", lineHeight:1.5 }}>Drift history isn't provisioned yet. Run <b>supabase/drift-baselines.sql</b> in the Supabase SQL editor to enable baseline tracking.{res.error?<div style={{ color:"var(--muted)", marginTop:4 }}>{res.error}</div>:null}</div>
+        </div>
+      )}
+
+      {res && res.error && !res.notProvisioned && (
+        <div style={{ fontSize:12.5, color:"var(--clay)", padding:"6px 2px" }}>{res.error}</div>
+      )}
+
+      {res && res.baselineSet && (
+        <div style={{ display:"flex", alignItems:"center", gap:9, padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--t-50)", boxShadow:"var(--neo-in)", borderLeft:"3px solid var(--t-500)" }}>
+          <Icon name="check" size={16} style={{ color:"var(--t-600)", flexShrink:0 }} />
+          <div style={{ fontSize:12.5, color:"var(--ink)" }}>Baseline captured ✓ — re-check later to detect drift against this snapshot.</div>
+        </div>
+      )}
+
+      {res && res.drift && (()=>{
+        const d=res.drift, sev=d.severity||"none", changes=d.changes||[];
+        const tone = sev==="critical"?"clay":sev==="warning"?"gold":sev==="info"?"gray":"teal";
+        return (
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:2 }}>
+              {sev==="none" || changes.length===0
+                ? <Chip tone="teal" size="sm" icon="check">No drift — page matches baseline</Chip>
+                : <Chip tone={tone} size="sm" icon="alert">{sev} · {changes.length} change{changes.length===1?"":"s"}</Chip>}
+              {res.baselineAt && <span style={{ fontSize:11.5, color:"var(--muted)" }}>baseline {new Date(res.baselineAt).toLocaleString()}</span>}
+              <NeoButton kind="soft" size="sm" icon="refresh" style={{ marginLeft:"auto" }} disabled={busy} onClick={()=>run(true)}>Set new baseline</NeoButton>
+            </div>
+            {changes.map((c,i)=>{
+              const ct=SEV[c.severity]||"gray", col=TT[ct][0];
+              return (
+                <div key={i} style={{ padding:"10px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", borderLeft:"3px solid "+col }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:9, flexWrap:"wrap" }}>
+                    <Chip tone={ct} size="sm">{c.severity}</Chip>
+                    <span style={{ fontSize:12.5, fontWeight:700 }}>{c.field}</span>
+                    {c.rule && <span style={{ fontSize:11, color:"var(--faint)", fontFamily:"var(--mono)" }}>{c.rule}</span>}
+                  </div>
+                  <div style={{ display:"flex", gap:14, marginTop:7, fontSize:12, flexWrap:"wrap" }}>
+                    <div style={{ flex:1, minWidth:160 }}><span style={{ fontSize:10.5, fontWeight:700, color:"var(--faint)", textTransform:"uppercase", letterSpacing:.4 }}>Before</span><div style={{ color:"var(--muted)", marginTop:2, wordBreak:"break-word" }}>{fmtDriftVal(c.before)}</div></div>
+                    <div style={{ flex:1, minWidth:160 }}><span style={{ fontSize:10.5, fontWeight:700, color:"var(--faint)", textTransform:"uppercase", letterSpacing:.4 }}>After</span><div style={{ color:"var(--ink)", marginTop:2, wordBreak:"break-word" }}>{fmtDriftVal(c.after)}</div></div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
+
+      {!res && !busy && <div style={{ padding:"6px 2px", fontSize:13, color:"var(--muted)" }}>Enter a URL and check — the first run for a page captures a baseline; later runs diff against it and flag what changed.</div>}
+    </div>
+  );
+}
+function fmtDriftVal(v){
+  if(v==null) return "—";
+  if(Array.isArray(v)) return v.length?v.join(", "):"—";
+  if(typeof v==="boolean") return v?"true":"false";
+  const s=String(v); return s.length?s:"—";
+}
+
+/* ---------------- IndexNow panel (near Search Console indexing) ----------------
+   Deterministic key + publish instruction, then submit URLs to IndexNow (Bing/Yandex/
+   Naver/Seznam). 403 → keyMissing notice (key file not yet served). */
+function IndexNowPanel({ ctx }) {
+  const s = ctx.site;
+  const API = window.SentinelAPI;
+  const [keyInfo,setKeyInfo] = useState(null);
+  const [keyBusy,setKeyBusy] = useState(false);
+  const [urls,setUrls] = useState("");
+  const [subBusy,setSubBusy] = useState(false);
+  useEffect(()=>{ setKeyInfo(null); setUrls(""); },[s.id]);
+  const getKey = ()=>{
+    setKeyBusy(true);
+    API.indexnowKey(s.id).then(r=>{
+      if(r.error){ ctx.toast("IndexNow: "+r.error,"clay"); return; }
+      setKeyInfo(r);
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setKeyBusy(false));
+  };
+  const copy = (text,label)=>{ try{ navigator.clipboard.writeText(text); ctx.toast((label||"Copied")+" ✓","teal"); }catch(e){ ctx.toast("Select & copy manually","gold"); } };
+  const submit = ()=>{
+    if(!keyInfo||!keyInfo.key){ ctx.toast("Get a key first","gold"); return; }
+    const list=(urls||"").split(/\s+/).map(u=>u.trim()).filter(Boolean);
+    if(!list.length){ ctx.toast("Paste at least one URL","gold"); return; }
+    setSubBusy(true);
+    API.indexnowSubmit(s.id, keyInfo.key, list).then(r=>{
+      if(r.error){ ctx.toast("IndexNow: "+r.error,"clay"); return; }
+      if(r.keyMissing){ ctx.toast("Key file not found at "+(keyInfo.publishAt||"the publish URL")+" — publish it first","gold"); return; }
+      if(r.ok){ ctx.toast((r.submitted!=null?r.submitted:list.length)+" URL(s) submitted to IndexNow ✓","teal"); return; }
+      ctx.toast("IndexNow: "+(r.reason||("status "+(r.status||"?"))),"gold");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setSubBusy(false));
+  };
+  return (
+    <div>
+      <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:10, flexWrap:"wrap" }}>
+        <div style={{ flex:1, minWidth:220 }}>
+          <div style={{ fontSize:13.5, fontWeight:700 }}>IndexNow — instant index across Bing, Yandex &amp; more</div>
+          <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Generate a verification key, publish it once at your site root, then ping IndexNow whenever a page changes — no Search Console required.</div>
+        </div>
+        <NeoButton kind="soft" size="sm" icon={keyBusy?undefined:"lock"} disabled={keyBusy} onClick={getKey}>{keyBusy&&<Icon name="cog" size={15} className="audit-spin" />}{keyBusy?"Generating…":(keyInfo?"Regenerate key":"Get key")}</NeoButton>
+      </div>
+
+      {keyInfo && (
+        <div style={{ padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", marginBottom:12 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:9, flexWrap:"wrap" }}>
+            <span style={{ fontSize:11, fontWeight:700, color:"var(--faint)", textTransform:"uppercase", letterSpacing:.4 }}>Key</span>
+            <code style={{ flex:1, minWidth:160, fontSize:12.5, fontFamily:"var(--mono)", color:"var(--ink)", wordBreak:"break-all" }}>{keyInfo.key}</code>
+            <NeoButton kind="ghost" size="sm" icon="doc" onClick={()=>copy(keyInfo.key,"Key copied")}>Copy</NeoButton>
+          </div>
+          <div style={{ marginTop:10, paddingTop:10, borderTop:"1px solid var(--line-soft)" }}>
+            <div style={{ fontSize:12, color:"var(--ink)", lineHeight:1.5 }}>Serve a file containing the key at:</div>
+            <div style={{ display:"flex", alignItems:"center", gap:9, marginTop:6, flexWrap:"wrap" }}>
+              <code style={{ flex:1, minWidth:160, fontSize:12, fontFamily:"var(--mono)", color:"var(--t-700)", wordBreak:"break-all" }}>{keyInfo.publishAt}</code>
+              <NeoButton kind="ghost" size="sm" icon="doc" onClick={()=>copy(keyInfo.publishAt,"URL copied")}>Copy URL</NeoButton>
+              {keyInfo.keyFile!=null && <NeoButton kind="ghost" size="sm" icon="doc" onClick={()=>copy(keyInfo.keyFile,"File contents copied")}>Copy file</NeoButton>}
+            </div>
+            <div style={{ fontSize:11, color:"var(--faint)", marginTop:6 }}>The file's body must be exactly the key text shown above. Once it's live, submit URLs below.</div>
+          </div>
+        </div>
+      )}
+
+      <textarea value={urls} onChange={e=>setUrls(e.target.value)} placeholder={"https://your-site.com/page-a\nhttps://your-site.com/page-b"} rows={4}
+        style={{ width:"100%", boxSizing:"border-box", padding:"11px 14px", fontSize:12.5, fontFamily:"var(--mono)", lineHeight:1.6, border:"none", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", color:"var(--ink)", resize:"vertical" }} />
+      <div style={{ display:"flex", alignItems:"center", gap:10, marginTop:10, flexWrap:"wrap" }}>
+        <span style={{ fontSize:11.5, color:"var(--muted)" }}>One URL per line — only URLs on this site's host are submitted.</span>
+        <NeoButton kind="primary" size="sm" icon={subBusy?undefined:"upload"} disabled={subBusy||!keyInfo} style={{ marginLeft:"auto" }} onClick={submit}>{subBusy&&<Icon name="cog" size={15} className="audit-spin" />}{subBusy?"Submitting…":"Submit to IndexNow"}</NeoButton>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- Google Search Console screen ---------------- */
 /* First-party ground truth: clicks, impressions, CTR, position by query/page.
    Connect via service-account JSON → pick property → real GSC analytics. */
@@ -3548,6 +3716,14 @@ function GscScreen({ ctx }) {
                       {(drops.drops||[]).length===0 && <div style={{ padding:"10px", fontSize:13, color:"var(--muted)" }}>No significant ranking drops — positions are holding. ✅</div>}
                     </div>
                   )}
+                </div>
+                {/* IndexNow — instant index ping (Bing/Yandex/etc.), independent of GSC */}
+                <div style={{ borderTop:"1px solid var(--line-soft)", paddingTop:14 }}>
+                  <IndexNowPanel ctx={ctx} />
+                </div>
+                {/* Drift — diff a live page vs its saved baseline for silent SEO regressions */}
+                <div style={{ borderTop:"1px solid var(--line-soft)", paddingTop:14 }}>
+                  <DriftPanel ctx={ctx} />
                 </div>
               </div>
             )}
