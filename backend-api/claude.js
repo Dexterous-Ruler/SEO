@@ -442,49 +442,65 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
 // snippet structure (<ol>/<ul> for steps, <table> for comparisons) + an optional
 // FAQ. Niche-aware via sys('aeo.answerBlock', siteId). Returns the parsed object
 // { heading, format, answer, html, faq } or { error }.
+// Parse the answer-block JSON: strip ```json fences, slice the first balanced
+// object, JSON.parse. Returns the normalized block, or null so the caller can
+// retry / salvage. (Strips fences explicitly so trailing prose after the closing
+// ``` can't poison lastIndexOf('}').)
+function parseAnswerBlockJson(txt) {
+  const t = String(txt || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
+  const s = t.indexOf('{'); const e = t.lastIndexOf('}');
+  if (s < 0 || e <= s) return null;
+  try {
+    const o = JSON.parse(t.slice(s, e + 1));
+    if (!o || (!o.heading && !o.answer)) return null;
+    return {
+      heading: String(o.heading || ''), format: String(o.format || ''),
+      answer: String(o.answer || ''), html: String(o.html || ''),
+      faq: Array.isArray(o.faq) ? o.faq.filter((f) => f && f.q && f.a).map((f) => ({ q: String(f.q), a: String(f.a) })) : [],
+    };
+  } catch (_) { return null; }
+}
+
 export async function answerBlock({ url, title, query, currentContent, format, market, siteId }) {
-  const txt = await complete({
-    system: sys('aeo.answerBlock', siteId),
-    promptKey: 'aeo.answerBlock',
-    maxTokens: 2800, temperature: 0.4,
-    messages: [{ role: 'user', content: `TARGET QUERY: ${query || ''}
+  const content = `TARGET QUERY: ${query || ''}
 PAGE TITLE: ${title || '(none)'}
 URL: ${url || ''}${format ? '\nDESIRED FORMAT: ' + format : ''}${market ? `\nLOCALIZE strictly for ${market}: cite ${market} authorities/regulators, ${market} law, local currency and spelling — do NOT default to UK unless the market IS the UK.` : ''}
 
 === CURRENT PAGE CONTENT (ground the answer in THIS; do not invent facts beyond it) ===
 ${(currentContent || '').slice(0, 6000)}
 
-Produce the answer-first block as STRICT JSON.` }],
+Produce the answer-first block as STRICT JSON.`;
+  const call = (maxTokens, extra) => complete({
+    system: sys('aeo.answerBlock', siteId), promptKey: 'aeo.answerBlock',
+    maxTokens, temperature: 0.4,
+    messages: [{ role: 'user', content: content + (extra || '') }],
   });
-  // Primary parse: slice the first { to the last } and JSON.parse.
-  try {
-    const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
-    return {
-      heading: String(o.heading || ''),
-      format: String(o.format || ''),
-      answer: String(o.answer || ''),
-      html: String(o.html || ''),
-      faq: Array.isArray(o.faq) ? o.faq.filter((f) => f && f.q && f.a).map((f) => ({ q: String(f.q), a: String(f.a) })) : [],
-    };
-  } catch (e) {
-    // Salvage: a verbose/truncated block can break JSON.parse — pull the fields
-    // back out of the raw text by regex so we don't lose the whole generation.
-    const grab = (re) => { const m = txt.match(re); return m ? m[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\\\/g, '\\') : ''; };
-    const heading = grab(/"heading"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-    const answer = grab(/"answer"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-    if (!heading && !answer) return { error: 'answerBlock parse failed', _raw: txt.slice(0, 400) };
-    const fmt = grab(/"format"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-    const html = grab(/"html"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-    const faq = [];
-    const faqBlock = txt.match(/"faq"\s*:\s*\[([\s\S]*?)\]/);
-    if (faqBlock) {
-      const re = /\{\s*"q"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"a"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}/g;
-      let m; while ((m = re.exec(faqBlock[1])) !== null) {
-        faq.push({ q: m[1].replace(/\\"/g, '"').replace(/\\n/g, '\n'), a: m[2].replace(/\\"/g, '"').replace(/\\n/g, '\n') });
-      }
-    }
-    return { heading, format: fmt, answer, html, faq, _salvaged: true };
+  // Primary call. If the JSON is unparseable (almost always truncation), retry
+  // ONCE with more token headroom + a compactness nudge before regex-salvage.
+  let txt = await call(2800, '');
+  let parsed = parseAnswerBlockJson(txt);
+  if (!parsed) {
+    txt = await call(4096, '\n\nReturn COMPACT, COMPLETE JSON only — no markdown fences; keep the html concise so the JSON closes.');
+    parsed = parseAnswerBlockJson(txt);
   }
+  if (parsed) return parsed;
+  // Final salvage: regex-recover the fields from the raw text so a verbose/truncated
+  // block still yields usable content instead of a hard error.
+  const grab = (re) => { const m = txt.match(re); return m ? m[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\\\/g, '\\') : ''; };
+  const heading = grab(/"heading"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  const answer = grab(/"answer"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (!heading && !answer) return { error: 'answerBlock parse failed', _raw: txt.slice(0, 400) };
+  const fmt = grab(/"format"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  const html = grab(/"html"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  const faq = [];
+  const faqBlock = txt.match(/"faq"\s*:\s*\[([\s\S]*?)\]/);
+  if (faqBlock) {
+    const re = /\{\s*"q"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"a"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}/g;
+    let m; while ((m = re.exec(faqBlock[1])) !== null) {
+      faq.push({ q: m[1].replace(/\\"/g, '"').replace(/\\n/g, '\n'), a: m[2].replace(/\\"/g, '"').replace(/\\n/g, '\n') });
+    }
+  }
+  return { heading, format: fmt, answer, html, faq, _salvaged: true };
 }
 
 // AEO snippet-format classifier. Given a QUERY (+ optional SERP features),
