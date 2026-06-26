@@ -282,23 +282,34 @@ async function serverEgressIp() {
   return null;
 }
 
-// Representative sample inputs for the "Test this prompt" preview. Each runs the
-// prompt as the SYSTEM with this user message, on the right engine.
-const PROMPT_SAMPLES = {
-  'content.rules': { engine: 'claude', user: 'Write a meta description (140-160 characters) for a UK page titled "Divorce Solicitors London | Go Legal". Output only the meta description.' },
-  'content.cluster': { engine: 'claude', user: 'Site: Go Legal. Niche: UK legal.\nKeywords (with volume):\ndivorce solicitor (9900)\ndivorce lawyer (8100)\nmake a will (3300)\nwill writing service (2400)\nemployment solicitor (1800)\nReturn the clustered JSON.' },
-  'content.brief': { engine: 'claude', user: 'KEYWORD: uk evisa login\nINTENT: informational\n\n=== GROUNDED SUMMARY ===\nAn eVisa is a digital immigration status replacing BRPs. Users sign in to a UKVI account with their document, DOB and contact details.\n\n=== SOURCES ===\n[1] GOV.UK — https://www.gov.uk/evisa\n\n=== INTERNAL-LINK CANDIDATES ===\nUK visa fees → /visa-fees\n\nWrite the UK content brief as JSON.' },
-  'research.ukScope': { engine: 'perplexity', user: 'Briefly: what is the standard processing time and fee for a passport renewal?' },
-  'research.gather': { engine: 'perplexity', user: 'Topic: UK skilled worker visa\n\nGive the key current facts, recent changes, and main questions UK readers ask.' },
-  'research.trending': { engine: 'perplexity', user: 'Niche: UK visas and immigration. What is trending in the UK this week?' },
-  'research.facts': { engine: 'perplexity', user: 'Topic: UK spouse visa. List the current UK facts most useful to cite.' },
-  'seo.internalLinks': { engine: 'claude', user: 'SOURCE PAGE: Divorce process explained (/divorce-process)\n\nSOURCE TEXT: A guide to the UK divorce process, financial settlements and child arrangements.\n\nCANDIDATE TARGET PAGES:\n1. Financial settlement guide → /financial-settlement\n2. Child arrangements → /child-arrangements\n\nReturn the JSON array.' },
-  'seo.externalLinks': { engine: 'claude', user: 'PAGE URL: /uk-spouse-visa\nTITLE: UK Spouse Visa Guide\nNICHE: UK immigration\n\nPAGE TEXT (excerpt):\nThe UK spouse visa lets partners of British citizens live in the UK. Applicants must meet a financial requirement and apply through GOV.UK. Processing times are published by UK Visas and Immigration.\n\nReturn the JSON array of authoritative external-link suggestions.' },
-  'seo.pageFacts': { engine: 'claude', user: 'URL: /uk-spouse-visa\nTITLE: UK Spouse Visa Guide\n\nPAGE TEXT: The UK spouse visa lets partners of British citizens live in the UK. It is valid for 33 months and requires meeting a financial requirement.\n\nReturn the JSON.' },
-  'report.narrate': { engine: 'claude', user: 'Site: Go Legal\n\nComputed metrics:\n{"trafficValue":{"totalEstValue":4200,"currency":"GBP","valueAtRisk":900},"audit":{"latestComposite":78,"delta":-3},"search":{"clicks28":1200}}\n\nWrite the weekly executive briefing.' },
-  'plan.project': { engine: 'claude', user: 'Site: Go Legal (https://go-legal.ai)\nNiche: UK legal\nGoals: reach 100/100 Lighthouse + improve content.\nCurrent scores: {"performance":62,"seo":85}\n\nWrite the plan.' },
-  'chat.assistant': { engine: 'claude', user: 'Give me one concrete, high-impact SEO action for my UK legal site this week.' },
-};
+// Representative sample inputs for the "Test this prompt" preview, DERIVED FROM THE
+// SELECTED SITE so the test reflects the site you're working on (not a hardcoded
+// go-visa/go-legal topic). Each runs the prompt as the SYSTEM with this user message,
+// on the right engine. `site` may be null (falls back to neutral wording).
+function sampleFor(key, site) {
+  const s = site || {};
+  const name = s.name || 'your site';
+  const url = s.url || '';
+  const niche = (s.stack && s.stack.type) || s.niche || 'this site’s topic';
+  const topic = niche;
+  const mkt = (s.semrush_db ? String(s.semrush_db) : 'uk').toUpperCase();
+  const M = {
+    'content.rules': { engine: 'claude', user: `Write a meta description (140-160 characters) for a ${mkt} ${name} page about ${topic}. Output only the meta description.` },
+    'content.cluster': { engine: 'claude', user: `Site: ${name}. Niche: ${niche} (${mkt}).\nKeywords (with volume):\n${topic} (2900)\nbest ${topic} (1600)\n${topic} cost (880)\nhow to choose ${topic} (520)\n${topic} explained (390)\nReturn the clustered JSON.` },
+    'content.brief': { engine: 'claude', user: `KEYWORD: ${topic}\nINTENT: informational\n\n=== GROUNDED SUMMARY ===\nA concise, factual overview of ${topic} for a ${mkt} audience on ${name}.\n\n=== SOURCES ===\n[1] Official ${mkt} source\n\n=== INTERNAL-LINK CANDIDATES ===\nRelated guide → /guide\n\nWrite the ${mkt} content brief as JSON for ${name}.` },
+    'research.ukScope': { engine: 'perplexity', user: `Briefly, for a ${mkt} audience: give the key current facts about ${topic}.` },
+    'research.gather': { engine: 'perplexity', user: `Topic: ${topic} (${mkt})\n\nGive the key current facts, recent changes, and the main questions ${mkt} readers ask.` },
+    'research.trending': { engine: 'perplexity', user: `Niche: ${niche} (${mkt}). What is trending this week?` },
+    'research.facts': { engine: 'perplexity', user: `Topic: ${topic} (${mkt}). List the current facts most useful to cite.` },
+    'seo.internalLinks': { engine: 'claude', user: `SOURCE PAGE: ${topic} explained (/guide)\n\nSOURCE TEXT: A ${mkt} guide to ${topic} for ${name} readers, covering the basics, costs and how to choose.\n\nCANDIDATE TARGET PAGES:\n1. ${topic} costs → /costs\n2. How to choose ${topic} → /choose\n\nReturn the JSON array.` },
+    'seo.externalLinks': { engine: 'claude', user: `PAGE URL: /guide\nTITLE: ${topic} guide\nNICHE: ${niche}\n\nPAGE TEXT (excerpt):\nA ${mkt} overview of ${topic} for ${name} readers, with the key facts and where official guidance is published.\n\nReturn the JSON array of authoritative external-link suggestions.` },
+    'seo.pageFacts': { engine: 'claude', user: `URL: /guide\nTITLE: ${topic} guide\n\nPAGE TEXT: A ${mkt} overview of ${topic} for ${name} readers, including the key facts, requirements and typical costs.\n\nReturn the JSON.` },
+    'report.narrate': { engine: 'claude', user: `Site: ${name}\n\nComputed metrics:\n{"trafficValue":{"totalEstValue":4200,"currency":"GBP","valueAtRisk":900},"audit":{"latestComposite":78,"delta":-3},"search":{"clicks28":1200}}\n\nWrite the weekly executive briefing.` },
+    'plan.project': { engine: 'claude', user: `Site: ${name}${url ? ' (' + url + ')' : ''}\nNiche: ${niche} (${mkt})\nGoals: reach 100/100 Lighthouse + improve content.\nCurrent scores: {"performance":62,"seo":85}\n\nWrite the plan.` },
+    'chat.assistant': { engine: 'claude', user: `Give me one concrete, high-impact SEO action for ${name} this week.` },
+  };
+  return M[key] || { engine: 'claude', user: `Briefly demonstrate how you respond to a typical request for ${name}.` };
+}
 
 // --- route handlers --------------------------------------------------------
 const routes = {
@@ -1481,7 +1492,11 @@ const routes = {
   'POST /prompt-test': async (body) => {
     const { key, content } = body;
     if (!key || content == null) return { error: 'key and content required' };
-    const sample = PROMPT_SAMPLES[key] || { engine: 'claude', user: 'Briefly demonstrate how you respond to a typical request.' };
+    // Run the preview AGAINST THE SELECTED SITE: load it, derive a site-relevant sample,
+    // and prepend the active-site context the real flows inject — so testing fast-ila
+    // reflects fast-ila, not whatever site the global prompt was authored for.
+    const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    const sample = sampleFor(key, site);
     try {
       // Honour the per-prompt model/temperature (use the unsaved values if sent).
       const model = body.model !== undefined ? body.model : prompts.modelFor(key);
@@ -1489,10 +1504,11 @@ const routes = {
       if (sample.engine === 'perplexity') {
         if (!perplexity.hasKey()) return { error: 'Perplexity not configured — cannot test research prompts.' };
         const r = await perplexity.ask({ system: content, user: sample.user, model: model || 'fast', temperature: temperature != null ? temperature : undefined, maxTokens: 500 });
-        return { output: r.answer, engine: 'perplexity', model: model || 'fast', sources: r.sources, cost: r.cost };
+        return { output: r.answer, engine: 'perplexity', model: model || 'fast', sources: r.sources, cost: r.cost, site: site ? site.name : null };
       }
-      const txt = await claude.complete({ system: [{ type: 'text', text: content }], messages: [{ role: 'user', content: sample.user }], maxTokens: 800, model: model || undefined, temperature: temperature != null ? temperature : 0.3 });
-      return { output: txt, engine: 'claude', model: model || 'default' };
+      const siteBlock = site ? `ACTIVE SITE: ${site.name}${site.url ? ' (' + site.url + ')' : ''}${site.stack && site.stack.type ? ' — ' + site.stack.type : ''}. Target market: ${(site.semrush_db || 'uk').toString().toUpperCase()}. Write specifically for THIS site.\n\n` : '';
+      const txt = await claude.complete({ system: [{ type: 'text', text: siteBlock + content }], messages: [{ role: 'user', content: sample.user }], maxTokens: 800, model: model || undefined, temperature: temperature != null ? temperature : 0.3 });
+      return { output: txt, engine: 'claude', model: model || 'default', site: site ? site.name : null };
     } catch (e) { return { error: e.message }; }
   },
 

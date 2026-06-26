@@ -238,6 +238,17 @@ function SiteSwitcher({ ctx }) {
               );
             })}
             <div style={{ height:1, background:"var(--line-soft)", margin:"6px 8px" }} />
+            <button className="nav-item" onClick={()=>{setOpen(false);ctx.goto("airtable");}}
+              style={{ width:"100%", display:"flex", alignItems:"center", gap:11, padding:"10px 12px", borderRadius:13, background:"transparent" }}>
+              <div style={{ width:34, height:34, borderRadius:11, background:"var(--t-50)", display:"grid", placeItems:"center", color:"var(--t-700)", flexShrink:0 }}>
+                <Icon name="layers" size={17} />
+              </div>
+              <div style={{ flex:1, textAlign:"left", minWidth:0 }}>
+                <div style={{ fontSize:13.5, fontWeight:700, color:"var(--t-700)" }}>Airtable</div>
+                <div style={{ fontSize:11, color:"var(--muted)" }}>Create content — push &amp; manage briefs</div>
+              </div>
+              <Icon name="chevR" size={16} style={{ color:"var(--faint)" }} />
+            </button>
             <button className="nav-item" onClick={()=>{setOpen(false);ctx.openAddSite(null);}}
               style={{ width:"100%", display:"flex", alignItems:"center", gap:11, padding:"10px 12px", borderRadius:13, background:"transparent" }}>
               <div style={{ width:34, height:34, borderRadius:11, background:"var(--t-50)", display:"grid", placeItems:"center", color:"var(--t-700)", flexShrink:0 }}>
@@ -1140,7 +1151,7 @@ function AdminScreen({ ctx }) {
   const runTest = (p)=>{
     const content=edits[p.key]!=null?edits[p.key]:p.content;
     setTesting(p.key);
-    API.promptTest(p.key, content, mdl(p)||null, tmp(p)===""?null:tmp(p)).then(r=>{ if(r.error){ ctx.toast("Test: "+r.error,"clay"); return; } setTests(t=>({...t,[p.key]:r})); }).catch(e=>ctx.toast("Test: "+e.message,"clay")).finally(()=>setTesting(""));
+    API.promptTest(p.key, content, mdl(p)||null, tmp(p)===""?null:tmp(p), s.id).then(r=>{ if(r.error){ ctx.toast("Test: "+r.error,"clay"); return; } setTests(t=>({...t,[p.key]:r})); }).catch(e=>ctx.toast("Test: "+e.message,"clay")).finally(()=>setTesting(""));
   };
   const fmtTime = (iso)=>{ try{ return new Date(iso).toLocaleString("en-GB",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"}); }catch(e){ return iso; } };
 

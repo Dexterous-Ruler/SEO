@@ -743,6 +743,15 @@ function UxActivationScreen({ ctx }) {
         <NeoButton kind="soft" icon={loading ? undefined : "refresh"} disabled={loading} onClick={load}>{loading && <Icon name="cog" size={15} className="audit-spin" />}Re-probe</NeoButton>
       </PageHead>
 
+      <Well style={{ marginBottom: 16, background: "var(--t-50)" }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: "var(--t-800)", marginBottom: 6 }}>This is the setup switch for Experience Monitor</div>
+        <div style={{ fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.55 }}>
+          Arming turns ON a privacy-first <b>real-user beacon</b> (5% sampling, consent-gated, anonymous — no PII, no session replay). Once a site collects data, the <b>Experience Monitor</b> screen lists the UX/conversion defects it finds (broken CTAs, dead links, tiny tap-targets, JS errors…) ranked by organic clicks at risk — that's where you click <b>Apply</b> or <b>Send to review</b> (fixes go through your normal Approve Changes queue).
+          <br /><br />
+          <b>Why a site may not arm</b> — all three must be true: <b>1)</b> the server master switch <code>RUM_ENABLED</code> is on; <b>2)</b> the site is <b>signed off</b> for compliance (DPIA — currently a manual step, shown as the “Not signed off” chip); and <b>3)</b> a <b>consent cookie</b> is detected (a CMP like Complianz, or the first-party banner below). Sites missing #2 or #3 stay disabled by design — it's a compliance gate, not a fault.
+        </div>
+      </Well>
+
       {probe && probe.rumEnabled === false && (
         <Well style={{ background: "var(--gold-bg)", marginBottom: 16 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700, color: "#7E5A14" }}>

@@ -296,7 +296,7 @@ export async function narrate({ siteName, metrics, siteId }) {
 export async function internalLinkSuggestions({ sourceUrl, sourceTitle, sourceText, candidates, siteId }) {
   const list = (candidates || []).slice(0, 150).map((c, i) => `${i + 1}. ${c.title} → ${c.url}`).join('\n');
   const txt = await complete({
-    system: sys('seo.internalLinks'),
+    system: sys('seo.internalLinks', siteId),
     promptKey: 'seo.internalLinks',
     maxTokens: 1200,
     messages: [{ role: 'user', content: `SOURCE PAGE: ${sourceTitle || ''} (${sourceUrl})\n\nSOURCE TEXT (excerpt):\n${(sourceText || '').slice(0, 4500)}\n\nCANDIDATE TARGET PAGES (link only to these):\n${list}\n\nBe generous but precise: propose EVERY genuinely-relevant, helpful in-content link (aim for the 4-8 most useful) — only skip a candidate if linking would be forced or off-topic. The anchor MUST be a phrase that appears verbatim in the SOURCE TEXT above (so it can be inserted), 2-6 words, descriptive. Return the JSON array of internal-link suggestions.` }],
@@ -329,28 +329,12 @@ export async function externalLinkSuggestions({ url, title, text, niche, siteId 
   } catch (e) { return []; }
 }
 
-// Link-building OUTREACH email drafter. Personalised pitch for one prospect,
-// based on the tactic (competitor gap / broken link / unlinked mention). Honest,
-// concise, non-spammy. Returns { subject, body }. Sending stays human-approved.
-export async function outreachEmail({ siteName, siteUrl, niche, prospectDomain, tactic, targetPage, siteId }) {
-  const txt = await complete({
-    system: sys('backlinks.outreach', siteId),
-    promptKey: 'backlinks.outreach',
-    maxTokens: 700,
-    messages: [{ role: 'user', content: `OUR SITE: ${siteName || ''} (${siteUrl || ''})\nNICHE: ${niche || ''}\nPROSPECT DOMAIN: ${prospectDomain}\nTACTIC: ${tactic}\nOUR RELEVANT PAGE: ${targetPage || '(suggest the most relevant one)'}\n\nWrite the outreach email. Return ONLY JSON: {"subject":"...","body":"..."}.` }],
-  });
-  try {
-    const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
-    return { subject: String(o.subject || '').slice(0, 160), body: String(o.body || '') };
-  } catch (e) { return { subject: '', body: txt.trim() }; }
-}
-
 // AI-SEO fact extraction. Pull the citable, extractable facts from a page and
 // propose a FAQPage JSON-LD + concrete factual additions that make the page
 // easier for LLMs/answer engines to cite. Returns { facts, faqs, suggestions }.
 export async function extractCitableFacts({ url, title, text, niche, siteId }) {
   const txt = await complete({
-    system: sys('seo.pageFacts'),
+    system: sys('seo.pageFacts', siteId),
     promptKey: 'seo.pageFacts',
     maxTokens: 1100,
     messages: [{ role: 'user', content: `URL: ${url}\nTITLE: ${title || ''}\nNICHE: ${niche || ''}\n\nPAGE TEXT (excerpt):\n${(text || '').slice(0, 6000)}\n\nReturn the JSON.` }],
