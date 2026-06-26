@@ -202,6 +202,7 @@
     contentDecayBrief(page) { return engine("/content-decay-brief", { page }); },
     contentRefresh(siteId, page, apply) { return engine("/content-refresh", { siteId, page, apply: !!apply }); },
     contentRefreshUndo(siteId, page) { return engine("/content-refresh-undo", { siteId, page }); },
+    contentRewrite(siteId, page, opts) { return engine("/content-rewrite", Object.assign({ siteId, page }, opts || {})); },
     refreshBlocksPurge(siteId) { return engine("/refresh-blocks-purge", { siteId }); },
     pageOptimizeImages(siteId, page, apply) { return engine("/page-optimize-images", { siteId, page, apply: !!apply }); },
     async listGeoRuns(siteId) { return sbSelect("geo_runs", "site_id=eq." + siteId + "&select=*&order=created_at.desc&limit=20"); },

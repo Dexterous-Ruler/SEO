@@ -2099,6 +2099,62 @@ const routes = {
     return { status: 'removed', via: 'content' };
   },
 
+  // Content Decay → full REWRITE of a decaying page (reviewed: apply:false previews, apply:true
+  // writes). Generates the refresh brief if not supplied, rewrites the EXISTING post content via
+  // Claude per the brief, and (apply) writes it back to the SAME WordPress post — gated on
+  // write-armed; WordPress keeps a revision so it's reversible. Builder pages fall back to manual.
+  'POST /content-rewrite': async (body) => {
+    const page = body.page || {};
+    const pageUrl = page.url || page.page || body.url;
+    if (!pageUrl) return { error: 'No page specified' };
+    const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
+    const wp = new WordPressClient(creds);
+    let found = (page._id && page._type) ? { id: page._id, type: page._type } : null;
+    if (!found) { try { found = await wp.resolvePostByUrl(pageUrl); } catch (e) {} }
+    if (!found || !found.id) return { status: 'manual', reason: 'Could not match this URL to a WordPress post/page — rewrite it in the editor using the Brief.' };
+    // Apply a REVIEWED rewrite directly — publish exactly what was previewed (no re-generation).
+    if (body.apply && body.html && String(body.html).trim().length > 80) {
+      if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then apply the rewrite.' };
+      const clean = String(body.html).replace(/^\s*```(?:html)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+      const upd = await wp.update(found.type, found.id, { content: clean }, { force: true });
+      if (upd && upd.dryRun) return { status: 'dry-run' };
+      const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=modified`).catch(() => null);
+      const indexed = await submitOneForIndex(body.siteId, pageUrl);
+      if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'You', icon: 'sparkles', text: `Rewrote & refreshed “${page.title || pageUrl}”`, meta: 'reviewed full rewrite + re-indexed (WordPress revision saved)' }).catch(() => {});
+      return { status: 'applied', postId: found.id, url: pageUrl, indexed, modified: after && after.modified, reversible: 'WordPress keeps a revision — restore the previous version from the post’s Revisions if needed.' };
+    }
+    const builder = (site && site.stack && site.stack.builder) || '';
+    if (/elementor|beaver|divi|bricks|wpbakery/i.test(builder)) {
+      return { status: 'manual', builder, reason: `This is a ${builder} page — a full rewrite can't be written into page-builder content automatically. Use the Brief and edit in ${builder}.` };
+    }
+    const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content,title`).catch(() => null);
+    const rawHtml = (post && post.content && (post.content.raw != null ? post.content.raw : '')) || '';
+    const rawText = rawHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (rawText.length < 60) return { status: 'manual', reason: 'This page has too little editable content to rewrite automatically (likely a page-builder layout) — use the Brief and edit it directly.' };
+    const title = (post && post.title && (post.title.raw || post.title.rendered)) || page.title || '';
+    let brief = body.brief;
+    if (!brief) { try { brief = await claude.decayBrief({ page, pageContext: { excerpt: rawText.slice(0, 4000) }, siteId: body.siteId }); } catch (e) { brief = ''; } }
+    let newHtml = '';
+    try { newHtml = await claude.refreshArticle({ page: { ...page, title }, currentContent: rawHtml || rawText, brief, siteId: body.siteId }); }
+    catch (e) { return { error: 'Rewrite failed: ' + e.message }; }
+    const clean = String(newHtml || '').replace(/^\s*```(?:html)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    if (clean.length < 80) return { error: 'The rewrite came back empty — try again.' };
+    if (!body.apply) {
+      return { status: 'preview', postId: found.id, type: found.type, title, brief, newHtml: clean,
+        oldWords: rawText.split(/\s+/).filter(Boolean).length, newWords: clean.replace(/<[^>]+>/g, ' ').split(/\s+/).filter(Boolean).length };
+    }
+    if (site && site.write_armed === false && !body.force) {
+      return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then apply the rewrite.' };
+    }
+    const upd = await wp.update(found.type, found.id, { content: clean }, { force: true });
+    if (upd && upd.dryRun) return { status: 'dry-run', newHtml: clean };
+    const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=modified`).catch(() => null);
+    const indexed = await submitOneForIndex(body.siteId, pageUrl);
+    if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'sparkles', text: `Rewrote & refreshed “${title || pageUrl}”`, meta: 'full content rewrite + re-indexed (WordPress revision saved)' }).catch(() => {});
+    return { status: 'applied', postId: found.id, url: pageUrl, indexed, modified: after && after.modified, reversible: 'WordPress keeps a revision — restore the previous version from the post’s Revisions if needed.' };
+  },
+
   // Site-wide cleanup: strip any legacy freshness block from EVERY post/page that has one.
   // Calls the mu-plugin's idempotent remove on each id (a true no-op where there's no block,
   // so untouched pages aren't re-saved or re-dated). Removes both classic + Elementor blocks.
@@ -2639,7 +2695,7 @@ const REQ_TIMEOUT_MS = Number(process.env.REQ_TIMEOUT_MS) || 280000; // safety n
 const HEAVY_ROUTES = new Set([
   'POST /content-intel', 'POST /generate-content', 'POST /generate-schema', 'POST /generate-css',
   'POST /ai-seo-facts', 'POST /internal-links', 'POST /external-links', 'POST /apply-link',
-  'POST /content-decay', 'POST /content-decay-brief', 'POST /content-refresh', 'POST /content-brief', 'POST /project-plan',
+  'POST /content-decay', 'POST /content-decay-brief', 'POST /content-refresh', 'POST /content-rewrite', 'POST /content-brief', 'POST /project-plan',
   'POST /narrate', 'POST /scorecard', 'POST /weekly-briefing', 'POST /research', 'POST /auditPage',
   'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
   'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',

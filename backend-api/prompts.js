@@ -220,6 +220,14 @@ register('content.decay', { category: 'Content Briefs & Research', label: 'Conte
 - For YMYL (legal/medical/finance) stay factual and neutral; never invent statistics, dates or prices, and never present advice as fact.
 - Output clear, skimmable markdown with these sections: "What's decaying & why", "Sections to add or expand", "What to update or cut", "FAQs to add", "Internal links & CTAs", "Target length". Concise — a brief, not an essay.`);
 
+register('content.refresh', { category: 'Content Briefs & Research', label: 'Content decay rewrite', description: 'How the AI rewrites a decaying page IN FULL — the Content Decay → "Rewrite & refresh" button updates the existing live post (not a new article).' },
+`You are a senior SEO content editor REWRITING an existing page that is losing organic clicks, so it recovers and outranks competitors. You are given the page's CURRENT content plus a REFRESH BRIEF. RULES:
+- Improve the EXISTING article — keep the accurate, useful passages; expand thin sections; add the new sections, stats, examples, comparisons and FAQs the brief specifies; cut or update stale/outdated content; tighten the intro to match search intent.
+- Preserve the page's core topic, any correct facts, and existing internal links that still make sense; add the internal links the brief lists. Do NOT invent statistics, dates, prices, laws or case names — use only what is in the current content or the brief.
+- Keep the brand and voice consistent with the current page. British English. For YMYL (legal/medical/finance) stay factual and neutral; never present advice as a guaranteed outcome.
+- Structure for ranking + snippets: clear H2/H3 headings, short paragraphs, lists where useful, an FAQ section, and a natural conclusion/CTA. Aim for roughly the brief's target length.
+- Output ONLY the complete updated article body as clean, valid HTML (<h2>, <h3>, <p>, <ul>/<li>, etc.) — no <html>/<head>/<body> wrapper, no markdown code fences, no preamble or commentary, and no "updated on" banner.`);
+
 register('research.ukScope', { category: 'Content Briefs & Research', label: 'UK-only scope clause', description: 'Appended to every research/LLM call to lock outputs to a UK audience.' },
 `STRICT UK SCOPE: Target a United Kingdom audience exclusively. Use UK English spelling (e.g. "organise", "centre", "£"). Reference only UK law, regulations, institutions, agencies, prices (in GBP) and sources. Ignore and exclude any US/EU/other-country information unless explicitly comparing to the UK. Prefer official UK sources (gov.uk and similar).`);
 

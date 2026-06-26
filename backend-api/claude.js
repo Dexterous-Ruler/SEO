@@ -235,6 +235,32 @@ ${(pageContext && pageContext.excerpt) || '(could not fetch the live page)'}`,
   return txt;
 }
 
+// Full REWRITE of a decaying page — expand/update the EXISTING article per the decay
+// refresh brief (NOT a new article, NOT a bolt-on block). Returns the complete updated
+// post body as HTML. Editable prompt: content.refresh.
+export async function refreshArticle({ page, currentContent, brief, siteId }) {
+  const p = page || {};
+  const txt = await complete({
+    system: sys('content.refresh', siteId), promptKey: 'content.refresh',
+    maxTokens: 6000, temperature: 0.5,
+    messages: [{
+      role: 'user',
+      content: `Rewrite and improve this EXISTING page so it recovers its lost rankings. Keep what already works; expand, update and restructure per the refresh brief. Do NOT start from scratch and do NOT add a visible "updated on" banner.
+
+PAGE: ${p.title || ''} — ${p.url || p.page || ''}
+
+=== REFRESH BRIEF (the plan to execute) ===
+${brief || '(no brief supplied — improve depth, freshness, structure, FAQs and internal links)'}
+
+=== CURRENT PAGE CONTENT (rewrite/expand THIS; do not invent facts beyond it and the brief) ===
+${(currentContent || '').slice(0, 16000)}
+
+Output ONLY the complete, updated article body as clean HTML. No preamble, no code fences, no commentary.`,
+    }],
+  });
+  return txt;
+}
+
 // block to PREPEND to a decaying page: an updated lede + a few targeted points
 // that re-establish relevance for the queries it's losing. Grounded strictly in
 // the existing page content — no invented facts (critical for YMYL/legal).
@@ -404,4 +430,4 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
   } catch (e) { return { title: keyword, error: 'brief synthesis parse failed', sources: research.sources || [], _raw: txt.slice(0, 400) }; }
 }
 
-export default { metaDescription, titleRewrite, altText, draftFix, narrate, internalLinkSuggestions, extractCitableFacts, projectPlan, clusterKeywords, synthesizeContentBrief, decayBrief, complete };
+export default { metaDescription, titleRewrite, altText, draftFix, narrate, internalLinkSuggestions, extractCitableFacts, projectPlan, clusterKeywords, synthesizeContentBrief, decayBrief, refreshArticle, complete };

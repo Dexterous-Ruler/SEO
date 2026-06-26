@@ -2774,6 +2774,26 @@ function GscScreen({ ctx }) {
   const undoRefresh = (d)=>{
     API.contentRefreshUndo(s.id, d).then(r=>{ ctx.toast(r.status==="removed"?"Refresh removed from the page":(r.reason||"Nothing to undo"),"teal"); setRefreshFor(null); }).catch(e=>ctx.toast(e.message,"clay"));
   };
+  // Full REWRITE of a decaying page: preview the Claude-rewritten content (review), then publish to the live post.
+  const [rewriteFor,setRewriteFor] = useState(null);  // { page, loading?|applying?, preview?|manual?|applied?|error? }
+  const doRewrite = (d)=>{
+    setRewriteFor({ page:d.page, loading:true });
+    API.contentRewrite(s.id, d, {}).then(r=>{
+      if(r.error){ setRewriteFor({ page:d.page, error:r.error }); ctx.toast("Rewrite: "+r.error,"clay"); return; }
+      if(r.status==="manual"){ setRewriteFor({ page:d.page, manual:r }); ctx.toast(r.reason||"Edit this page in your builder","gold"); return; }
+      setRewriteFor({ page:d.page, preview:r });
+    }).catch(e=>{ setRewriteFor({ page:d.page, error:e.message }); ctx.toast(e.message,"clay"); });
+  };
+  const applyRewrite = (d)=>{
+    const prev = rewriteFor && rewriteFor.preview; if(!prev) return;
+    setRewriteFor(f=>({ ...(f||{}), applying:true }));
+    API.contentRewrite(s.id, d, { html:prev.newHtml, brief:prev.brief, apply:true }).then(r=>{
+      if(r.error){ ctx.toast("Apply: "+r.error,"clay"); setRewriteFor(f=>({ ...(f||{}), applying:false })); return; }
+      if(r.status==="blocked"){ ctx.toast(r.reason||"Site is read-only — arm writes first","gold"); setRewriteFor(f=>({ ...(f||{}), applying:false })); return; }
+      setRewriteFor({ page:d.page, applied:r });
+      ctx.toast("Rewrote & refreshed the live page"+(r.indexed&&r.indexed.ok?" · re-indexed":"")+" ✓","teal");
+    }).catch(e=>{ ctx.toast(e.message,"clay"); setRewriteFor(f=>({ ...(f||{}), applying:false })); });
+  };
   const doRefreshAll = async ()=>{
     const pages=(decay&&decay.pages)||[]; if(!pages.length) return;
     let applied=0,manual=0,blocked=0,imgs=0,skipped=0;
@@ -3080,6 +3100,7 @@ function GscScreen({ ctx }) {
                           <span style={{ marginLeft:"auto", display:"inline-flex", gap:7 }}>
                             <NeoButton kind="primary" size="sm" icon={(refreshFor&&refreshFor.page===d.page&&refreshFor.loading)?undefined:"sparkles"} disabled={refreshFor&&refreshFor.page===d.page&&refreshFor.loading} onClick={()=>doRefresh(d)}>{refreshFor&&refreshFor.page===d.page&&refreshFor.loading&&<Icon name="cog" size={14} className="audit-spin" />}{refreshFor&&refreshFor.page===d.page&&refreshFor.loading?(refreshFor.step==="images"?"Optimising images…":"Refreshing…"):"Refresh & optimise"}</NeoButton>
                             <NeoButton kind="ghost" size="sm" icon="doc" onClick={()=>genBrief(d)}>Brief</NeoButton>
+                            <NeoButton kind="soft" size="sm" icon={(rewriteFor&&rewriteFor.page===d.page&&(rewriteFor.loading||rewriteFor.applying))?undefined:"sparkles"} disabled={rewriteFor&&rewriteFor.page===d.page&&(rewriteFor.loading||rewriteFor.applying)} onClick={()=>doRewrite(d)} title="Claude rewrites & expands this existing page per a fresh brief — you review it, then it updates the SAME live post">{rewriteFor&&rewriteFor.page===d.page&&rewriteFor.loading&&<Icon name="cog" size={14} className="audit-spin" />}{rewriteFor&&rewriteFor.page===d.page&&rewriteFor.loading?"Rewriting…":"Rewrite & refresh"}</NeoButton>
                           </span>
                         </div>
                         {/* One-click refresh result */}
@@ -3121,6 +3142,25 @@ function GscScreen({ ctx }) {
                           <div style={{ marginTop:10, padding:"12px 14px", background:"var(--surface)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)" }}>
                             {briefFor.loading ? <div style={{ fontSize:12.5, color:"var(--muted)", display:"flex", alignItems:"center", gap:8 }}><Icon name="cog" size={14} className="audit-spin" />Claude is writing a refresh brief…</div>
                               : <div className="md" style={{ fontSize:12.5 }} dangerouslySetInnerHTML={{ __html:(window.SentinelHelpers&&window.SentinelHelpers.renderMarkdown(briefFor.brief))||briefFor.brief }} />}
+                          </div>
+                        )}
+                        {rewriteFor && rewriteFor.page===d.page && (rewriteFor.loading||rewriteFor.error||rewriteFor.manual||rewriteFor.applied||rewriteFor.preview) && (
+                          <div style={{ marginTop:10, padding:"12px 14px", background:"var(--surface)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", borderLeft:"3px solid var(--t-500)" }}>
+                            {rewriteFor.loading && <div style={{ fontSize:12.5, color:"var(--muted)", display:"flex", alignItems:"center", gap:8 }}><Icon name="cog" size={14} className="audit-spin" />Claude is rewriting this page from a fresh brief…</div>}
+                            {rewriteFor.error && <div style={{ fontSize:12.5, color:"var(--clay)" }}>{rewriteFor.error}</div>}
+                            {rewriteFor.manual && <div style={{ fontSize:12.5, color:"var(--gold)" }}>{rewriteFor.manual.reason}</div>}
+                            {rewriteFor.applied && <div style={{ fontSize:12.5, fontWeight:700, color:"var(--teal)", display:"flex", alignItems:"center", gap:7, flexWrap:"wrap" }}><Icon name="check" size={14} />Rewrote the live page (previous version saved as a WordPress revision){rewriteFor.applied.indexed&&rewriteFor.applied.indexed.ok?" · re-indexed":""}. <a href={d.page} target="_blank" style={{ color:"var(--t-700)" }}>View page →</a></div>}
+                            {rewriteFor.preview && (<>
+                              <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:7, flexWrap:"wrap" }}>
+                                <span style={{ fontSize:12.5, fontWeight:700 }}>Rewrite preview — review before it goes live</span>
+                                <Chip tone="gray" size="sm">{rewriteFor.preview.oldWords}→{rewriteFor.preview.newWords} words</Chip>
+                                <span style={{ marginLeft:"auto", display:"inline-flex", gap:7 }}>
+                                  <NeoButton kind="primary" size="sm" icon={rewriteFor.applying?undefined:"check"} disabled={rewriteFor.applying} onClick={()=>applyRewrite(d)}>{rewriteFor.applying&&<Icon name="cog" size={14} className="audit-spin" />}{rewriteFor.applying?"Publishing…":"Apply to live page"}</NeoButton>
+                                  <NeoButton kind="ghost" size="sm" onClick={()=>setRewriteFor(null)}>Discard</NeoButton>
+                                </span>
+                              </div>
+                              <div className="scroll md" style={{ maxHeight:340, overflow:"auto", fontSize:12.5, lineHeight:1.5, background:"var(--bg)", padding:"10px 13px", borderRadius:8, boxShadow:"var(--neo-in)" }} dangerouslySetInnerHTML={{ __html: rewriteFor.preview.newHtml }} />
+                            </>)}
                           </div>
                         )}
                       </div>
