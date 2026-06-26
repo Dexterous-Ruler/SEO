@@ -237,6 +237,35 @@ function generatePageSchema(page, opts = {}) {
 // Returns { graph, validation } where validation is validateSchema(graph).
 // ---------------------------------------------------------------------------
 
+// Market → BCP-47 language map (en-GB fallback). Lets a non-UK site emit the
+// right inLanguage instead of inheriting the platform's en-GB default.
+const MARKET_LANG = {
+  'United Kingdom': 'en-GB',
+  'Australia': 'en-AU',
+  'United States': 'en-US',
+  'India': 'en-IN',
+  'Ireland': 'en-IE',
+};
+function langForMarket(lang, market) {
+  if (lang) return lang;
+  if (market && MARKET_LANG[market]) return MARKET_LANG[market];
+  return 'en-GB';
+}
+
+// Normalize a faq item to { q, a } accepting {q,a} | {question,answer} |
+// {name,acceptedAnswer:{text}} (schema.org Question shape). Returns null if no
+// usable Q&A pair.
+function normalizeFaq(f) {
+  if (!f || typeof f !== 'object') return null;
+  const q = f.q || f.question || f.name;
+  let a = f.a || f.answer;
+  if (a == null && f.acceptedAnswer) {
+    a = typeof f.acceptedAnswer === 'string' ? f.acceptedAnswer : f.acceptedAnswer.text;
+  }
+  if (q && a) return { q, a };
+  return null;
+}
+
 // Extract <li> inner text (tags stripped, entities/whitespace tidied) from html.
 function parseListItems(html) {
   if (!html || typeof html !== 'string') return [];
@@ -259,13 +288,14 @@ function parseListItems(html) {
   return out;
 }
 
-function schemaForAnswerBlock(url, block, { org, baseUrl, siteName } = {}) {
+function schemaForAnswerBlock(url, block, { org, baseUrl, siteName, lang, market } = {}) {
   const b = block || {};
   const graph = [];
 
   // Page node — reuse buildWebPage style (title/description from the block heading).
+  // inLanguage derives from explicit lang or the site's market (not the en-GB default).
   graph.push(buildWebPage(
-    { url, title: b.heading, description: b.answer, lang: undefined },
+    { url, title: b.heading, description: b.answer, lang: langForMarket(lang, market) },
     org || {},
     baseUrl || ''
   ));
@@ -276,10 +306,14 @@ function schemaForAnswerBlock(url, block, { org, baseUrl, siteName } = {}) {
     if (speak) graph.push(speak);
   }
 
-  // FAQPage — only worth it with 2+ Q&A pairs.
-  if (Array.isArray(b.faq) && b.faq.filter((f) => f && f.q && f.a).length >= 2) {
-    const faq = buildFaqPage(url, b.faq);
-    if (faq) graph.push(faq);
+  // FAQPage — robust: accept {q,a} | {question,answer} | {name,acceptedAnswer}
+  // and emit when there's >=1 valid Q&A pair (buildFaqPage gets normalized {q,a}).
+  if (Array.isArray(b.faq)) {
+    const pairs = b.faq.map(normalizeFaq).filter(Boolean);
+    if (pairs.length >= 1) {
+      const faq = buildFaqPage(url, pairs);
+      if (faq) graph.push(faq);
+    }
   }
 
   // HowTo — list-format blocks (or html carrying <ol>/<li>) become step-by-step.

@@ -442,20 +442,21 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
 // snippet structure (<ol>/<ul> for steps, <table> for comparisons) + an optional
 // FAQ. Niche-aware via sys('aeo.answerBlock', siteId). Returns the parsed object
 // { heading, format, answer, html, faq } or { error }.
-export async function answerBlock({ url, title, query, currentContent, format, siteId }) {
+export async function answerBlock({ url, title, query, currentContent, format, market, siteId }) {
   const txt = await complete({
     system: sys('aeo.answerBlock', siteId),
     promptKey: 'aeo.answerBlock',
-    maxTokens: 1500, temperature: 0.4,
+    maxTokens: 2800, temperature: 0.4,
     messages: [{ role: 'user', content: `TARGET QUERY: ${query || ''}
 PAGE TITLE: ${title || '(none)'}
-URL: ${url || ''}${format ? '\nDESIRED FORMAT: ' + format : ''}
+URL: ${url || ''}${format ? '\nDESIRED FORMAT: ' + format : ''}${market ? `\nLOCALIZE strictly for ${market}: cite ${market} authorities/regulators, ${market} law, local currency and spelling — do NOT default to UK unless the market IS the UK.` : ''}
 
 === CURRENT PAGE CONTENT (ground the answer in THIS; do not invent facts beyond it) ===
 ${(currentContent || '').slice(0, 6000)}
 
 Produce the answer-first block as STRICT JSON.` }],
   });
+  // Primary parse: slice the first { to the last } and JSON.parse.
   try {
     const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
     return {
@@ -465,7 +466,25 @@ Produce the answer-first block as STRICT JSON.` }],
       html: String(o.html || ''),
       faq: Array.isArray(o.faq) ? o.faq.filter((f) => f && f.q && f.a).map((f) => ({ q: String(f.q), a: String(f.a) })) : [],
     };
-  } catch (e) { return { error: 'answerBlock parse failed', _raw: txt.slice(0, 400) }; }
+  } catch (e) {
+    // Salvage: a verbose/truncated block can break JSON.parse — pull the fields
+    // back out of the raw text by regex so we don't lose the whole generation.
+    const grab = (re) => { const m = txt.match(re); return m ? m[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\\\/g, '\\') : ''; };
+    const heading = grab(/"heading"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    const answer = grab(/"answer"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (!heading && !answer) return { error: 'answerBlock parse failed', _raw: txt.slice(0, 400) };
+    const fmt = grab(/"format"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    const html = grab(/"html"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    const faq = [];
+    const faqBlock = txt.match(/"faq"\s*:\s*\[([\s\S]*?)\]/);
+    if (faqBlock) {
+      const re = /\{\s*"q"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"a"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}/g;
+      let m; while ((m = re.exec(faqBlock[1])) !== null) {
+        faq.push({ q: m[1].replace(/\\"/g, '"').replace(/\\n/g, '\n'), a: m[2].replace(/\\"/g, '"').replace(/\\n/g, '\n') });
+      }
+    }
+    return { heading, format: fmt, answer, html, faq, _salvaged: true };
+  }
 }
 
 // AEO snippet-format classifier. Given a QUERY (+ optional SERP features),

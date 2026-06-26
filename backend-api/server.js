@@ -2731,6 +2731,7 @@ const routes = {
   // (sys('aeo.answerBlock') auto-prepends the per-site geo_context niche block).
   'POST /aeo-answer-block': async (body) => {
     const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    const market = marketFor(site && site.semrush_db);
     const url = body.url || (body.page && body.page.url) || '';
     const query = body.query || '';
     if (!query) return { error: 'A target query is required.' };
@@ -2745,7 +2746,7 @@ const routes = {
       } catch (e) { /* fall through — answerBlock can work query-only */ }
     }
     try {
-      const block = await claude.answerBlock({ url, title, query, currentContent, format: body.format, siteId: body.siteId });
+      const block = await claude.answerBlock({ url, title, query, currentContent, format: body.format, market: market.country, siteId: body.siteId });
       return block;
     } catch (e) { return { error: 'Answer block generation failed: ' + e.message }; }
   },
@@ -2774,7 +2775,8 @@ const routes = {
     catch (e) { return { error: 'Invalid url.' }; }
     const siteName = (site && site.name) || baseUrl;
     const org = { name: siteName, url: baseUrl, logo: site && site.logo };
-    const { graph, validation } = schemaForAnswerBlock(url, block, { org, baseUrl, siteName });
+    const market = marketFor(site && site.semrush_db);
+    const { graph, validation } = schemaForAnswerBlock(url, block, { org, baseUrl, siteName, market: market.country });
     return { graph, validation };
   },
 
@@ -2793,7 +2795,8 @@ const routes = {
     catch (e) { return { error: 'Invalid url.' }; }
     const siteName = (site && site.name) || baseUrl;
     const org = { name: siteName, url: baseUrl, logo: site && site.logo };
-    const { graph, validation } = schemaForAnswerBlock(url, block, { org, baseUrl, siteName });
+    const market = marketFor(site && site.semrush_db);
+    const { graph, validation } = schemaForAnswerBlock(url, block, { org, baseUrl, siteName, market: market.country });
     // Reuse the existing apply-schema writer (single source of truth for the write).
     const applied = await routes['POST /apply-schema']({ siteId: body.siteId, creds: body.creds, url, jsonld: JSON.stringify(graph), force: body.force });
     return { ...applied, validation };

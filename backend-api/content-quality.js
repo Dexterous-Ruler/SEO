@@ -94,7 +94,61 @@ const AI_PATTERNS = [
 // ---------------------------------------------------------------------------
 
 /**
- * Strip HTML to plain text. Removes script/style blocks, decodes a handful of
+ * Remove non-content chrome from an HTML string BEFORE tag stripping: whole
+ * script/style/nav/header/footer/form/aside blocks, then obvious menu/cookie/
+ * popup lines (very short, repeated, link-only). Keeps the article body so word
+ * count, repetition, and claim detection aren't polluted by boilerplate.
+ * Deterministic; only touches the HTML path (callers gate on '<').
+ * @param {string} html
+ * @returns {string}
+ */
+function stripBoilerplate(html) {
+  let t = String(html);
+  // Drop whole chrome blocks (case-insensitive, across newlines).
+  t = t
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<nav\b[^>]*>[\s\S]*?<\/nav>/gi, ' ')
+    .replace(/<header\b[^>]*>[\s\S]*?<\/header>/gi, ' ')
+    .replace(/<footer\b[^>]*>[\s\S]*?<\/footer>/gi, ' ')
+    .replace(/<form\b[^>]*>[\s\S]*?<\/form>/gi, ' ')
+    .replace(/<aside\b[^>]*>[\s\S]*?<\/aside>/gi, ' ');
+  return t;
+}
+
+/**
+ * Drop obvious menu/cookie/popup lines from already-extracted text: very short
+ * lines (link-only nav items, "Accept cookies", "Menu") and short lines that
+ * repeat verbatim (typical of duplicated nav/footer link rows). Conservative —
+ * only removes lines under a low word threshold so real prose is never cut.
+ * @param {string} text
+ * @returns {string}
+ */
+function dropChromeLines(text) {
+  const lines = String(text).split(/\n+/);
+  const seen = new Map();
+  for (const line of lines) {
+    const key = line.trim().toLowerCase();
+    if (key) seen.set(key, (seen.get(key) || 0) + 1);
+  }
+  const cookieRe = /\b(cookie|cookies|accept all|privacy policy|sign in|log in|subscribe|newsletter|skip to (?:main |content)|menu)\b/i;
+  const kept = lines.filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    const wordCount = (trimmed.match(/\S+/g) || []).length;
+    const key = trimmed.toLowerCase();
+    // Short cookie/menu/popup boilerplate.
+    if (wordCount <= 6 && cookieRe.test(trimmed)) return false;
+    // Very short lines that repeat verbatim (duplicated nav/footer link rows).
+    if (wordCount <= 4 && (seen.get(key) || 0) > 1) return false;
+    return true;
+  });
+  return kept.join('\n');
+}
+
+/**
+ * Strip HTML to plain text. Removes chrome blocks (script/style/nav/header/
+ * footer/form/aside) and obvious menu/cookie/popup lines, decodes a handful of
  * common entities, drops all tags, and collapses whitespace. Deterministic.
  * @param {string} html
  * @returns {string}
@@ -103,8 +157,10 @@ function stripHtml(html) {
   let t = String(html == null ? '' : html);
   // Quick "is this HTML?" check — if no angle brackets, treat as plain text.
   if (t.indexOf('<') === -1 && t.indexOf('&') === -1) return collapseWs(t);
-  t = t.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ');
-  t = t.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ');
+  // Remove non-content chrome blocks before any tag/text extraction.
+  t = stripBoilerplate(t);
+  // Turn block boundaries into newlines so dropChromeLines can see line units.
+  t = t.replace(/<\/(?:p|div|li|ul|ol|h[1-6]|section|article|tr|br)\s*\/?>/gi, '\n');
   // Preserve link hrefs as visible tokens so verifyClaims can see citations.
   t = t.replace(/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>/gi, ' $1 ');
   t = t.replace(/<[^>]+>/g, ' ');
@@ -116,6 +172,10 @@ function stripHtml(html) {
     .replace(/&quot;/gi, '"')
     .replace(/&#39;/gi, "'")
     .replace(/&apos;/gi, "'");
+  // Collapse intra-line whitespace (keeping newlines) before line-level pruning,
+  // then drop obvious menu/cookie/popup lines, then flatten to a single string.
+  t = t.replace(/[^\S\n]+/g, ' ').replace(/ *\n */g, '\n');
+  t = dropChromeLines(t);
   return collapseWs(t);
 }
 

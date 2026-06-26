@@ -170,15 +170,21 @@ export async function competitors(domain, { db = 'uk', limit = 10 } = {}) {
 
 // Deterministic question-intent classifier (no AI). Returns one of
 // 'definitional' | 'procedural' | 'comparative' | 'evaluative' | 'other'.
-// Order matters: definitional → procedural → comparative → evaluative → other.
+// Order matters: comparative → procedural → definitional → evaluative → other.
+// Comparative runs first so "same as"/" or "/vs win before "is"/"how" fire.
 // Case-insensitive, word-boundary aware so "is" never matches inside "this".
+// 'other' should be rare — the buckets above cover almost every real question.
 export function classifyQuestion(q) {
   const s = String(q || '').toLowerCase().trim();
   if (!s) return 'other';
-  if (/\b(what\s+is|what\s+are|what\s+does|define|meaning\s+of)\b/.test(s)) return 'definitional';
-  if (/\b(how\s+to|how\s+do|how\s+can|how\s+does|steps\s+to|guide)\b/.test(s)) return 'procedural';
-  if (/\b(vs|versus|or|compare|better)\b|\bdifference\s+between\b/.test(s)) return 'comparative';
-  if (/\b(is|are|should|can\s+i|worth|best|which|do\s+i\s+need|cost\s+of|how\s+much)\b/.test(s)) return 'evaluative';
+  // comparative FIRST: vs / versus / difference between / compare / "same as" / whole-word " or " / better than
+  if (/\b(vs|versus|compare|same\s+as)\b|\bdifference\s+between\b|\bor\b|\bbetter\s+than\b/.test(s)) return 'comparative';
+  // procedural: how to / how do / how can / how does / how long does … take / steps to / guide to / process of|for
+  if (/\b(how\s+to|how\s+do|how\s+can|how\s+does|steps\s+to|guide\s+to)\b|\bhow\s+long\s+does\b.*\btake\b|\bprocess\s+(of|for)\b/.test(s)) return 'procedural';
+  // definitional / factual lookups: what is|are|does / define / meaning of / how much|many / cost of / when is|does|do / where
+  if (/\b(what\s+is|what\s+are|what\s+does|define|meaning\s+of|how\s+much|how\s+many|cost\s+of|where)\b|\bwhen\s+(is|does|do)\b/.test(s)) return 'definitional';
+  // evaluative: leading is/are/should/can i/do i need + worth|best|which is|which one
+  if (/^(is|are|should)\b|^can\s+i\b|^do\s+i\s+need\b|\b(worth|best)\b|\bwhich\s+(is|one)\b/.test(s)) return 'evaluative';
   return 'other';
 }
 
