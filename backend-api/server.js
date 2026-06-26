@@ -1437,9 +1437,12 @@ const routes = {
   // Live UK trending intelligence for a niche (news-weighted), with sources.
   'POST /trending-intel': async (body) => {
     const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
-    const niche = body.niche || (site && site.niche) || (site && site.stack && site.stack.type) || (site && site.name);
-    if (!niche) return { error: 'No niche to research.' };
-    try { return await research.trendingIntel({ niche, db: body.db || (site && site.semrush_db), now: Date.now() }); }
+    // The site's geo_context describes WHAT it does + WHO it serves — the real niche signal
+    // (there is no `niche` column; stack.type is empty + name is just a domain → generic news).
+    const context = body.context || (site && site.geo_context) || '';
+    const niche = body.niche || (site && site.stack && site.stack.type) || (site && site.name) || 'this site';
+    if (!context && !niche) return { error: 'No niche to research.' };
+    try { return await research.trendingIntel({ niche, context, db: body.db || (site && site.semrush_db), now: Date.now() }); }
     catch (e) { return { error: 'Trending analysis failed: ' + e.message }; }
   },
 

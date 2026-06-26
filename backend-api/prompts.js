@@ -234,8 +234,13 @@ register('research.ukScope', { category: 'Content Briefs & Research', label: 'UK
 register('research.gather', { category: 'Content Briefs & Research', label: 'Research grounding (Perplexity)', description: 'System prompt for the grounded current-state research summary.' },
 `You are a research assistant. Summarise the current state of the topic for the target market in the scope clause, with concrete, sourced facts (figures, dates, local-currency prices, rules). Be concise and factual.`);
 
-register('research.trending', { category: 'Content Briefs & Research', label: 'Trending intelligence', description: 'Surfaces this week’s trending topics in a niche for the target market.' },
-`You surface what is trending RIGHT NOW for content planning. List the 5-8 most timely topics/questions in the niche for the target market in the scope clause, each one line, newest first.`);
+register('research.trending', { category: 'Content Briefs & Research', label: 'Trending intelligence', description: 'Proposes timely, niche-specific article ideas (grounded JSON) for the site’s audience — not generic national news.' },
+`You propose timely, NICHE-SPECIFIC article ideas for ONE specific website's content plan — never generic national news. Using the SITE CONTEXT provided (what the site does and who it serves), surface the most timely topics or questions THIS week that this site's audience would actually search for, or that genuinely tie a current development to the site's niche. RULES:
+- Stay strictly INSIDE the site's niche and target market. If a trending national news item (weather, politics, sport, celebrity) is not genuinely relevant to the site's niche, EXCLUDE it.
+- Every idea must be something this site could authoritatively publish and that a real user in its audience would search for.
+- For YMYL niches (legal/medical/finance) keep it factual; never invent statistics, dates, prices, laws or case names.
+- Output ONLY a JSON array of 6-8 items and nothing else — no prose, no markdown, no commentary:
+[{"title":"a specific, click-worthy article title","keyword":"the primary search keyword","whyNow":"one sentence on why it is timely this week","angle":"2-3 sentences on what the article should cover and the angle for this site"}]`);
 
 register('research.facts', { category: 'Content Briefs & Research', label: 'Grounded citable facts', description: 'Extracts current, cited facts for the target market (YMYL accuracy).' },
 `Extract concrete, current, citable facts for the target market in the scope clause (figures, local-currency fees, dates, rules, named bodies). Each fact one line. No advice, no fluff.`);

@@ -1365,6 +1365,7 @@ function OpportunitiesScreen({ ctx }) {
   const [pushing,setPushing] = useState("");
   const [trend,setTrend] = useState(null);
   const [trendBusy,setTrendBusy] = useState(false);
+  const [ideaState,setIdeaState] = useState({});  // idea index -> { ignored?, pushed?, pushing?, edit?:{title,angle} }
   const [briefs,setBriefs] = useState({});   // clusterIndex → {brief, sources}
   const [briefBusy,setBriefBusy] = useState(-1);
   const [paaSeed,setPaaSeed] = useState("");
@@ -1397,6 +1398,22 @@ function OpportunitiesScreen({ ctx }) {
       ctx.toast(r.pushed>0?("Pushed "+r.pushed+" trending topic(s) → Airtable ✓"+(r.skipped?" ("+r.skipped+" already there)":"")):"All trending topics already in Airtable", r.pushed>0?"teal":"gold");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(""));
   };
+  // Per-topic actions on the structured trending ideas: Push (→ Article Writer brief row), Amend (edit), Ignore.
+  const setIdea = (i,patch)=>setIdeaState(st=>({ ...st, [i]:{ ...(st[i]||{}), ...patch } }));
+  const ideaPlan = (idea)=> (idea.whyNow?idea.whyNow:"") + (idea.angle?((idea.whyNow?"\n\n":"")+idea.angle):"");
+  const pushIdea = (idea,i)=>{
+    const ed=(ideaState[i]||{}).edit;
+    const title=(ed&&ed.title)||idea.title;
+    const angle=(ed&&ed.angle)||ideaPlan(idea);
+    setIdea(i,{ pushing:true });
+    API.airtableSync(s.id,{ kinds:["article_brief"], cluster:{ suggestedTitle:title, primaryKeyword:idea.keyword||title }, brief:{ title, angle } }).then(r=>{
+      const res=(r.synced&&r.synced.article_brief)||{};
+      if(r.error||res.error){ ctx.toast("Push: "+(r.error||res.error),"clay"); setIdea(i,{ pushing:false }); return; }
+      setIdea(i,{ pushing:false, pushed:true, edit:null });
+      ctx.toast("Pushed “"+title.slice(0,38)+"” → Article Writer ✓ — set Status to “Write Article” to generate","teal");
+    }).catch(e=>{ ctx.toast(e.message,"clay"); setIdea(i,{ pushing:false }); });
+  };
+  const startAmend = (idea,i)=>setIdea(i,{ edit:{ title:idea.title, angle:ideaPlan(idea) } });
   // ITEM 1: People Also Ask — pull real Google PAA questions for a seed keyword (in the
   // site's market via DataForSEO SERP), then push them to Airtable as content briefs.
   const findPaa = ()=>{
@@ -1468,15 +1485,47 @@ function OpportunitiesScreen({ ctx }) {
         <SoftCard hover={false} style={{ marginBottom:18 }}>
           <SectionHead sub={`What's trending in your niche in ${cName} right now — grounded & sourced`} right={
             <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-              {trend && !trend.error && ((trend.topics)||[]).length>0 && <NeoButton kind="soft" size="sm" icon={pushing==="trend"?undefined:"upload"} disabled={pushing==="trend"} onClick={pushTrending}>{pushing==="trend"&&<Icon name="cog" size={14} className="audit-spin" />}Push topics → Airtable</NeoButton>}
               <NeoButton kind="soft" size="sm" icon={trendBusy?undefined:"trend"} disabled={trendBusy} onClick={loadTrending}>{trendBusy&&<Icon name="cog" size={14} className="audit-spin" />}{trendBusy?"Scanning…":trend?"Refresh":"What's trending?"}</NeoButton>
             </div>
           }>{`Trending now (${cName})`}</SectionHead>
           {trend && trend.error && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"4px 2px" }}>{trend.error}</div>}
           {trend && !trend.error && (
-            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-              {trend.summary && <div className="md" style={{ fontSize:13, lineHeight:1.55 }} dangerouslySetInnerHTML={{ __html:(window.SentinelHelpers&&window.SentinelHelpers.renderMarkdown(trend.summary))||trend.summary }} />}
-              {(trend.topics||[]).length>0 && <div style={{ display:"flex", flexDirection:"column", gap:5 }}>{trend.topics.slice(0,6).map((t,i)=>(<a key={i} href={t.url} target="_blank" style={{ fontSize:12.5, padding:"8px 11px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", color:"var(--ink)", textDecoration:"none", display:"flex", gap:8, alignItems:"center" }}><Icon name="trend" size={13} style={{color:"var(--gold)"}} /><span style={{ flex:1 }}>{t.title}</span></a>))}</div>}
+            <div style={{ display:"flex", flexDirection:"column", gap:9 }}>
+              {(trend.ideas||[]).length>0 ? (<>
+                <div style={{ fontSize:11.5, color:"var(--muted)" }}>Proposed articles for your niche this week — <b>Push</b> each to the Article Writer (Title + content plan), <b>Amend</b> it first, or <b>Ignore</b> it.</div>
+                {(trend.ideas||[]).map((idea,i)=>{ const st=ideaState[i]||{}; if(st.ignored) return null; const ed=st.edit; return (
+                  <div key={i} style={{ padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", opacity:st.pushed?0.72:1 }}>
+                    {ed ? (
+                      <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
+                        <input value={ed.title} onChange={e=>setIdea(i,{ edit:{ ...ed, title:e.target.value } })} placeholder="Article title" style={{ fontSize:13.5, fontWeight:700, padding:"7px 10px", borderRadius:8, border:"none", background:"var(--surface)", boxShadow:"var(--neo-in)", color:"var(--ink)", outline:"none" }} />
+                        <textarea value={ed.angle} onChange={e=>setIdea(i,{ edit:{ ...ed, angle:e.target.value } })} rows={4} placeholder="Content plan / angle" style={{ fontSize:12.5, lineHeight:1.5, padding:"8px 10px", borderRadius:8, border:"none", background:"var(--surface)", boxShadow:"var(--neo-in)", color:"var(--ink)", outline:"none", resize:"vertical", fontFamily:"inherit" }} />
+                        <div style={{ display:"flex", gap:7 }}>
+                          <NeoButton kind="primary" size="sm" icon={st.pushing?undefined:"upload"} disabled={st.pushing} onClick={()=>pushIdea(idea,i)}>{st.pushing&&<Icon name="cog" size={13} className="audit-spin" />}Save &amp; push</NeoButton>
+                          <NeoButton kind="ghost" size="sm" onClick={()=>setIdea(i,{ edit:null })}>Cancel</NeoButton>
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ display:"flex", alignItems:"flex-start", gap:10 }}>
+                        <div style={{ flex:1, minWidth:0 }}>
+                          <div style={{ fontSize:13.5, fontWeight:700, color:"var(--ink)" }}>{idea.title}</div>
+                          {idea.whyNow && <div style={{ fontSize:11.5, color:"var(--gold)", marginTop:3 }}><b>Why now:</b> {idea.whyNow}</div>}
+                          {idea.angle && <div style={{ fontSize:12.5, color:"var(--muted)", marginTop:4, lineHeight:1.5 }}>{idea.angle}</div>}
+                          {idea.keyword && <div style={{ fontSize:11, color:"var(--faint)", fontFamily:"var(--mono)", marginTop:4 }}>kw: {idea.keyword}</div>}
+                        </div>
+                        <span style={{ display:"inline-flex", gap:6, flexShrink:0 }}>
+                          {st.pushed ? <Chip tone="teal" size="sm" icon="check">Pushed</Chip> : (<>
+                            <NeoButton kind="primary" size="sm" icon={st.pushing?undefined:"upload"} disabled={st.pushing} onClick={()=>pushIdea(idea,i)}>{st.pushing&&<Icon name="cog" size={13} className="audit-spin" />}Push</NeoButton>
+                            <NeoButton kind="soft" size="sm" icon="doc" onClick={()=>startAmend(idea,i)}>Amend</NeoButton>
+                            <NeoButton kind="ghost" size="sm" onClick={()=>setIdea(i,{ ignored:true })}>Ignore</NeoButton>
+                          </>)}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                ); })}
+              </>) : (
+                trend.summary && <div className="md" style={{ fontSize:13, lineHeight:1.55 }} dangerouslySetInnerHTML={{ __html:(window.SentinelHelpers&&window.SentinelHelpers.renderMarkdown(trend.summary))||trend.summary }} />
+              )}
               {(trend.sources||[]).length>0 && <div style={{ fontSize:11, color:"var(--faint)" }}>Sources: {(trend.sources||[]).slice(0,5).map((s,i)=>(<a key={i} href={s.url} target="_blank" style={{ color:"var(--t-600)", marginRight:8 }}>{s.domain||(i+1)}</a>))}</div>}
             </div>
           )}

@@ -99,25 +99,34 @@ export async function contentBrief({ keyword, intent, siteName, niche, excludeDo
 }
 
 // Current UK trending topics in a niche (news-weighted), with sources.
-export async function trendingIntel({ niche, db, now = 0 }) {
+export async function trendingIntel({ niche, context, db, now = 0 }) {
   if (!perplexity.hasKey() && !tavily.hasKey()) return { error: 'No research engine configured.' };
   const mk = marketFor(db);
   const ttl = 6 * 60 * 60 * 1000;
-  const cacheKey = `trend:${mk.db}:${niche}`;
+  const ctx = (context || '').toString().slice(0, 3500);   // the site's geo_context (what it does + audience)
+  const cacheKey = `trend:${mk.db}:${(ctx || niche).slice(0, 80)}`;
   if (now) { const c = cacheGet(cacheKey, now, ttl); if (c) return c; }
-  const out = { niche, country: mk.country, topics: [], summary: '', sources: [], engines: {}, cost: 0 };
+  const out = { niche, country: mk.country, ideas: [], topics: [], summary: '', sources: [], engines: {}, cost: 0 };
   if (perplexity.hasKey()) {
     try {
       const pp = await perplexity.ask({
-        system: P('research.trending'),
-        user: `Niche: ${niche}. What is trending in ${mk.country} this week that we could write about? Give concrete topics with why each matters now.`,
-        ...mt('research.trending', 'fast'), recency: 'week', domains: mk.preferDomains, scope: mk.scope, geo: mk.geo, maxTokens: 700,
+        system: (ctx ? `=== SITE CONTEXT (propose ideas strictly for THIS site's niche & audience) ===\n${ctx}\n\n` : '') + P('research.trending'),
+        user: `${ctx ? '' : `Niche: ${niche}. `}Propose 6-8 timely, niche-specific article ideas for this site's ${mk.country} audience for THIS week. Return ONLY the JSON array described above.`,
+        ...mt('research.trending', 'fast'), recency: 'week', domains: mk.preferDomains, scope: mk.scope, geo: mk.geo, maxTokens: 1100,
       });
       out.summary = pp.answer; out.sources = rankSources(pp.sources); out.engines.perplexity = (pp.sources || []).length; if (pp.cost) out.cost += pp.cost;
+      try {
+        const a = String(pp.answer || ''); const s = a.indexOf('['); const e = a.lastIndexOf(']');
+        const arr = (s >= 0 && e > s) ? JSON.parse(a.slice(s, e + 1)) : [];
+        out.ideas = (Array.isArray(arr) ? arr : []).filter((x) => x && x.title).map((x) => ({
+          title: String(x.title).slice(0, 160), keyword: String(x.keyword || x.title).slice(0, 120),
+          whyNow: String(x.whyNow || x.why || '').slice(0, 400), angle: String(x.angle || x.plan || '').slice(0, 900),
+        })).slice(0, 10);
+      } catch (e) { /* fall back to the prose summary */ }
     } catch (e) { out.engines.perplexityError = String(e.message || e); }
   }
   if (tavily.hasKey()) {
-    try { const t = await tavily.search(`${niche} ${mk.country}`, { topic: 'news', days: 7, maxResults: 8 }); out.topics = (t.results || []).map((r) => ({ title: r.title, url: r.url })); out.engines.tavily = out.topics.length; if (!out.sources.length) out.sources = rankSources(t.results); }
+    try { const t = await tavily.search(`${(niche || '').slice(0, 60)} ${mk.country}`, { topic: 'news', days: 7, maxResults: 8 }); out.topics = (t.results || []).map((r) => ({ title: r.title, url: r.url })); out.engines.tavily = out.topics.length; if (!out.sources.length) out.sources = rankSources(t.results); }
     catch (e) { out.engines.tavilyError = String(e.message || e); }
   }
   if (now) cacheSet(cacheKey, out, now);
