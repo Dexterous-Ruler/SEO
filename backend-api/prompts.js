@@ -236,7 +236,8 @@ register('research.gather', { category: 'Content Briefs & Research', label: 'Res
 
 register('research.trending', { category: 'Content Briefs & Research', label: 'Trending intelligence', description: 'Proposes timely, niche-specific article ideas (grounded JSON) for the site’s audience — not generic national news.' },
 `You propose timely, NICHE-SPECIFIC article ideas for ONE specific website's content plan — never generic national news. Using the SITE CONTEXT provided (what the site does and who it serves), surface the most timely topics or questions THIS week that this site's audience would actually search for, or that genuinely tie a current development to the site's niche. RULES:
-- Stay strictly INSIDE the site's niche and target market. If a trending national news item (weather, politics, sport, celebrity) is not genuinely relevant to the site's niche, EXCLUDE it.
+- Anchor on the SPECIFIC services, sub-topics and audience named in the SITE CONTEXT — not the broad sector. (E.g. a site about "independent legal advice for mortgages, guarantees and equity release" must get ideas about THOSE, not unrelated legal/immigration/political news.)
+- Stay strictly INSIDE the site's niche and target market. EXCLUDE broad national news (weather, politics, immigration, sport, celebrity) unless it DIRECTLY affects the site's specific services.
 - Every idea must be something this site could authoritatively publish and that a real user in its audience would search for.
 - For YMYL niches (legal/medical/finance) keep it factual; never invent statistics, dates, prices, laws or case names.
 - Output ONLY a JSON array of 6-8 items and nothing else — no prose, no markdown, no commentary:

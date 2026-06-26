@@ -103,7 +103,7 @@ export async function trendingIntel({ niche, context, db, now = 0 }) {
   if (!perplexity.hasKey() && !tavily.hasKey()) return { error: 'No research engine configured.' };
   const mk = marketFor(db);
   const ttl = 6 * 60 * 60 * 1000;
-  const ctx = (context || '').toString().slice(0, 3500);   // the site's geo_context (what it does + audience)
+  const ctx = (context || '').toString().slice(0, 9000);   // the site's geo_context (identity + the SPECIFIC services it covers, which sit past the preamble)
   const cacheKey = `trend:${mk.db}:${(ctx || niche).slice(0, 80)}`;
   if (now) { const c = cacheGet(cacheKey, now, ttl); if (c) return c; }
   const out = { niche, country: mk.country, ideas: [], topics: [], summary: '', sources: [], engines: {}, cost: 0 };
