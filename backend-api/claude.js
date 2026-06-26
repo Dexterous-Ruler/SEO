@@ -242,7 +242,7 @@ export async function refreshArticle({ page, currentContent, brief, siteId }) {
   const p = page || {};
   const txt = await complete({
     system: sys('content.refresh', siteId), promptKey: 'content.refresh',
-    maxTokens: 6000, temperature: 0.5,
+    maxTokens: 4096, temperature: 0.5,
     messages: [{
       role: 'user',
       content: `Rewrite and improve this EXISTING page so it recovers its lost rankings. Keep what already works; expand, update and restructure per the refresh brief. Do NOT start from scratch and do NOT add a visible "updated on" banner.
