@@ -2284,6 +2284,17 @@ function ContentScreen({ ctx }) {
   const live = API && window.SENTINEL_LIVE;
   const [dbVal,setDbVal] = useState(s.semrush_db||"uk");
   const [dbList,setDbList] = useState(null);
+  // AEO readiness — score the current/pasted page for answer-engine extractability:
+  // 0–100 score, thin-content flag, and the uncited-claim list (verifyClaims).
+  const [aeoUrl,setAeoUrl] = useState("");
+  const [aeoBusy,setAeoBusy] = useState(false);
+  const [aeo,setAeo] = useState(null);
+  const runAeoScore = ()=>{
+    const url=(aeoUrl||"").trim();
+    if(!url){ ctx.toast("Paste a page URL to score","gold"); return; }
+    setAeoBusy(true); setAeo(null);
+    API.contentScore("", url).then(r=>{ if(r.error){ ctx.toast("AEO score: "+r.error,"clay"); setAeo({ error:r.error }); return; } setAeo(r); }).catch(e=>{ ctx.toast(e.message,"clay"); setAeo({ error:e.message }); }).finally(()=>setAeoBusy(false));
+  };
   useEffect(()=>{ setDbVal(s.semrush_db||"uk"); },[s.id]);
   useEffect(()=>{ if(live&&!dbList) API.siteDatabase(s.id).then(r=>{ if(r&&r.countries) setDbList(r.countries); }).catch(()=>{}); },[live]);
   const changeCountry = (db)=>{
@@ -2322,6 +2333,48 @@ function ContentScreen({ ctx }) {
           </NeoButton>
         </div>
       </PageHead>
+
+      {/* AEO readiness — answer-engine extractability score for a single page (preview/offline). */}
+      <SoftCard hover={false} style={{ marginBottom:18 }}>
+        <SectionHead sub="Score one page for answer-engine readiness — how cleanly LLMs & featured snippets can extract it. Flags thin content and uncited claims.">AEO readiness</SectionHead>
+        <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+          <input value={aeoUrl} onChange={e=>setAeoUrl(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") runAeoScore(); }} placeholder="https://your-site.com/page-to-check"
+            className="search-in" style={{ flex:1, minWidth:240, padding:"11px 14px", borderRadius:"var(--r-md)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, fontFamily:"var(--mono)", color:"var(--ink)", outline:"none" }} />
+          <NeoButton kind="primary" icon={aeoBusy?undefined:"radar"} disabled={aeoBusy} onClick={runAeoScore}>{aeoBusy&&<Icon name="cog" size={16} className="audit-spin" />}{aeoBusy?"Scoring…":"Score page"}</NeoButton>
+        </div>
+        {aeo && aeo.error && <div style={{ marginTop:12, fontSize:13, color:"var(--clay)" }}>{aeo.error}</div>}
+        {aeo && !aeo.error && (()=>{ const tone=aeo.score>=80?"teal":aeo.score>=50?"gold":"clay"; const v=aeo.verify||{}; return (
+          <div style={{ marginTop:14, display:"flex", flexDirection:"column", gap:14 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:16, flexWrap:"wrap" }}>
+              <div style={{ width:74, height:74, borderRadius:18, background:TT[tone][1], color:TT[tone][0], display:"grid", placeItems:"center", flexShrink:0 }}>
+                <span style={{ fontSize:26, fontWeight:800, lineHeight:1 }}>{aeo.score}</span>
+              </div>
+              <div style={{ flex:1, minWidth:200 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:9, flexWrap:"wrap", marginBottom:5 }}>
+                  <span style={{ fontSize:14.5, fontWeight:700 }}>AEO readiness score</span>
+                  {aeo.thin && <Chip tone="clay" size="sm" icon="alert">thin content</Chip>}
+                  {v.total!=null && <Chip tone={v.pass?"teal":"gold"} size="sm">{v.uncitedCount||0}/{v.total} uncited claim(s)</Chip>}
+                  {aeo.words!=null && <Chip tone="gray" size="sm">{Number(aeo.words).toLocaleString()} words</Chip>}
+                </div>
+                {(aeo.flags||[]).length>0 && <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>{(aeo.flags||[]).map((f,i)=><Chip key={i} tone="gray" size="sm">{f}</Chip>)}</div>}
+              </div>
+            </div>
+            {(v.uncited||[]).length>0 && (
+              <div>
+                <div style={{ fontSize:12, fontWeight:800, color:"var(--muted)", textTransform:"uppercase", letterSpacing:.4, marginBottom:7 }}>Uncited claims — add a source or remove</div>
+                <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                  {(v.uncited||[]).map((c,i)=>(
+                    <div key={i} style={{ display:"flex", gap:10, padding:"10px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+                      <Icon name="alert" size={15} style={{ color:"var(--gold)", flexShrink:0, marginTop:1 }} />
+                      <span style={{ fontSize:12.5, color:"var(--ink)", lineHeight:1.5 }}>{typeof c==="string"?c:(c.claim||c.text||JSON.stringify(c))}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ); })()}
+      </SoftCard>
 
       {!d && !loading && (
         <SoftCard hover={false}>
@@ -2765,7 +2818,7 @@ function GscScreen({ ctx }) {
   const [data,setData] = useState(null);
   const [err,setErr] = useState(null);
   const [tab,setTab] = useState("queries");
-  useEffect(()=>{ if(ctx.navTab && ["queries","pages","striking","decay","anomalies","indexing"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
+  useEffect(()=>{ if(ctx.navTab && ["queries","pages","striking","steal","decay","anomalies","indexing"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
   const [saEmail,setSaEmail] = useState(null);
   const [advanced,setAdvanced] = useState(false);   // show service-account paste
   const [propMenu,setPropMenu] = useState(false);   // header property switcher
@@ -2778,6 +2831,11 @@ function GscScreen({ ctx }) {
   const [idxHealth,setIdxHealth] = useState(null);
   const [drops,setDrops] = useState(null);
   const [idxBusy,setIdxBusy] = useState("");
+  // Snippet Steal (AEO) — quick wins, question queries & rising impressions from GSC,
+  // each with a one-click Claude "answer block" generator (preview only).
+  const [steal,setSteal] = useState(null);
+  const [stealBusy,setStealBusy] = useState(false);
+  const [answerFor,setAnswerFor] = useState(null);  // { query, loading?|block?|error? }
   const autoPickedRef = useRef(new Set());   // sites we've already auto-mapped this session
 
   useEffect(()=>{ setData(null); setProps([]); setSaText(""); setErr(null); setDecay(null); setAnom(null); setIdxHealth(null); setDrops(null); setPropMenu(false); if(live) API.gscStatus(s.id).then(setStatus).catch(()=>{}); },[s.id]);
@@ -2787,6 +2845,18 @@ function GscScreen({ ctx }) {
   const loadAnom = ()=>{
     setAnomBusy(true); setErr(null);
     API.gscAnomalies(s.id, 90).then(r=>{ if(r.error){ setErr({ msg:r.error, needsConnect:r.needsConnect, needsProperty:r.needsProperty }); return; } setAnom(r); }).catch(e=>setErr({ msg:e.message })).finally(()=>setAnomBusy(false));
+  };
+  const loadSteal = ()=>{
+    setStealBusy(true); setErr(null);
+    API.gscSnippetSteal(s.id).then(r=>{ if(r.error){ setErr({ msg:r.error, noAccess:r.noAccess, needsConnect:r.needsConnect, needsProperty:r.needsProperty }); return; } setSteal(r); }).catch(e=>setErr({ msg:e.message })).finally(()=>setStealBusy(false));
+  };
+  // One-click: generate a featured-snippet "answer block" for a query (Claude, preview only).
+  const genAnswer = (row)=>{
+    setAnswerFor({ query:row.query, loading:true });
+    API.aeoAnswerBlock(s.id, row.page||"", row.query).then(r=>{
+      if(r.error){ setAnswerFor({ query:row.query, error:r.error }); ctx.toast("Answer block: "+r.error,"clay"); return; }
+      setAnswerFor({ query:row.query, block:r });
+    }).catch(e=>{ setAnswerFor({ query:row.query, error:e.message }); ctx.toast(e.message,"clay"); });
   };
   const loadDecay = ()=>{
     setDecayBusy(true); setErr(null);
@@ -3073,7 +3143,7 @@ function GscScreen({ ctx }) {
 
           <SoftCard hover={false}>
             <div style={{ display:"flex", gap:3, padding:3, background:"var(--bg)", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-in)", width:"fit-content", marginBottom:16 }}>
-              {[["queries","Top Queries"],["pages","Top Pages"],["striking","Quick Wins (11–20)"],["decay","Content Decay"],["anomalies","Anomalies"],["indexing","Indexing & Drops"]].map(([v,l])=>(
+              {[["queries","Top Queries"],["pages","Top Pages"],["striking","Quick Wins (11–20)"],["steal","Snippet Steal"],["decay","Content Decay"],["anomalies","Anomalies"],["indexing","Indexing & Drops"]].map(([v,l])=>(
                 <button key={v} onClick={()=>setTab(v)} style={{ padding:"8px 15px", fontSize:12.5, fontWeight:700, borderRadius:99, background:tab===v?"var(--surface)":"transparent", color:tab===v?"var(--t-700)":"var(--muted)", boxShadow:tab===v?"var(--neo-sm)":"none" }}>{l}</button>
               ))}
             </div>
@@ -3116,6 +3186,88 @@ function GscScreen({ ctx }) {
                 {(data.striking||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No page-2 queries in this window.</div>}
               </div>
             )}
+            {tab==="steal" && (()=>{
+              // Shared row renderer: query · position/impressions · "Generate answer block".
+              // Below the row, the active query shows its Claude answer-block preview.
+              const Row = (row, i, extra)=>{
+                const active = answerFor && answerFor.query===row.query;
+                return (
+                  <div key={i} style={{ padding:"9px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:10, fontSize:13 }}>
+                      {row.position!=null && <span style={{ display:"inline-grid", placeItems:"center", minWidth:30, height:22, borderRadius:7, background:"var(--gold-bg)", color:"var(--gold)", fontSize:12, fontWeight:800, flexShrink:0 }}>{Number(row.position).toFixed(1)}</span>}
+                      <span style={{ flex:1, fontWeight:600, fontFamily:"var(--mono)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{row.query}</span>
+                      <span style={{ width:90, textAlign:"right", color:"var(--muted)", flexShrink:0 }}>{extra}</span>
+                      <NeoButton kind="soft" size="sm" icon={(active&&answerFor.loading)?undefined:"sparkles"} disabled={active&&answerFor.loading} onClick={()=>genAnswer(row)}>{active&&answerFor.loading&&<Icon name="cog" size={14} className="audit-spin" />}{active&&answerFor.loading?"Writing…":"Generate answer block"}</NeoButton>
+                    </div>
+                    {active && (answerFor.error||answerFor.block) && (
+                      <div style={{ marginTop:10, padding:"12px 14px", background:"var(--surface)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", borderLeft:"3px solid "+(answerFor.error?"var(--clay)":"var(--t-500)") }}>
+                        {answerFor.error && <div style={{ fontSize:12.5, color:"var(--clay)" }}>{answerFor.error}</div>}
+                        {answerFor.block && (()=>{ const b=answerFor.block; return (<>
+                          <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:7, flexWrap:"wrap" }}>
+                            <span style={{ fontSize:13, fontWeight:800 }}>{b.heading}</span>
+                            {b.format && <Chip tone="gray" size="sm">{b.format}</Chip>}
+                            <NeoButton kind="ghost" size="sm" icon="copy" style={{ marginLeft:"auto" }} onClick={()=>{ try{ navigator.clipboard.writeText(b.html||b.answer||""); ctx.toast("Answer block copied — paste it high on the page","teal"); }catch(e){ ctx.toast("Select & copy the block below","gold"); } }}>Copy</NeoButton>
+                          </div>
+                          {b.answer && <div style={{ fontSize:12.5, color:"var(--ink)", lineHeight:1.5, marginBottom:8 }}>{b.answer}</div>}
+                          {b.html && <div className="scroll md" style={{ maxHeight:280, overflow:"auto", fontSize:12.5, lineHeight:1.5, background:"var(--bg)", padding:"10px 13px", borderRadius:8, boxShadow:"var(--neo-in)" }} dangerouslySetInnerHTML={{ __html: b.html }} />}
+                          {(b.faq||[]).length>0 && (
+                            <div style={{ marginTop:9, display:"flex", flexDirection:"column", gap:6 }}>
+                              <div style={{ fontSize:11, fontWeight:800, color:"var(--muted)", textTransform:"uppercase", letterSpacing:.4 }}>FAQ</div>
+                              {(b.faq||[]).map((f,fi)=>(
+                                <div key={fi} style={{ padding:"8px 11px", background:"var(--bg)", borderRadius:8, boxShadow:"var(--neo-in)" }}>
+                                  <div style={{ fontSize:12.5, fontWeight:700 }}>{f.q}</div>
+                                  <div style={{ fontSize:12, color:"var(--ink)", marginTop:2 }}>{f.a}</div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </>); })()}
+                      </div>
+                    )}
+                  </div>
+                );
+              };
+              return (
+                <div>
+                  <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:14, flexWrap:"wrap" }}>
+                    <div style={{ flex:1, minWidth:220 }}>
+                      <div style={{ fontSize:13.5, fontWeight:700 }}>Snippet Steal — win the featured snippet & AI answers</div>
+                      <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Queries where you're close, asking a question, or surging in impressions — each with a one-click Claude "answer block" engineered to capture the snippet / AI citation. Preview only; nothing publishes.</div>
+                    </div>
+                    <NeoButton kind="primary" size="sm" icon={stealBusy?undefined:"radar"} disabled={stealBusy} onClick={loadSteal}>{stealBusy&&<Icon name="cog" size={15} className="audit-spin" />}{stealBusy?"Scanning…":(steal?"Re-scan":"Find opportunities")}</NeoButton>
+                  </div>
+                  {steal && (
+                    <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+                      {/* Quick Wins (pos 2–10) */}
+                      <div>
+                        <div style={{ fontSize:12.5, fontWeight:800, color:"var(--ink-2)", marginBottom:7, display:"flex", alignItems:"center", gap:7 }}><Icon name="arrowUp" size={14} style={{ color:"var(--t-700)" }} />Quick Wins · positions 2–10 <Chip tone="teal" size="sm">{(steal.quickWins&&steal.quickWins.count)||0}</Chip></div>
+                        <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+                          {((steal.quickWins&&steal.quickWins.rows)||[]).map((row,i)=>Row(row,"qw"+i, fmt(row.impressions)+" impr."))}
+                          {((steal.quickWins&&steal.quickWins.rows)||[]).length===0 && <div style={{ padding:"10px 12px", fontSize:13, color:"var(--muted)" }}>No queries sitting in positions 2–10 right now.</div>}
+                        </div>
+                      </div>
+                      {/* Question queries */}
+                      <div style={{ borderTop:"1px solid var(--line-soft)", paddingTop:14 }}>
+                        <div style={{ fontSize:12.5, fontWeight:800, color:"var(--ink-2)", marginBottom:7, display:"flex", alignItems:"center", gap:7 }}><Icon name="search" size={14} style={{ color:"var(--t-700)" }} />Question Queries <Chip tone="gold" size="sm">{(steal.questions&&steal.questions.count)||0}</Chip></div>
+                        <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+                          {((steal.questions&&steal.questions.rows)||[]).map((row,i)=>Row(row,"q"+i, fmt(row.impressions)+" impr."))}
+                          {((steal.questions&&steal.questions.rows)||[]).length===0 && <div style={{ padding:"10px 12px", fontSize:13, color:"var(--muted)" }}>No question-style queries detected in this window.</div>}
+                        </div>
+                      </div>
+                      {/* Rising impressions */}
+                      <div style={{ borderTop:"1px solid var(--line-soft)", paddingTop:14 }}>
+                        <div style={{ fontSize:12.5, fontWeight:800, color:"var(--ink-2)", marginBottom:7, display:"flex", alignItems:"center", gap:7 }}><Icon name="trend" size={14} style={{ color:"var(--t-700)" }} />Rising Impressions <Chip tone="plum" size="sm">{(steal.rising&&steal.rising.count)||0}</Chip></div>
+                        <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+                          {((steal.rising&&steal.rising.rows)||[]).map((row,i)=>Row(row,"r"+i, "+"+fmt(row.impressionDelta)+" impr."))}
+                          {((steal.rising&&steal.rising.rows)||[]).length===0 && <div style={{ padding:"10px 12px", fontSize:13, color:"var(--muted)" }}>No queries with rising impressions vs the prior period.</div>}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {!steal && !stealBusy && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Click "Find opportunities" to surface near-miss, question and surging queries from real Google data — then generate an answer block to capture each snippet.</div>}
+                </div>
+              );
+            })()}
             {tab==="decay" && (
               <div>
                 <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:14, flexWrap:"wrap" }}>

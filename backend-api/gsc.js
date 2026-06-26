@@ -236,4 +236,86 @@ export async function contentDecay(sa, property, { windowDays = 28 } = {}) {
   };
 }
 
-export default { listSites, query, snapshot, contentDecay };
+// ── Quick wins (snippet-steal candidates) ──────────────────────────────────
+// Queries already ranking in the meaty zone (positions posMin–posMax, default
+// 2–10) with real demand. These are the cheapest CTR/feature-snippet upgrades:
+// the page is already there, you just need to win the snippet / sharpen intent.
+// Anchored on impressions desc = biggest opportunity first.
+export async function quickWins(sa, property, { days = 28, minImpressions = 30, posMin = 2, posMax = 10 } = {}) {
+  const startDate = daysAgo(days + 2); // GSC data lags ~2 days
+  const endDate = daysAgo(2);
+  const data = await query(sa, property, { startDate, endDate, dimensions: ['query', 'page'], rowLimit: 1000 });
+  const rows = data
+    .filter((r) => r.position >= posMin && r.position <= posMax && r.impressions >= minImpressions)
+    .sort((a, b) => b.impressions - a.impressions)
+    .map((r) => ({
+      query: r.keys[0], page: r.keys[1],
+      position: Math.round(r.position * 10) / 10,
+      impressions: r.impressions, clicks: r.clicks,
+      ctr: Math.round(r.ctr * 10000) / 10000,
+    }));
+  return { rows, count: rows.length };
+}
+
+// ── Question queries (PAA / featured-snippet intent) ────────────────────────
+// Queries phrased as questions are prime People-Also-Ask / featured-snippet
+// targets — they signal informational intent you can answer directly on-page.
+export async function questionQueries(sa, property, { days = 28, minImpressions = 10 } = {}) {
+  const startDate = daysAgo(days + 2); // GSC data lags ~2 days
+  const endDate = daysAgo(2);
+  const data = await query(sa, property, { startDate, endDate, dimensions: ['query'], rowLimit: 1000 });
+  // Question word as a whole word anywhere in the query (covers "how to ...",
+  // "what is ...", "... where to apply", etc.). Word boundaries avoid matching
+  // "iso" for "is" or "showld" for "should".
+  const QW = /\b(who|what|why|how|when|where|which|can|do|does|is|are|should)\b/i;
+  const rows = data
+    .filter((r) => r.impressions >= minImpressions && QW.test(r.keys[0]))
+    .sort((a, b) => b.impressions - a.impressions)
+    .map((r) => ({
+      query: r.keys[0], impressions: r.impressions, clicks: r.clicks,
+      ctr: Math.round(r.ctr * 10000) / 10000,
+      position: Math.round(r.position * 10) / 10,
+    }));
+  return { rows, count: rows.length };
+}
+
+// ── Snippet visibility (rising impressions, flat clicks) ────────────────────
+// Compares a RECENT window vs the immediately PRIOR window PER QUERY. Queries
+// whose impressions are climbing (>= +20%) while clicks stay flat or fall
+// (<= +5%) are likely surfacing in PAA / AI-overview / featured-snippet slots
+// that Google reads aloud without sending the click — growing zero-click
+// visibility you should defend (claim the snippet, sharpen the title).
+export async function snippetVisibility(sa, property, { windowDays = 28 } = {}) {
+  const end = daysAgo(2);
+  const recentStart = daysAgo(2 + windowDays);
+  const priorEnd = daysAgo(2 + windowDays + 1);
+  const priorStart = daysAgo(2 + windowDays * 2 + 1);
+
+  const [recent, prior] = await Promise.all([
+    query(sa, property, { startDate: recentStart, endDate: end, dimensions: ['query'], rowLimit: 1000 }),
+    query(sa, property, { startDate: priorStart, endDate: priorEnd, dimensions: ['query'], rowLimit: 1000 }),
+  ]);
+
+  const priorMap = new Map(prior.map((r) => [r.keys[0], r]));
+  const rows = [];
+  for (const r of recent) {
+    const q = r.keys[0];
+    const p = priorMap.get(q);
+    if (!p || p.impressions <= 0) continue;            // need a prior baseline
+    const imprPct = (r.impressions - p.impressions) / p.impressions;
+    const clickPct = p.clicks > 0 ? (r.clicks - p.clicks) / p.clicks
+      : (r.clicks > 0 ? Infinity : 0);                 // 0→N clicks = real growth, not a snippet
+    if (imprPct >= 0.20 && clickPct <= 0.05) {
+      rows.push({
+        query: q,
+        impressionsNow: r.impressions, impressionsPrev: p.impressions,
+        clicksNow: r.clicks, clicksPrev: p.clicks,
+        impressionDelta: Math.round((r.impressions - p.impressions)),
+      });
+    }
+  }
+  rows.sort((a, b) => b.impressionDelta - a.impressionDelta);
+  return { rows, count: rows.length };
+}
+
+export default { listSites, query, snapshot, contentDecay, quickWins, questionQueries, snippetVisibility };

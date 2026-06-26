@@ -437,4 +437,50 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
   } catch (e) { return { title: keyword, error: 'brief synthesis parse failed', sources: research.sources || [], _raw: txt.slice(0, 400) }; }
 }
 
-export default { metaDescription, titleRewrite, altText, draftFix, narrate, internalLinkSuggestions, extractCitableFacts, projectPlan, clusterKeywords, synthesizeContentBrief, decayBrief, refreshArticle, complete };
+// AEO answer-first block. For a TARGET QUERY + page, produce a question-format
+// heading + a direct 40-60 word answer (no preamble) + the right real-HTML
+// snippet structure (<ol>/<ul> for steps, <table> for comparisons) + an optional
+// FAQ. Niche-aware via sys('aeo.answerBlock', siteId). Returns the parsed object
+// { heading, format, answer, html, faq } or { error }.
+export async function answerBlock({ url, title, query, currentContent, format, siteId }) {
+  const txt = await complete({
+    system: sys('aeo.answerBlock', siteId),
+    promptKey: 'aeo.answerBlock',
+    maxTokens: 1500, temperature: 0.4,
+    messages: [{ role: 'user', content: `TARGET QUERY: ${query || ''}
+PAGE TITLE: ${title || '(none)'}
+URL: ${url || ''}${format ? '\nDESIRED FORMAT: ' + format : ''}
+
+=== CURRENT PAGE CONTENT (ground the answer in THIS; do not invent facts beyond it) ===
+${(currentContent || '').slice(0, 6000)}
+
+Produce the answer-first block as STRICT JSON.` }],
+  });
+  try {
+    const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
+    return {
+      heading: String(o.heading || ''),
+      format: String(o.format || ''),
+      answer: String(o.answer || ''),
+      html: String(o.html || ''),
+      faq: Array.isArray(o.faq) ? o.faq.filter((f) => f && f.q && f.a).map((f) => ({ q: String(f.q), a: String(f.a) })) : [],
+    };
+  } catch (e) { return { error: 'answerBlock parse failed', _raw: txt.slice(0, 400) }; }
+}
+
+// AEO snippet-format classifier. Given a QUERY (+ optional SERP features),
+// classify the winning snippet format. Returns the parsed { format, reason }.
+export async function classifySnippetFormat({ query, serpFeatures, siteId }) {
+  const txt = await complete({
+    system: sys('aeo.snippetFormat', siteId),
+    promptKey: 'aeo.snippetFormat',
+    maxTokens: 200, temperature: 0,
+    messages: [{ role: 'user', content: `QUERY: ${query || ''}${serpFeatures ? `\nSERP FEATURES: ${typeof serpFeatures === 'string' ? serpFeatures : JSON.stringify(serpFeatures).slice(0, 600)}` : ''}\n\nReturn the classification JSON.` }],
+  });
+  try {
+    const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
+    return { format: String(o.format || ''), reason: String(o.reason || '') };
+  } catch (e) { return { format: '', reason: '', _parseError: true }; }
+}
+
+export default { metaDescription, titleRewrite, altText, draftFix, narrate, internalLinkSuggestions, extractCitableFacts, projectPlan, clusterKeywords, synthesizeContentBrief, decayBrief, refreshArticle, answerBlock, classifySnippetFormat, complete };

@@ -42,7 +42,8 @@ import { detectGscDaily, detectAuditHistory } from './anomaly.js';
 import * as tv from './traffic-value.js';
 import { correlationMatrix } from './correlation.js';
 import { suggestForSite as suggestInternalLinks, editablePageContent, insertableIn, normText, resolveSourceByUrl, linkedAnchorTexts, alreadyLinked } from './internal-links.js';
-import { generatePageSchema } from './schema-gen.js';
+import { generatePageSchema, validateSchema } from './schema-gen.js';
+import { scoreContent, verifyClaims, humanize } from './content-quality.js';
 import { generateCssFixes } from './css-fixes.js';
 import { findOpportunities } from './content-opportunities.js';
 import * as research from './research.js';
@@ -1758,10 +1759,18 @@ const routes = {
     }
     if (!postId) return { error: 'Could not resolve the page — pass postId or a valid page URL.' };
     const jsonld = typeof body.jsonld === 'string' ? body.jsonld : JSON.stringify(body.jsonld || body.schema || {});
+    // Validate the JSON-LD graph before writing. WARN-ONLY: warnings (deprecated
+    // types, etc.) never block the publish — they ride along on the response so the
+    // UI can surface them. Only HARD errors (ok===false with errors[]) block the write.
+    let validation = null;
+    try { validation = validateSchema(jsonld); } catch (e) { validation = { ok: true, errors: [], warnings: ['validation skipped: ' + e.message] }; }
+    if (validation && validation.ok === false && Array.isArray(validation.errors) && validation.errors.length) {
+      return { error: 'Schema validation failed: ' + validation.errors.join('; '), validation };
+    }
     try {
       const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/schema`, { method: 'POST', body: { post_id: postId, jsonld } });
       if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: 'Applied schema to live page #' + postId, meta: 'JSON-LD' }).catch(() => {});
-      return { ok: true, postId, ...r };
+      return { ok: true, postId, validation, ...r };
     } catch (e) { return { error: 'Apply failed — is the seo-agent-optimize mu-plugin installed? ' + e.message }; }
   },
   // AI-VISIBILITY AUTO-PUSH: generate the site's ENTITY SIGNALS (Organization + LegalService
@@ -2695,6 +2704,81 @@ const routes = {
     if (site) await db.logActivity({ site_id: site.id, type: 'rolled-back', actor: 'You', icon: 'undo', text: 'Rolled back — ' + body.field, meta: 'value restored' }).catch(() => {});
     return { ...r, rolledBack: true };
   },
+
+  // ── AEO / Answer Engine ─────────────────────────────────────────────────────
+  // Generate a featured-snippet/AEO answer block for a target query. PREVIEW ONLY
+  // — never auto-publishes; the frontend shows it for review before any /apply.
+  // Fetches the live page text the same way /ai-seo-facts does, then asks Claude
+  // (sys('aeo.answerBlock') auto-prepends the per-site geo_context niche block).
+  'POST /aeo-answer-block': async (body) => {
+    const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    const url = body.url || (body.page && body.page.url) || '';
+    const query = body.query || '';
+    if (!query) return { error: 'A target query is required.' };
+    let title = body.title || '', currentContent = body.currentContent || '';
+    // If no content was passed but we have a URL, fetch + strip the page (same as /ai-seo-facts).
+    if (!currentContent && url) {
+      try {
+        const res = await fetch(url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } });
+        const html = await res.text();
+        title = title || (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || '';
+        currentContent = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      } catch (e) { /* fall through — answerBlock can work query-only */ }
+    }
+    try {
+      const block = await claude.answerBlock({ url, title, query, currentContent, format: body.format, siteId: body.siteId });
+      return block;
+    } catch (e) { return { error: 'Answer block generation failed: ' + e.message }; }
+  },
+
+  // Classify the best featured-snippet format (paragraph|list|table|video) for a
+  // query given its SERP features. Niche-aware via sys('aeo.snippetFormat').
+  'POST /aeo-snippet-format': async (body) => {
+    if (!body.query) return { error: 'A query is required.' };
+    try {
+      return await claude.classifySnippetFormat({ query: body.query, serpFeatures: body.serpFeatures, siteId: body.siteId });
+    } catch (e) { return { error: 'Snippet-format classification failed: ' + e.message }; }
+  },
+
+  // Offline content quality score + claim verification. NOT heavy — pure/sync, no
+  // network/LLM. Accepts raw html or a url (fetched + stripped the existing way).
+  'POST /content-score': async (body) => {
+    let html = body.html || '';
+    if (!html && body.url) {
+      try {
+        const res = await fetch(body.url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } });
+        html = await res.text();
+      } catch (e) { return { error: 'Could not fetch the page: ' + e.message }; }
+    }
+    if (!html) return { error: 'Pass html or a url to score.' };
+    return { ...scoreContent(html), verify: verifyClaims(html) };
+  },
+
+  // GSC snippet-steal intel: pos 2–10 quick wins, question/PAA queries, and rising
+  // zero-click visibility. Loads the GSC service account + property exactly like
+  // /gsc-snapshot does, and mirrors its not-connected/not-selected handling.
+  'POST /gsc-snippet-steal': async (body) => {
+    const saStr = await db.getGscSa(body.siteId).catch(() => null);
+    if (!saStr) return { error: 'Google Search Console not connected for this site.', needsConnect: true };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    const property = body.property || (site && site.gsc_property);
+    if (!property) return { error: 'No GSC property selected. Pick one after connecting.', needsProperty: true };
+    const sa = JSON.parse(saStr);
+    try {
+      const [quickWins, questions, rising] = await Promise.all([
+        gsc.quickWins(sa, property, {}),
+        gsc.questionQueries(sa, property, {}),
+        gsc.snippetVisibility(sa, property, {}),
+      ]);
+      return { property, quickWins, questions, rising };
+    } catch (e) { if (e.code === 'NO_ACCESS') return { error: e.message, noAccess: true }; return { error: e.message }; }
+  },
+
+  // Validate a JSON-LD schema (object, bare @graph array, or JSON string) before
+  // shipping. NOT heavy — pure/sync. Returns { ok, errors, warnings }.
+  'POST /validate-schema': async (body) => {
+    return validateSchema(body.schema);
+  },
 };
 
 // --- server ----------------------------------------------------------------
@@ -2711,6 +2795,7 @@ const HEAVY_ROUTES = new Set([
   'POST /narrate', 'POST /scorecard', 'POST /weekly-briefing', 'POST /research', 'POST /auditPage',
   'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
   'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',
+  'POST /aeo-answer-block', 'POST /aeo-snippet-format',
 ]);
 
 // ── Experience Monitor — UX beacon ingest (the high-volume hot path) ─────────

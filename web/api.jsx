@@ -159,6 +159,11 @@
     gscSubmitUrls(siteId, urls) { return engine("/gsc-submit-urls", { siteId, urls }); },
     gscIndexHealth(siteId) { return engine("/gsc-index-health", { siteId }); },
     gscRankingDrops(siteId) { return engine("/gsc-ranking-drops", { siteId }); },
+    // AEO / answer-engine optimisation (snippet-steal + answer blocks + readiness scoring)
+    gscSnippetSteal(siteId) { return engine("/gsc-snippet-steal", { siteId }); },
+    aeoAnswerBlock(siteId, url, query, format) { return engine("/aeo-answer-block", { siteId, url, query, format }); },
+    contentScore(html, url) { return engine("/content-score", { html, url }); },
+    validateSchema(schema) { return engine("/validate-schema", { schema }); },
     auditAnomalies(history) { return engine("/audit-anomalies", { history }); },
     correlation(siteId, days) { return engine("/correlation", { siteId, days: days || 90 }); },
     execScorecard(siteId) { return engine("/exec-scorecard", { siteId }); },
