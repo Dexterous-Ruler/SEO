@@ -2856,11 +2856,163 @@ function GeoScreen({ ctx }) {
         </div>
       )}
 
+      {/* Local Pack readiness — Local SEO: NAP-driven readiness score + LocalBusiness schema */}
+      <SoftCard hover={false} style={{ marginTop:18 }}>
+        <SectionHead sub="Score a page for Google's local 3-pack & generate LocalBusiness schema" right={<Chip tone="teal" size="sm" icon="globe">Local SEO</Chip>}>Local Pack readiness</SectionHead>
+        <LocalPackPanel ctx={ctx} />
+      </SoftCard>
+
       {/* DataForSEO section */}
       <SoftCard hover={false} style={{ marginTop:18 }}>
         <SectionHead sub="Real keyword, competitor & backlink data" right={<Chip tone="gold" size="sm" icon="bolt">DataForSEO</Chip>}>Search Data</SectionHead>
         <SemrushPanel ctx={ctx} />
       </SoftCard>
+    </div>
+  );
+}
+
+/* ---------------- Local Pack readiness panel (AI Visibility / Local SEO) ----------------
+   Two one-click actions on the site's NAP (parsed from geo_context / homepage):
+   • Check readiness — fetch a live page, score it 0-100 against the 6 Google-local checks
+     (NAP present, LocalBusiness schema, clickable tel:, postcode) with a ✓/✗ list.
+   • Generate LocalBusiness schema — build the [WebPage, LegalService] JSON-LD @graph,
+     show validation + the parsed NAP, then "Apply to site" (write-armed gated server-side).
+   Mirrors the AEO answer-block schema flow + DriftPanel layout; reuses existing atoms. */
+function LocalPackPanel({ ctx }) {
+  const s = ctx.site;
+  const API = window.SentinelAPI;
+  const copy = (text,label)=>{ try{ navigator.clipboard.writeText(text); ctx.toast((label||"Copied")+" ✓","teal"); }catch(e){ ctx.toast("Select & copy manually","gold"); } };
+  const [url,setUrl] = useState((s._rawUrl||s.url||"").replace(/\/$/,"")+"/");
+  const [readyBusy,setReadyBusy] = useState(false);
+  const [ready,setReady] = useState(null);     // { score, checks:[{id,label,ok}], nap } | { error }
+  const [schemaBusy,setSchemaBusy] = useState(false);
+  const [schema,setSchema] = useState(null);   // { graph, validation, nap } | { error }
+  const [applying,setApplying] = useState(false);
+  const [applied,setApplied] = useState(false);
+  useEffect(()=>{ setReady(null); setSchema(null); setApplied(false); setUrl((s._rawUrl||s.url||"").replace(/\/$/,"")+"/"); },[s.id]);
+
+  const checkReadiness = ()=>{
+    const u=(url||"").trim();
+    if(!u){ ctx.toast("Enter a page URL to check","gold"); return; }
+    setReadyBusy(true);
+    API.localReadiness(s.id, u).then(r=>{
+      if(r.error){ setReady({ error:r.error }); ctx.toast("Local readiness: "+r.error,"clay"); return; }
+      setReady(r);
+    }).catch(e=>{ setReady({ error:e.message }); ctx.toast(e.message,"clay"); }).finally(()=>setReadyBusy(false));
+  };
+  const genSchema = ()=>{
+    setSchemaBusy(true); setApplied(false);
+    API.localSchema(s.id).then(r=>{
+      if(r.error){ setSchema({ error:r.error }); ctx.toast("LocalBusiness schema: "+r.error,"clay"); return; }
+      setSchema({ graph:r.graph, validation:r.validation, nap:r.nap });
+    }).catch(e=>{ setSchema({ error:e.message }); ctx.toast(e.message,"clay"); }).finally(()=>setSchemaBusy(false));
+  };
+  const applySchema = ()=>{
+    setApplying(true);
+    API.applyLocalSchema(s.id, { url:(url||"").trim()||undefined }).then(r=>{
+      if(r.error){ ctx.toast("Apply LocalBusiness schema: "+r.error,"clay"); return; }
+      if(r.status==="blocked"){ ctx.toast(r.reason||"Site is read-only — arm writes in Settings first","gold"); return; }
+      setApplied(true);
+      ctx.toast("LocalBusiness schema applied to the live page ✓","teal");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setApplying(false));
+  };
+
+  // Compact NAP renderer — shared by the readiness + schema results. Skips blank fields.
+  const napRows = (nap)=>{
+    if(!nap) return null;
+    const lines = [
+      ["Business", nap.businessName],
+      ["Legal entity", nap.legalEntity],
+      ["Address", [nap.streetAddress, nap.locality, nap.region, nap.postalCode, nap.country].filter(Boolean).join(", ")],
+      ["Phone", nap.telephone],
+      ["Email", nap.email],
+    ].filter(r=>r[1]);
+    if(!lines.length) return <div style={{ fontSize:12, color:"var(--muted)" }}>No NAP found — add the firm's name, address & phone to its geo_context or homepage.</div>;
+    return (
+      <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+        {lines.map(([k,v],i)=>(
+          <div key={i} style={{ display:"flex", gap:10, fontSize:12.5, alignItems:"baseline" }}>
+            <span style={{ width:88, flexShrink:0, fontSize:10.5, fontWeight:700, color:"var(--faint)", textTransform:"uppercase", letterSpacing:.4 }}>{k}</span>
+            <span style={{ color:"var(--ink)", wordBreak:"break-word" }}>{v}</span>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div>
+      <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:12, flexWrap:"wrap" }}>
+        <div style={{ flex:1, minWidth:220 }}>
+          <div style={{ fontSize:13.5, fontWeight:700 }}>Local Pack readiness — show up in the Google local 3-pack</div>
+          <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>Scores the page against the signals Google &amp; AI use for local results (NAP consistency, <code>LocalBusiness</code> schema, a clickable <code>tel:</code> link, postcode) and generates the matching <code>LegalService</code> JSON-LD from the firm's NAP.</div>
+        </div>
+      </div>
+
+      <div style={{ display:"flex", gap:10, marginBottom:14, flexWrap:"wrap" }}>
+        <input value={url} onChange={e=>setUrl(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter"&&!readyBusy) checkReadiness(); }} placeholder="https://your-firm.com/contact"
+          style={{ flex:1, minWidth:220, padding:"11px 14px", fontSize:13.5, fontFamily:"var(--mono)", border:"none", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", color:"var(--ink)" }} />
+        <NeoButton kind="primary" icon={readyBusy?undefined:"gauge"} disabled={readyBusy} onClick={checkReadiness}>{readyBusy&&<Icon name="cog" size={16} className="audit-spin" />}{readyBusy?"Checking…":"Check readiness"}</NeoButton>
+        <NeoButton kind="soft" icon={schemaBusy?undefined:"layers"} disabled={schemaBusy} onClick={genSchema}>{schemaBusy&&<Icon name="cog" size={16} className="audit-spin" />}Generate LocalBusiness schema</NeoButton>
+      </div>
+
+      {/* readiness result */}
+      {ready && ready.error && (
+        <div style={{ fontSize:12.5, color:"var(--clay)", padding:"6px 2px", marginBottom:12 }}>{ready.error}</div>
+      )}
+      {ready && !ready.error && (
+        <div style={{ display:"flex", gap:14, alignItems:"flex-start", flexWrap:"wrap", padding:"14px 16px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", marginBottom:14 }}>
+          <div style={{ display:"flex", flexDirection:"column", alignItems:"center", flexShrink:0, minWidth:78 }}>
+            <span style={{ fontSize:38, fontWeight:800, color:tealForScore(ready.score), lineHeight:1 }}>{ready.score}</span>
+            <span style={{ fontSize:11, color:"var(--muted)", fontWeight:600, marginTop:3 }}>/ 100</span>
+          </div>
+          <div style={{ flex:1, minWidth:200, display:"flex", flexDirection:"column", gap:6 }}>
+            {(ready.checks||[]).map((c,i)=>(
+              <div key={c.id||i} style={{ display:"flex", alignItems:"center", gap:9, fontSize:12.5 }}>
+                <span style={{ width:18, height:18, borderRadius:6, flexShrink:0, display:"grid", placeItems:"center", background:c.ok?"var(--t-100)":"var(--clay-bg)", color:c.ok?"var(--t-700)":"var(--clay)" }}><Icon name={c.ok?"check":"x"} size={12} sw={2.6} /></span>
+                <span style={{ color:c.ok?"var(--ink)":"var(--muted)" }}>{c.label}</span>
+              </div>
+            ))}
+          </div>
+          {ready.nap && (
+            <div style={{ flex:1, minWidth:200, borderLeft:"1px solid var(--line)", paddingLeft:14 }}>
+              <div style={{ fontSize:10.5, fontWeight:700, color:"var(--faint)", textTransform:"uppercase", letterSpacing:.4, marginBottom:7 }}>Parsed NAP</div>
+              {napRows(ready.nap)}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* generated schema */}
+      {schema && schema.error && (
+        <div style={{ fontSize:12.5, color:"var(--clay)", padding:"6px 2px" }}>{schema.error}</div>
+      )}
+      {schema && !schema.error && (()=>{ const v=schema.validation||{}; return (
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+            {v.ok
+              ? <Chip tone="teal" size="sm" icon="check">Valid LocalBusiness graph</Chip>
+              : <Chip tone="clay" size="sm" icon="alert">{(v.errors&&v.errors.length)||0} error{((v.errors&&v.errors.length)||0)===1?"":"s"}</Chip>}
+            {(v.warnings&&v.warnings.length>0) && <Chip tone="gold" size="sm" icon="alert">{v.warnings.length} warning{v.warnings.length===1?"":"s"}</Chip>}
+            {applied && <Chip tone="teal" size="sm" icon="check">applied live</Chip>}
+            <div style={{ marginLeft:"auto", display:"flex", gap:9 }}>
+              <NeoButton kind="soft" size="sm" icon="doc" onClick={()=>copy(JSON.stringify(schema.graph,null,2),"JSON-LD copied")}>Copy</NeoButton>
+              <NeoButton kind="primary" size="sm" icon={applying?undefined:"upload"} disabled={applying} onClick={applySchema}>{applying&&<Icon name="cog" size={13} className="audit-spin" />}Apply to site</NeoButton>
+            </div>
+          </div>
+          {(v.errors&&v.errors.length>0) && <div style={{ fontSize:12, color:"var(--clay)" }}>{v.errors.join(" · ")}</div>}
+          {(v.warnings&&v.warnings.length>0) && <div style={{ fontSize:11.5, color:"var(--gold)" }}>{v.warnings.join(" · ")}</div>}
+          {schema.nap && (
+            <div style={{ padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+              <div style={{ fontSize:10.5, fontWeight:700, color:"var(--faint)", textTransform:"uppercase", letterSpacing:.4, marginBottom:7 }}>Parsed NAP</div>
+              {napRows(schema.nap)}
+            </div>
+          )}
+          <pre className="scroll" style={{ margin:0, padding:"12px 14px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", fontSize:11, fontFamily:"var(--mono)", color:"var(--ink)", overflowX:"auto", maxHeight:300, lineHeight:1.5, whiteSpace:"pre-wrap" }}>{JSON.stringify(schema.graph,null,2)}</pre>
+        </div>
+      ); })()}
+
+      {!ready && !schema && !readyBusy && !schemaBusy && <div style={{ padding:"6px 2px", fontSize:13, color:"var(--muted)" }}>Check a page's local readiness, or generate &amp; apply the LocalBusiness schema built from this firm's NAP.</div>}
     </div>
   );
 }

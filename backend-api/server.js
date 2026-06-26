@@ -42,7 +42,7 @@ import { detectGscDaily, detectAuditHistory } from './anomaly.js';
 import * as tv from './traffic-value.js';
 import { correlationMatrix } from './correlation.js';
 import { suggestForSite as suggestInternalLinks, editablePageContent, insertableIn, normText, resolveSourceByUrl, linkedAnchorTexts, alreadyLinked } from './internal-links.js';
-import { generatePageSchema, validateSchema, schemaForAnswerBlock } from './schema-gen.js';
+import { generatePageSchema, validateSchema, schemaForAnswerBlock, localSchemaForSite, localReadiness } from './schema-gen.js';
 import { scoreContent, verifyClaims, humanize } from './content-quality.js';
 import { generateCssFixes } from './css-fixes.js';
 import { findOpportunities } from './content-opportunities.js';
@@ -2810,6 +2810,66 @@ const routes = {
     return { ...applied, validation };
   },
 
+  // ── Local Pack / LocalBusiness (NAP) schema ────────────────────────────────
+  // Build the LocalBusiness-family @graph (WebPage + LegalService) for a site from
+  // its geo_context NAP. NOT heavy — pure/sync, no network/LLM. Loads the site the
+  // same way /generate-schema does and derives the market from semrush_db.
+  'POST /local-schema': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    if (!site) return { error: 'Site not found.' };
+    const market = marketFor(site.semrush_db);
+    const { graph, validation, nap } = localSchemaForSite({
+      url: site.url,
+      geoContext: site.geo_context,
+      siteName: site.name,
+      market: market.country,
+      areaServed: body.areaServed,
+    });
+    return { graph, validation, nap };
+  },
+
+  // Score a page's Local Pack readiness (NAP present, LocalBusiness JSON-LD, tel:
+  // link, postcode). NOT heavy — one fetch + regex parse. Fetches the page text the
+  // same way /ai-seo-facts / /content-score do, and reuses drift.snapshotPage for
+  // the page's JSON-LD @types (easiest source).
+  'POST /local-readiness': async (body) => {
+    const url = body.url || (body.page && body.page.url);
+    if (!url) return { error: 'A page url is required.' };
+    let html = '', text = '';
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } });
+      html = await res.text();
+      text = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    } catch (e) { return { error: 'Could not fetch the page: ' + e.message }; }
+    // jsonLdTypes from the drift snapshot (tolerant JSON-LD @type extractor).
+    let jsonLdTypes = [];
+    try { const snap = await drift.snapshotPage(url); if (snap && Array.isArray(snap.jsonLdTypes)) jsonLdTypes = snap.jsonLdTypes; } catch (e) {}
+    return localReadiness({ html, jsonLdTypes, text });
+  },
+
+  // Apply the LocalBusiness (NAP) schema to the live site. HEAVY (writes via the
+  // mu-plugin). Builds the graph with localSchemaForSite, then publishes through the
+  // SAME path as /apply-schema (write-armed gating, page resolution, validation,
+  // mu-plugin /schema write) — no second writer. Returns what /apply-schema returns +
+  // the build validation + the parsed nap.
+  'POST /apply-local-schema': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    if (!site) return { error: 'Site not found.' };
+    const market = marketFor(site.semrush_db);
+    const { graph, validation, nap } = localSchemaForSite({
+      url: site.url,
+      geoContext: site.geo_context,
+      siteName: site.name,
+      market: market.country,
+      areaServed: body.areaServed,
+    });
+    // Reuse the existing apply-schema writer (single source of truth for the write).
+    const applied = await routes['POST /apply-schema']({ siteId: body.siteId, creds: body.creds, url: body.url || site.url, jsonld: JSON.stringify(graph), force: body.force });
+    return { ...applied, validation, nap };
+  },
+
   // Humanize text — strip AI-tell phrasing/cadence (content-quality.js). NOT heavy —
   // pure/sync, no network/LLM.
   'POST /content-humanize': async (body) => {
@@ -2918,6 +2978,7 @@ const HEAVY_ROUTES = new Set([
   'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
   'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',
   'POST /aeo-answer-block', 'POST /aeo-snippet-format', 'POST /aeo-apply-block-schema',
+  'POST /apply-local-schema',
 ]);
 
 // ── Experience Monitor — UX beacon ingest (the high-volume hot path) ─────────

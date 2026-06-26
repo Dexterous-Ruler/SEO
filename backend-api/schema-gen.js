@@ -460,5 +460,200 @@ function validateSchema(input) {
   return { ok: errors.length === 0, errors, warnings };
 }
 
-export { generatePageSchema, validateSchema, buildOrganization, buildLegalService, buildPerson, buildWebPage, buildArticle, buildBreadcrumb, buildFaqPage, buildHowTo, buildSpeakable, buildVideoObject, schemaForAnswerBlock };
-export default { generatePageSchema, validateSchema, buildHowTo, buildSpeakable, buildVideoObject, schemaForAnswerBlock };
+// ===========================================================================
+// Local Pack / LocalBusiness support — parse a site's NAP (Name/Address/Phone)
+// out of its geo_context prose (the sites table has no dedicated NAP columns),
+// emit a LocalBusiness-family node (LegalService for these law firms), and score
+// a page's Local Pack readiness. Deterministic, zero-dependency, same style as
+// the builders above.
+// ===========================================================================
+
+// UK postcode (e.g. EC1V 2NX, SW1A 1AA, M1 1AE). Captures the canonical form
+// with the single space before the inward code; tolerant of a missing space.
+const UK_POSTCODE_RE = /\b([A-Z]{1,2}\d[A-Z\d]?)\s*(\d[A-Z]{2})\b/i;
+// UK phone (e.g. 0207 459 4037, 020 7459 4037, +44 20 7459 4037, 07700 900123).
+const UK_PHONE_RE = /(\+44\s?\d{1,4}|\(?0\d{2,4}\)?)[\s.-]?\d{3,4}[\s.-]?\d{3,4}/;
+const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
+// Company-suffix fingerprints for the registered legal entity.
+const LEGAL_ENTITY_RE = /\b([A-Z][\w&'.,-]*(?:\s+[A-Z][\w&'.,-]*)*\s+(?:Ltd|Limited|LLP|PLC|LLC|Solicitors|Law(?:\s+Firm)?|Services\s+Ltd|Partnership))\b/;
+
+// extractNap — best-effort, deterministic parse of NAP from geo_context/page text.
+// Returns a partial { businessName, legalEntity, streetAddress, locality, region,
+// postalCode, country, telephone, email } (any field may be ''). Pure.
+function extractNap(text) {
+  const out = {
+    businessName: '', legalEntity: '', streetAddress: '', locality: '',
+    region: '', postalCode: '', country: '', telephone: '', email: '',
+  };
+  if (!text || typeof text !== 'string') return out;
+  const s = text.replace(/\s+/g, ' ').trim();
+
+  // Email + phone (first match wins).
+  const em = s.match(EMAIL_RE);
+  if (em) out.email = em[0];
+  const ph = s.match(UK_PHONE_RE);
+  if (ph) out.telephone = ph[0].replace(/[\s.-]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+  // Registered legal entity (…Ltd / Limited / LLP / Solicitors …).
+  const le = s.match(LEGAL_ENTITY_RE);
+  if (le) {
+    out.legalEntity = le[1].trim().replace(/[.,]+$/, '');
+    // Business name = entity minus a trailing company suffix (people search the
+    // trading name, not "… Services Ltd").
+    out.businessName = out.legalEntity
+      .replace(/\s+(?:Ltd|Limited|LLP|PLC|LLC|Services\s+Ltd|Partnership)$/i, '')
+      .trim();
+  }
+
+  // Postcode + UK country default once a postcode is present.
+  const pc = s.match(UK_POSTCODE_RE);
+  if (pc) {
+    out.postalCode = (pc[1] + ' ' + pc[2]).toUpperCase();
+    out.country = 'GB';
+    // Address block: the comma-separated run immediately preceding the postcode.
+    // e.g. "128 City Road, London EC1V 2NX" → street "128 City Road", locality
+    // "London". Walk back from the postcode through the prior comma segments.
+    const before = s.slice(0, pc.index).replace(/[,\s]+$/, '');
+    const segs = before.split(',').map((x) => x.trim()).filter(Boolean);
+    // Last segment usually holds the locality (sometimes "London EC1V" if the
+    // postcode hugged the town); the one before it is the street line.
+    if (segs.length) {
+      let locality = segs[segs.length - 1];
+      // Strip a dangling outward-code fragment the postcode regex left behind.
+      locality = locality.replace(/\s+[A-Z]{1,2}\d[A-Z\d]?$/i, '').trim();
+      out.locality = locality;
+      if (segs.length >= 2) {
+        const street = segs[segs.length - 2];
+        // Only treat as a street if it looks address-like (has a number or a
+        // street keyword) so we don't grab a sentence fragment.
+        if (/\d|\b(?:Road|Rd|Street|St|Avenue|Ave|Lane|Ln|Way|Close|Court|Square|Sq|Place|Pl|Drive|Dr|Hill|Gardens|Terrace|Walk|Wharf|Row|Crescent)\b/i.test(street)) {
+          out.streetAddress = street;
+        }
+      }
+      // If the locality itself begins with a number (no comma between street and
+      // town, e.g. "128 City Road London"), split it.
+      if (!out.streetAddress && /^\d/.test(locality)) {
+        const m = locality.match(/^(\d+[^,]*?(?:Road|Rd|Street|St|Avenue|Ave|Lane|Ln|Way|Close|Court|Square|Sq|Place|Pl|Drive|Dr|Hill|Gardens|Terrace|Walk|Wharf|Row|Crescent))\s+(.+)$/i);
+        if (m) { out.streetAddress = m[1].trim(); out.locality = m[2].trim(); }
+      }
+    }
+    // Region heuristic: a London postcode area implies the London region.
+    if (/^(?:EC|WC|[NSEW]|NW|SW|SE)\d/i.test(out.postalCode)) out.region = out.region || 'London';
+  }
+
+  return out;
+}
+
+// buildLocalBusiness — a LocalBusiness-family node (default LegalService since
+// these are law firms; override via opts.type). Mirrors buildLegalService:
+// nested PostalAddress, telephone/email, areaServed, openingHoursSpecification,
+// priceRange, GeoCoordinates, sameAs[]. Omits empty fields via clean().
+//   nap:  output of extractNap (or any subset of the same shape)
+//   opts: { type, baseUrl, areaServed, openingHours, priceRange, sameAs, geo }
+//     openingHours: [{ dayOfWeek:['Monday',...], opens:'09:00', closes:'17:00' }]
+//     geo:          { lat, lng } | { latitude, longitude }
+function buildLocalBusiness(url, nap, { type = 'LegalService', baseUrl, areaServed, openingHours, priceRange, sameAs, geo } = {}) {
+  const n = nap || {};
+  const name = n.businessName || n.legalEntity;
+  if (!name) return null;
+  const base = baseUrl || url;
+
+  const address = clean({
+    '@type': 'PostalAddress',
+    streetAddress: n.streetAddress,
+    addressLocality: n.locality,
+    addressRegion: n.region,
+    postalCode: n.postalCode,
+    addressCountry: n.country,
+  });
+
+  // openingHoursSpecification — one entry per passed { dayOfWeek, opens, closes }.
+  let hours;
+  if (Array.isArray(openingHours) && openingHours.length) {
+    hours = openingHours.map((h) => clean({
+      '@type': 'OpeningHoursSpecification',
+      dayOfWeek: h && h.dayOfWeek,
+      opens: h && h.opens,
+      closes: h && h.closes,
+    })).filter((h) => h && (h.opens || h.dayOfWeek));
+    if (!hours.length) hours = undefined;
+  }
+
+  // geo → GeoCoordinates when a lat/lng pair is supplied.
+  let geoNode;
+  if (geo) {
+    const lat = geo.lat != null ? geo.lat : geo.latitude;
+    const lng = geo.lng != null ? geo.lng : geo.longitude;
+    if (lat != null && lng != null) {
+      geoNode = { '@type': 'GeoCoordinates', latitude: lat, longitude: lng };
+    }
+  }
+
+  return clean({
+    '@type': type,
+    '@id': idFor(base, 'localbusiness'),
+    name,
+    legalName: n.legalEntity && n.legalEntity !== name ? n.legalEntity : undefined,
+    url: url || base,
+    address: address && Object.keys(address).length > 1 ? address : undefined,
+    telephone: n.telephone,
+    email: n.email,
+    areaServed: areaServed || n.areaServed,
+    openingHoursSpecification: hours,
+    priceRange,
+    geo: geoNode,
+    sameAs: sameAs && sameAs.length ? sameAs : undefined,
+  });
+}
+
+// localSchemaForSite — extractNap(geoContext) → buildLocalBusiness wrapped in a
+// generatePageSchema-style @graph (WebPage + the LocalBusiness node), validated.
+// Returns { graph, validation, nap }.
+function localSchemaForSite({ url, geoContext, siteName, market, areaServed } = {}) {
+  const nap = extractNap(geoContext);
+  const graph = [];
+  graph.push(buildWebPage(
+    { url, title: siteName || nap.businessName, lang: langForMarket(null, market) },
+    {},
+    url || ''
+  ));
+  const lb = buildLocalBusiness(url, nap, { areaServed, baseUrl: url });
+  if (lb) graph.push(lb);
+  const graphDoc = { '@context': 'https://schema.org', '@graph': graph.map(clean) };
+  return { graph: graphDoc, validation: validateSchema(graphDoc), nap };
+}
+
+// localReadiness — score 0-100 of a page's Local Pack readiness from its html /
+// extracted JSON-LD @types / visible text. Returns { score, checks, nap }.
+//   html:        raw page html (for tel: link detection)
+//   jsonLdTypes: array of @type strings found in the page's JSON-LD
+//   text:        visible text (run through extractNap for NAP presence)
+function localReadiness({ html, jsonLdTypes, text } = {}) {
+  const nap = extractNap(text || '');
+  const types = (jsonLdTypes || []).map(String);
+  const h = typeof html === 'string' ? html : '';
+
+  const hasName = !!(nap.businessName || nap.legalEntity);
+  const hasAddress = !!(nap.streetAddress || nap.locality || nap.postalCode);
+  const hasPhone = !!nap.telephone;
+  const hasLocalLd = types.some((t) => /^(LocalBusiness|LegalService|Attorney|Notary|ProfessionalService)$/i.test(t));
+  // Clickable phone: a tel: href anywhere in the markup.
+  const hasTelLink = /href\s*=\s*["']?tel:/i.test(h);
+  const hasPostcode = !!nap.postalCode;
+
+  const checks = [
+    { id: 'nap_name', label: 'Business name present in page text', ok: hasName },
+    { id: 'nap_address', label: 'Street/locality/postcode present (NAP address)', ok: hasAddress },
+    { id: 'nap_phone', label: 'Telephone present in page text', ok: hasPhone },
+    { id: 'local_jsonld', label: 'LocalBusiness/LegalService JSON-LD present', ok: hasLocalLd },
+    { id: 'tel_link', label: 'Phone is a clickable tel: link', ok: hasTelLink },
+    { id: 'postcode', label: 'UK postcode present', ok: hasPostcode },
+  ];
+
+  const passed = checks.filter((c) => c.ok).length;
+  const score = Math.round((passed / checks.length) * 100);
+  return { score, checks, nap };
+}
+
+export { generatePageSchema, validateSchema, buildOrganization, buildLegalService, buildPerson, buildWebPage, buildArticle, buildBreadcrumb, buildFaqPage, buildHowTo, buildSpeakable, buildVideoObject, schemaForAnswerBlock, extractNap, buildLocalBusiness, localSchemaForSite, localReadiness };
+export default { generatePageSchema, validateSchema, buildHowTo, buildSpeakable, buildVideoObject, schemaForAnswerBlock, extractNap, buildLocalBusiness, localSchemaForSite, localReadiness };

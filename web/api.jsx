@@ -169,6 +169,13 @@
     // Build the JSON-LD @graph for a generated answer block (preview) and apply it live (write-armed gated server-side).
     aeoBlockSchema(siteId, url, block) { return engine("/aeo-block-schema", { siteId, url, block }); },
     aeoApplyBlockSchema(siteId, url, block) { return engine("/aeo-apply-block-schema", { siteId, url, block }); },
+    // Local Pack / Local SEO — LocalBusiness (LegalService) JSON-LD + Google-local readiness scoring.
+    // localSchema: build the [WebPage, LegalService] @graph from the site's NAP (geo_context/homepage) → { graph, validation, nap }.
+    // localReadiness: fetch a live page and score it 0-100 against the 6 local checks → { score, checks:[{id,label,ok}], nap }.
+    // applyLocalSchema: publish the LocalBusiness schema live via the existing /apply-schema writer (write-armed gated server-side; force overrides).
+    localSchema(siteId, areaServed) { return engine("/local-schema", { siteId, areaServed }); },
+    localReadiness(siteId, url) { return engine("/local-readiness", { siteId, url }); },
+    applyLocalSchema(siteId, opts) { return engine("/apply-local-schema", Object.assign({ siteId }, opts || {})); },
     // Drift — diff a live page against its stored baseline (SEO/meta/structure regressions).
     // notProvisioned until supabase/drift-baselines.sql is run; updateBaseline=true (re)captures.
     driftCheck(siteId, url, updateBaseline) { return engine("/drift-check", { siteId, url, updateBaseline: !!updateBaseline }); },
