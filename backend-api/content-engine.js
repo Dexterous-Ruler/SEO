@@ -31,6 +31,8 @@ import * as research from './research.js';
 import * as dfs from './dataforseo.js';
 import * as geo from './geo.js';
 import * as airtable from './airtable.js';
+import * as claude from './claude.js';
+import * as drift from './drift.js';
 
 const SB = process.env.SUPABASE_URL;
 const SRV = process.env.SUPABASE_SERVICE_ROLE;
@@ -595,17 +597,59 @@ function oppToCluster(row) {
   };
 }
 
+// Patch arbitrary columns on one opportunity (status + payload etc.). Graceful.
+async function updateOpp(id, patch) {
+  const body = Object.assign({}, patch, { updated_at: new Date().toISOString() });
+  let res;
+  try { res = await fetch(`${SB}/rest/v1/content_opportunities?id=eq.${id}`, { method: 'PATCH', headers: headers({ Prefer: 'return=representation' }), body: JSON.stringify(body) }); }
+  catch (e) { return { error: String(e.message || e) }; }
+  const text = await res.text();
+  if (isMissingTable(res.status, text)) return { ...NOT_PROVISIONED };
+  if (!res.ok) return { error: `update ${res.status}` };
+  let rows = []; try { rows = JSON.parse(text); } catch (e) {}
+  return { updated: true, item: rows[0] };
+}
+
+// Answer-block opportunities: GENERATE the answer-first block with claude.answerBlock
+// (best-effort per item), stash it on payload.draft, and move to 'in_review' so the
+// operator can review + apply it. Does NOT touch the Article Writer.
+async function draftAnswerBlocks(siteId, n) {
+  const wl = await worklist(siteId, { status: 'scored', actionType: 'answer_block', limit: n });
+  if (wl && wl.notProvisioned) return { ...NOT_PROVISIONED, drafted: 0, inReview: 0 };
+  const items = (wl.items || []).slice(0, n);
+  if (!items.length) return { drafted: 0, inReview: 0, skipped: true, reason: 'no scored answer-block opportunities' };
+  const site = await db.getSite(siteId).catch(() => null);
+  let inReview = 0, failed = 0;
+  for (const it of items) {
+    try {
+      const block = await claude.answerBlock({ url: site && site.url, title: it.title, query: it.primary_keyword || it.title, siteId });
+      if (block && !block.error && (block.answer || block.heading)) {
+        const payload = Object.assign({}, it.payload || {}, { draft: block });
+        const u = await updateOpp(it.id, { status: 'in_review', payload });
+        if (u && u.updated) inReview++; else failed++;
+      } else { failed++; }
+    } catch (e) { failed++; }
+  }
+  return { drafted: inReview, inReview, failed, candidates: items.length, kind: 'answer_block' };
+}
+
 export async function autoDraft(siteId, { topN = 5, actionType } = {}) {
   if (!siteId) return { error: 'No site selected.' };
   const n = Math.min(Math.max(Number(topN) || 5, 1), 50);
+
+  // Answer-block opportunities are drafted IN PLACE (generate block → in_review),
+  // not pushed to the Article Writer.
+  if (actionType === 'answer_block') return await draftAnswerBlocks(siteId, n);
 
   // 1) Top-N SCORED opportunities (highest score first). worklist() surfaces
   //    notProvisioned / errors, which we pass straight through.
   const wl = await worklist(siteId, { status: 'scored', actionType, limit: n });
   if (wl && wl.notProvisioned) return { ...NOT_PROVISIONED, drafted: 0 };
   if (wl && wl.error && !(wl.items && wl.items.length)) return { error: wl.error, drafted: 0 };
-  const items = (wl.items || []).slice(0, n);
-  if (!items.length) return { drafted: 0, skipped: true, reason: 'no scored opportunities to draft' };
+  // Article path only: never push an answer_block/geo item to the Article Writer,
+  // even if actionType was left blank.
+  const items = (wl.items || []).filter((it) => it.action_type !== 'answer_block' && it.action_type !== 'geo').slice(0, n);
+  if (!items.length) return { drafted: 0, skipped: true, reason: 'no scored article opportunities to draft' };
 
   // 2) Resolve the Article Writer table — the ONE n8n-watched table (cfg.table_gaps).
   let pat = null, cfg = null;
@@ -669,4 +713,111 @@ export async function autoDraft(siteId, { topN = 5, actionType } = {}) {
   return { drafted: pushed, queued, skippedDup, candidates: items.length, table: tbl.name };
 }
 
-export default { ingest, dedupeKey, tokens, score, persist, worklist, setStatus, dismiss, mirrorToAirtable, run, startRun, runStatus, autoDraft, fuzzyMerge };
+// ---- 12) syncPublished -----------------------------------------------------
+// Close the loop opposite autoDraft. autoDraft pushes opportunities INTO the
+// n8n-watched Article Writer table (cfg.table_gaps) and flips them → 'queued';
+// the n8n flow generates + publishes, then back-writes a Status like "Article
+// Complete" + a published URL onto that same row. syncPublished reads those
+// completed rows, matches each back to a still-open opportunity by Keyword
+// (case-insensitive — the same key autoDraft de-dupes on), advances it
+// 'queued'/'in_review' → 'published', and captures a drift.checkDrift baseline
+// for the published URL so future drift checks have something to diff against.
+// HEAVY (Airtable read + one page-snapshot per published URL). Graceful:
+//   • notProvisioned  → content_opportunities table missing
+//   • { skipped, reason } → no Airtable / no Article Writer table
+// A row is "complete" when its Status matches DONE_STATUS and it carries a URL.
+const DONE_STATUS = /article\s*complete|complete|published|done/i;
+const URL_FIELDS = ['Published URL', 'Published Url', 'URL', 'Url', 'Link', 'Article URL', 'Published Link'];
+function firstUrl(fields) {
+  for (const k of URL_FIELDS) {
+    const v = fields && fields[k];
+    if (typeof v === 'string' && /^https?:\/\//i.test(v.trim())) return v.trim();
+  }
+  // Fall back: any field whose value looks like an http(s) URL.
+  for (const v of Object.values(fields || {})) {
+    if (typeof v === 'string' && /^https?:\/\/\S+$/i.test(v.trim())) return v.trim();
+  }
+  return null;
+}
+
+export async function syncPublished(siteId) {
+  if (!siteId) return { error: 'No site selected.' };
+
+  // 1) Still-open opportunities we could mark published, keyed by Keyword.
+  //    We only advance rows currently 'queued' or 'in_review' (autoDraft set
+  //    'queued'; an operator may have moved some to 'in_review').
+  const openByKw = new Map();   // keyword(lower) → opportunity row
+  for (const status of ['queued', 'in_review']) {
+    const wl = await worklist(siteId, { status, limit: 500 });
+    if (wl && wl.notProvisioned) return { ...NOT_PROVISIONED, published: 0 };
+    for (const it of (wl.items || [])) {
+      const kw = String(it.primary_keyword || '').trim().toLowerCase();
+      if (kw && !openByKw.has(kw)) openByKw.set(kw, it);
+    }
+  }
+
+  // 2) Resolve the Article Writer table (cfg.table_gaps) — same one autoDraft writes.
+  let pat = null, cfg = null;
+  try { pat = await db.getAirtablePat(siteId); } catch (e) { pat = null; }
+  try { cfg = await db.getAirtableConfig(siteId); } catch (e) { cfg = null; }
+  if (!pat || !cfg || !cfg.base_id) return { published: 0, skipped: true, reason: 'Airtable not configured', candidates: openByKw.size };
+  if (!cfg.table_gaps) return { published: 0, skipped: true, reason: 'No Article Writer table configured (table_gaps)', candidates: openByKw.size };
+  const baseId = cfg.base_id;
+
+  let tables = [];
+  try { tables = await airtable.listTables(pat, baseId); } catch (e) { tables = []; }
+  const tbl = tables.find((t) => t.id === cfg.table_gaps || t.name === cfg.table_gaps);
+  if (!tbl) return { published: 0, skipped: true, reason: 'Configured Article Writer table no longer exists', candidates: openByKw.size };
+
+  // 3) Scan the table for completed rows (Status matches + has a URL). Paginate.
+  const completed = [];   // { keyword, url }
+  try {
+    let offset;
+    do {
+      const page = await airtable.listRecords(pat, baseId, tbl.id, { pageSize: 100, offset });
+      for (const rec of (page.records || [])) {
+        const f = rec.fields || {};
+        const status = String(f.Status || f.status || '');
+        if (!DONE_STATUS.test(status)) continue;
+        const url = firstUrl(f);
+        if (!url) continue;
+        const kw = String(f.Keyword || f.keyword || '').trim().toLowerCase();
+        if (kw) completed.push({ keyword: kw, url });
+      }
+      offset = page.offset;
+    } while (offset);
+  } catch (e) {
+    return { published: 0, skipped: true, reason: `Article Writer read → ${String(e.message || e)}`, candidates: openByKw.size };
+  }
+
+  // 4) Match completed rows → open opportunities by Keyword; advance to
+  //    'published' and capture a drift baseline for the published URL.
+  let published = 0, baselines = 0;
+  const seenKw = new Set(), seenUrl = new Set();
+  const errors = [];
+  for (const { keyword, url } of completed) {
+    if (seenKw.has(keyword)) continue;
+    seenKw.add(keyword);
+    const opp = openByKw.get(keyword);
+    if (!opp) continue;   // completed article with no matching open opportunity — ignore.
+
+    const patched = await setStatus(opp.id, 'published').catch((e) => ({ error: String(e.message || e) }));
+    if (patched && patched.notProvisioned) return { ...NOT_PROVISIONED, published };
+    if (!(patched && patched.updated)) { if (patched && patched.error) errors.push(patched.error); continue; }
+    published++;
+
+    // Drift baseline — best-effort, never blocks the status advance. One per URL.
+    if (!seenUrl.has(url)) {
+      seenUrl.add(url);
+      const d = await drift.checkDrift(siteId, url).catch((e) => ({ error: String(e.message || e) }));
+      if (d && (d.baselineSet || d.rebaselined || d.drift)) baselines++;
+      else if (d && d.error) errors.push(`drift ${url} → ${d.error}`);
+    }
+  }
+
+  const out = { published, baselines, completed: completed.length, candidates: openByKw.size, table: tbl.name };
+  if (errors.length) out.errors = errors.slice(0, 10);
+  return out;
+}
+
+export default { ingest, dedupeKey, tokens, score, persist, worklist, setStatus, dismiss, mirrorToAirtable, run, startRun, runStatus, autoDraft, syncPublished, fuzzyMerge };

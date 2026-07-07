@@ -3021,6 +3021,17 @@ const routes = {
     if (!body.siteId) return { error: 'No site selected.' };
     return engine.autoDraft(body.siteId, { topN: body.topN, actionType: body.actionType });
   },
+
+  // Close the loop opposite autodraft: read the n8n-watched Article Writer table
+  // (cfg.table_gaps) for rows the n8n flow marked complete (Status + published URL),
+  // match each back to an open opportunity by Keyword, advance 'queued'/'in_review'
+  // → 'published', and capture a drift baseline for each published URL. HEAVY
+  // (Airtable read + one page-snapshot per published URL).
+  // → { published, baselines, completed, candidates, table } | { skipped, reason } | { notProvisioned }.
+  'POST /engine-sync-published': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    return engine.syncPublished(body.siteId);
+  },
 };
 
 // --- server ----------------------------------------------------------------
@@ -3038,7 +3049,7 @@ const HEAVY_ROUTES = new Set([
   'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
   'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',
   'POST /aeo-answer-block', 'POST /aeo-snippet-format', 'POST /aeo-apply-block-schema',
-  'POST /apply-local-schema', 'POST /engine-autodraft',
+  'POST /apply-local-schema', 'POST /engine-autodraft', 'POST /engine-sync-published',
 ]);
 
 // ── Experience Monitor — UX beacon ingest (the high-volume hot path) ─────────

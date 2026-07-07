@@ -121,6 +121,9 @@
     // Auto-draft: push the top-N scored opportunities into the existing Airtable Article Writer
     // (n8n watches it → drafts + publishes → back in Approve Changes). Flips those rows → queued.
     engineAutodraft(siteId, opts) { return engine("/engine-autodraft", Object.assign({ siteId }, opts || {})); },
+    // Inverse of auto-draft: read n8n-completed rows from the Article Writer, advance the matching
+    // queued/in_review opportunities → published, and capture a drift baseline per published URL.
+    engineSyncPublished(siteId) { return engine("/engine-sync-published", { siteId }); },
     trendingIntel(siteId, niche, db) { return engine("/trending-intel", { siteId, niche, db }); },
     peopleAlsoAsk(siteId, keyword, depth) { return engine("/people-also-ask", { siteId, keyword, depth }); },
     // Same route with push:true → sends each PAA question to the Airtable Article Writer; returns { ..., airtable }.

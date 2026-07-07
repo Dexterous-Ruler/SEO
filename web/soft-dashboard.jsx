@@ -1367,6 +1367,8 @@ function ContentEngineScreen({ ctx }) {
   const [notProv,setNotProv] = useState(false);
   const [busyId,setBusyId] = useState("");   // id being dismissed / status-changed
   const [drafting,setDrafting] = useState(false);   // auto-draft top-5 → Article Writer in flight
+  const [syncing,setSyncing] = useState(false);   // sync published → monitor in flight
+  const [openDraft,setOpenDraft] = useState("");   // in_review row id whose answer-block draft is expanded
 
   const load = ()=>{
     if(!live) return;
@@ -1418,6 +1420,22 @@ function ContentEngineScreen({ ctx }) {
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setDrafting(false));
   };
 
+  // Inverse of auto-draft: read the n8n-completed rows back out of the Article Writer, advance the
+  // matching queued/in_review opportunities → published, and start drift monitoring on each URL.
+  const syncPublished = ()=>{
+    if(!live) return;
+    setSyncing(true);
+    API.engineSyncPublished(s.id).then(r=>{
+      if(r && r.notProvisioned){ setNotProv(true); return; }
+      if(r && r.skipped){ ctx.toast(r.reason||"Nothing to sync — connect Airtable Article Writer first","gold"); return; }
+      if(r && r.error){ ctx.toast("Sync published: "+r.error,"clay"); return; }
+      const n=(r&&r.published!=null)?r.published:0;
+      const b=(r&&r.baselines!=null)?r.baselines:0;
+      ctx.toast(n>0?("Marked "+n+" published & started drift monitoring"+(b?" ("+b+" baseline"+(b===1?"":"s")+" captured)":"")):"No newly-published articles to sync yet", n>0?"teal":"gold");
+      load();
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setSyncing(false));
+  };
+
   const dismiss = (item)=>{
     setBusyId(item.id);
     API.engineDismiss(item.id).then(r=>{
@@ -1438,14 +1456,17 @@ function ContentEngineScreen({ ctx }) {
   const actionTone = { article:"teal", answer_block:"plum", geo:"gold" };
   const actionLabel = { article:"Article", answer_block:"Answer block", geo:"GEO" };
   const intentTone = { informational:"teal", commercial:"gold", transactional:"plum", navigational:"gray" };
-  // status flow: scored → queued (in the Article Writer) → in_review → done; dismissed is terminal.
-  const statusTone  = { scored:"gray", queued:"teal", in_review:"gold", done:"teal", dismissed:"gray" };
-  const statusLabel = { scored:"scored", queued:"Queued", in_review:"In review", done:"done", dismissed:"dismissed" };
+  // status flow: scored → queued (in the Article Writer) → in_review → published → done; dismissed is terminal.
+  const statusTone  = { scored:"gray", queued:"teal", in_review:"gold", published:"teal", done:"teal", dismissed:"gray" };
+  const statusLabel = { scored:"scored", queued:"Queued", in_review:"In review", published:"Published", done:"done", dismissed:"dismissed" };
   const sorted = items.slice().sort((a,b)=>(b.score||0)-(a.score||0));
 
   return (
     <div className="rise">
       <PageHead title="Content Engine" sub="One unified, de-duped, scored worklist from every content source — keywords, trending, People Also Ask and AI-visibility.">
+        <NeoButton kind="soft" icon={syncing?undefined:"radar"} disabled={syncing||running||!live||notProv} onClick={syncPublished} title={!live?"Connect a live WordPress site":"Mark n8n-completed articles as published and start drift monitoring on each URL"}>
+          {syncing&&<Icon name="cog" size={16} className="audit-spin" />}{syncing?"Syncing…":"Sync published → monitor"}
+        </NeoButton>
         <NeoButton kind="soft" icon={drafting?undefined:"edit"} disabled={drafting||running||!live||notProv} onClick={autodraft} title={!live?"Connect a live WordPress site":"Push the top 5 scored opportunities into your Article Writer"}>
           {drafting&&<Icon name="cog" size={16} className="audit-spin" />}{drafting?"Queuing…":"Auto-draft top 5 → Article Writer"}
         </NeoButton>
@@ -1489,6 +1510,11 @@ function ContentEngineScreen({ ctx }) {
             // Multi-source is the dedupe payoff — show ALL distinct sources.
             const sources = [...new Set(evidence.map(e=>e&&e.source).filter(Boolean))];
             const dim = busyId===item.id;
+            // A generated answer-block draft (from claude.answerBlock) is stashed on payload.draft; only
+            // show the "View draft" affordance for in_review answer_block rows that actually have one.
+            const draft = item.payload && item.payload.draft;
+            const hasDraft = item.status==="in_review" && item.action_type==="answer_block" && draft && (draft.heading||draft.answer||draft.html);
+            const draftOpen = openDraft===item.id;
             return (
               <SoftCard key={item.id} hover={false} pad={16} style={{ opacity:dim?0.55:1 }}>
                 <div style={{ display:"flex", alignItems:"flex-start", gap:12, flexWrap:"wrap" }}>
@@ -1504,9 +1530,21 @@ function ContentEngineScreen({ ctx }) {
                   </div>
                   <div style={{ display:"flex", alignItems:"center", gap:8, flexShrink:0 }}>
                     {item.status!=="done" && <NeoButton kind="soft" size="sm" icon="check" disabled={dim} onClick={()=>setStatus(item,"done")} title="Mark done">Done</NeoButton>}
+                    {hasDraft && <NeoButton kind="ghost" size="sm" icon={draftOpen?"x":"chevD"} onClick={()=>setOpenDraft(draftOpen?"":item.id)} title="Preview the generated answer-block draft">{draftOpen?"Hide draft":"View draft"}</NeoButton>}
                     <NeoButton kind="ghost" size="sm" icon="x" disabled={dim} onClick={()=>dismiss(item)}>Dismiss</NeoButton>
                   </div>
                 </div>
+                {hasDraft && draftOpen && (
+                  <div style={{ marginTop:11, padding:"12px 14px", background:"var(--surface)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", borderLeft:"3px solid var(--t-500)" }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:7, flexWrap:"wrap" }}>
+                      {draft.heading && <span style={{ fontSize:13, fontWeight:800 }}>{draft.heading}</span>}
+                      {draft.format && <Chip tone="gray" size="sm">{draft.format}</Chip>}
+                      <NeoButton kind="ghost" size="sm" icon="copy" style={{ marginLeft:"auto" }} onClick={()=>{ try{ navigator.clipboard.writeText(draft.html||draft.answer||""); ctx.toast("Answer block copied — paste it high on the page","teal"); }catch(e){ ctx.toast("Select & copy the block below","gold"); } }}>Copy</NeoButton>
+                    </div>
+                    {draft.answer && <div style={{ fontSize:12.5, color:"var(--ink)", lineHeight:1.5, marginBottom:8 }}>{draft.answer}</div>}
+                    {draft.html && <div className="scroll md" style={{ maxHeight:280, overflow:"auto", fontSize:12.5, lineHeight:1.5, background:"var(--bg)", padding:"10px 13px", borderRadius:8, boxShadow:"var(--neo-in)" }} dangerouslySetInnerHTML={{ __html: draft.html }} />}
+                  </div>
+                )}
               </SoftCard>
             );
           })}
