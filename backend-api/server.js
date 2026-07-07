@@ -2969,16 +2969,24 @@ const routes = {
   // → best-effort Airtable mirror. HEAVY (it calls the producers, incl. DataForSEO
   // SERP + optional Claude). Returns { count, byAction, bySource, sources, saved? }.
   // notProvisioned rides through until supabase/content-engine.sql is run.
+  // Kick the full ingest in the BACKGROUND and return immediately — the pipeline
+  // (DataForSEO + GSC + Claude + Perplexity + PAA) runs longer than the edge
+  // sync cap, so a blocking call 504s. The UI polls /engine-run-status and
+  // reloads the worklist when status === 'done'.
   'POST /engine-run': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    try {
-      return await engine.run(body.siteId, {
-        db: body.db,
-        includeTrending: body.includeTrending !== false,
-        includePaa: body.includePaa !== false,
-        includeGeo: !!body.includeGeo,
-      });
-    } catch (e) { return { error: 'Content Engine run failed: ' + e.message }; }
+    return engine.startRun(body.siteId, {
+      db: body.db,
+      includeTrending: body.includeTrending !== false,
+      includePaa: body.includePaa !== false,
+      includeGeo: !!body.includeGeo,
+    });
+  },
+
+  // Poll the background run's status: { status:'idle'|'running'|'done'|'error', count?, byAction?, airtable?, ... }.
+  'POST /engine-run-status': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    return engine.runStatus(body.siteId);
   },
 
   // The scored worklist for a site (ordered by score desc), filterable by status /
@@ -3020,7 +3028,6 @@ const HEAVY_ROUTES = new Set([
   'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',
   'POST /aeo-answer-block', 'POST /aeo-snippet-format', 'POST /aeo-apply-block-schema',
   'POST /apply-local-schema',
-  'POST /engine-run',
 ]);
 
 // ── Experience Monitor — UX beacon ingest (the high-volume hot path) ─────────

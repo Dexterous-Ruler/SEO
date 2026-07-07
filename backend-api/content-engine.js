@@ -517,4 +517,23 @@ export async function run(siteId, opts = {}) {
   return out;
 }
 
-export default { ingest, dedupeKey, tokens, score, persist, worklist, setStatus, dismiss, mirrorToAirtable, run };
+// ---- 10) async run (fire-and-forget) --------------------------------------
+// The full pipeline (DataForSEO + GSC + Claude cluster + Perplexity + PAA) runs
+// longer than the edge gateway's sync-response cap, so a blocking /engine-run
+// 504s even though the work completes. startRun kicks it off in the background
+// and tracks status in-process; the UI polls runStatus and reloads the worklist
+// when done. (Node keeps the promise alive after the HTTP response returns.)
+const RUNS = new Map();   // siteId -> { status, startedAt, finishedAt, count, ... }
+export function startRun(siteId, opts = {}) {
+  if (!siteId) return { error: 'No site selected.' };
+  const prev = RUNS.get(siteId);
+  if (prev && prev.status === 'running') return { started: false, alreadyRunning: true, status: 'running', startedAt: prev.startedAt };
+  RUNS.set(siteId, { status: 'running', startedAt: Date.now() });
+  run(siteId, opts)
+    .then((r) => RUNS.set(siteId, { status: 'done', startedAt: (RUNS.get(siteId) || {}).startedAt, finishedAt: Date.now(), count: r.count, byAction: r.byAction, bySource: r.bySource, saved: r.saved, notProvisioned: r.notProvisioned, airtable: r.airtable, error: r.error }))
+    .catch((e) => RUNS.set(siteId, { status: 'error', finishedAt: Date.now(), error: String(e.message || e) }));
+  return { started: true, status: 'running' };
+}
+export function runStatus(siteId) { return RUNS.get(siteId) || { status: 'idle' }; }
+
+export default { ingest, dedupeKey, tokens, score, persist, worklist, setStatus, dismiss, mirrorToAirtable, run, startRun, runStatus };

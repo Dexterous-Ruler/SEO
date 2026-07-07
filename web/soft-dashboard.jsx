@@ -1381,14 +1381,25 @@ function ContentEngineScreen({ ctx }) {
   const runEngine = ()=>{
     if(!live) return;
     setRunning(true);
+    // The run is fire-and-forget server-side (it 504s if awaited — the producers
+    // exceed the edge sync cap), so poll /engine-run-status until it finishes.
+    let polls = 0;
+    const poll = ()=>{
+      API.engineRunStatus(s.id).then(st=>{
+        if(!st || st.status==="running"){ if(++polls<40){ setTimeout(poll,7000); } else { ctx.toast("Engine still running — check back shortly.","gold"); setRunning(false); } return; }
+        if(st.status==="error"){ ctx.toast("Content Engine: "+(st.error||"run failed"),"clay"); setRunning(false); return; }
+        setNotProv(!!st.notProvisioned);
+        const n = (st&&st.count!=null)?st.count:0;
+        ctx.toast(n>0?("Ingested "+n+" opportunity"+(n===1?"":"s")+" from every source ✓"):"No new opportunities found","teal");
+        load(); setRunning(false);
+      }).catch(()=>{ if(++polls<40){ setTimeout(poll,7000); } else { setRunning(false); } });
+    };
     API.engineRun(s.id).then(r=>{
-      if(r && r.notProvisioned){ setNotProv(true); return; }
-      if(r && r.error){ ctx.toast("Content Engine: "+r.error,"clay"); return; }
+      if(r && r.notProvisioned){ setNotProv(true); setRunning(false); return; }
+      if(r && r.error){ ctx.toast("Content Engine: "+r.error,"clay"); setRunning(false); return; }
       setNotProv(false);
-      const n = (r&&r.count!=null)?r.count : 0;
-      ctx.toast(n>0?("Ingested "+n+" opportunity"+(n===1?"":"s")+" from every source ✓"):"No new opportunities found","teal");
-      load();
-    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setRunning(false));
+      setTimeout(poll,6000);   // give the background run a head start, then poll
+    }).catch(e=>{ ctx.toast(e.message,"clay"); setRunning(false); });
   };
 
   const dismiss = (item)=>{

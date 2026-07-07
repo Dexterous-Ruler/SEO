@@ -114,6 +114,7 @@
     // (keywords, trending, People Also Ask, AI-visibility). HEAVY/slow route (~20-60s).
     // notProvisioned until supabase/content-engine.sql is run.
     engineRun(siteId, opts) { return engine("/engine-run", Object.assign({ siteId }, opts || {})); },
+    engineRunStatus(siteId) { return engine("/engine-run-status", { siteId }); },
     engineWorklist(siteId, opts) { return engine("/engine-worklist", Object.assign({ siteId }, opts || {})); },
     engineSetStatus(id, status) { return engine("/engine-set-status", { id, status }); },
     engineDismiss(id) { return engine("/engine-dismiss", { id }); },
