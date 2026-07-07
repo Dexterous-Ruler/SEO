@@ -54,6 +54,7 @@ import { limiters, infraStats, withTimeout, HEAVY_MAX_QUEUE, Limiter, TTLCache }
 import * as jobs from './jobs.js';
 import * as drift from './drift.js';
 import * as indexnow from './indexnow.js';
+import * as engine from './content-engine.js';
 
 // Resolve credentials for an operation: prefer a stored siteId (secure — secret
 // decrypted server-side), fall back to creds in the body (initial connect only).
@@ -2961,6 +2962,46 @@ const routes = {
     if (!host) return { error: 'This site has no usable URL to derive a host from.' };
     return indexnow.submit(host, body.key, body.urls || []);
   },
+
+  // ── Content Engine — the unified content-opportunity "brain" ────────────────
+  // ingest every producer (keyword clusters + trending + PAA + optional AI-vis) →
+  // normalize → dedupe/merge → score → persist to Supabase content_opportunities
+  // → best-effort Airtable mirror. HEAVY (it calls the producers, incl. DataForSEO
+  // SERP + optional Claude). Returns { count, byAction, bySource, sources, saved? }.
+  // notProvisioned rides through until supabase/content-engine.sql is run.
+  'POST /engine-run': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    try {
+      return await engine.run(body.siteId, {
+        db: body.db,
+        includeTrending: body.includeTrending !== false,
+        includePaa: body.includePaa !== false,
+        includeGeo: !!body.includeGeo,
+      });
+    } catch (e) { return { error: 'Content Engine run failed: ' + e.message }; }
+  },
+
+  // The scored worklist for a site (ordered by score desc), filterable by status /
+  // actionType. NOT heavy — a single Supabase read. Passes { notProvisioned:true }
+  // straight through so the UI can prompt the operator to run the migration.
+  'POST /engine-worklist': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    return engine.worklist(body.siteId, { status: body.status, actionType: body.actionType, limit: body.limit });
+  },
+
+  // Set the status of one opportunity (e.g. queued / in_progress / published).
+  // NOT heavy — a single Supabase PATCH. notProvisioned rides through.
+  'POST /engine-set-status': async (body) => {
+    if (!body.id) return { error: 'id required' };
+    if (!body.status) return { error: 'status required' };
+    return engine.setStatus(body.id, body.status);
+  },
+
+  // Dismiss one opportunity (status → 'dismissed'). NOT heavy.
+  'POST /engine-dismiss': async (body) => {
+    if (!body.id) return { error: 'id required' };
+    return engine.dismiss(body.id);
+  },
 };
 
 // --- server ----------------------------------------------------------------
@@ -2979,6 +3020,7 @@ const HEAVY_ROUTES = new Set([
   'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',
   'POST /aeo-answer-block', 'POST /aeo-snippet-format', 'POST /aeo-apply-block-schema',
   'POST /apply-local-schema',
+  'POST /engine-run',
 ]);
 
 // ── Experience Monitor — UX beacon ingest (the high-volume hot path) ─────────

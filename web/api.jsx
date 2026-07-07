@@ -110,6 +110,13 @@
     contentIntel(siteId, niche) { return engine("/content-intel", { siteId, niche }); },
     contentOpportunities(siteId, opts) { return engine("/content-opportunities", Object.assign({ siteId }, opts || {})); },
     contentBrief(siteId, keyword, intent) { return engine("/content-brief", { siteId, keyword, intent }); },
+    // Content Engine — one unified, de-duped, scored worklist from every content source
+    // (keywords, trending, People Also Ask, AI-visibility). HEAVY/slow route (~20-60s).
+    // notProvisioned until supabase/content-engine.sql is run.
+    engineRun(siteId, opts) { return engine("/engine-run", Object.assign({ siteId }, opts || {})); },
+    engineWorklist(siteId, opts) { return engine("/engine-worklist", Object.assign({ siteId }, opts || {})); },
+    engineSetStatus(id, status) { return engine("/engine-set-status", { id, status }); },
+    engineDismiss(id) { return engine("/engine-dismiss", { id }); },
     trendingIntel(siteId, niche, db) { return engine("/trending-intel", { siteId, niche, db }); },
     peopleAlsoAsk(siteId, keyword, depth) { return engine("/people-also-ask", { siteId, keyword, depth }); },
     // Same route with push:true → sends each PAA question to the Airtable Article Writer; returns { ..., airtable }.

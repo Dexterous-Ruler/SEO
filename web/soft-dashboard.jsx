@@ -23,6 +23,7 @@ const SNAV_GROUPS = [
   ]},
   { group:"Plan & Create Content", items:[
     { k:"plan",     label:"Content Plan", icon:"sparkles" },
+    { k:"engine",   label:"Content Engine", icon:"layers" },
     { k:"content",  label:"Content Analysis", icon:"sparkles" },
     { k:"gsc",      label:"Content Decay", icon:"trend", tab:"decay" },
     { k:"geo",      label:"AI Search Visibility", icon:"globe" },
@@ -65,6 +66,7 @@ const NAV_INDEX = [
   { title:"Review Queue", screen:"review", icon:"list", kw:"review queue proposals approve reject edit diff verify pending changes" },
   { title:"Audit History", screen:"history", icon:"trend", kw:"audit history past audits score trend regression timeline" },
   { title:"Content Plan", screen:"plan", icon:"sparkles", kw:"content plan trending topics find opportunities keyword clusters gaps calendar ideas" },
+  { title:"Content Engine", screen:"engine", icon:"layers", kw:"content engine unified worklist deduped scored opportunities keywords trending people also ask paa ai visibility geo one queue run ingest sources" },
   { title:"Content Intel", screen:"content", icon:"sparkles", kw:"content intelligence analyze content topic clusters suggestions" },
   { title:"AI Visibility (GEO)", screen:"geo", icon:"globe", kw:"ai visibility geo generative share of voice llms.txt ai robots chatgpt claude gemini perplexity citation competitors" },
   { title:"Search Console", screen:"gsc", icon:"search", kw:"search console gsc google clicks impressions ctr position connect google properties first party" },
@@ -1346,6 +1348,131 @@ function AdminScreen({ ctx }) {
         </div>
       )}
       </>)}
+    </div>
+  );
+}
+
+/* ---------------- Content Engine screen ---------------- */
+/* One unified, de-duped, scored worklist from every content source (keywords,
+   trending, People Also Ask, AI-visibility). "Run engine" is a HEAVY/slow route
+   (~20-60s) that ingests + de-dupes; the worklist is loaded on mount & after a run.
+   notProvisioned until supabase/content-engine.sql is run — amber notice, no error. */
+function ContentEngineScreen({ ctx }) {
+  const s = ctx.site;
+  const API = window.SentinelAPI;
+  const live = API && window.SENTINEL_LIVE;
+  const [items,setItems] = useState([]);
+  const [running,setRunning] = useState(false);
+  const [loading,setLoading] = useState(false);
+  const [notProv,setNotProv] = useState(false);
+  const [busyId,setBusyId] = useState("");   // id being dismissed / status-changed
+
+  const load = ()=>{
+    if(!live) return;
+    setLoading(true);
+    API.engineWorklist(s.id).then(r=>{
+      if(r && r.notProvisioned){ setNotProv(true); setItems([]); return; }
+      setNotProv(false);
+      setItems(Array.isArray(r&&r.items)?r.items:[]);
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setLoading(false));
+  };
+  useEffect(()=>{ setItems([]); setNotProv(false); if(live) load(); },[s.id]);
+
+  const runEngine = ()=>{
+    if(!live) return;
+    setRunning(true);
+    API.engineRun(s.id).then(r=>{
+      if(r && r.notProvisioned){ setNotProv(true); return; }
+      if(r && r.error){ ctx.toast("Content Engine: "+r.error,"clay"); return; }
+      setNotProv(false);
+      const n = (r&&r.count!=null)?r.count : 0;
+      ctx.toast(n>0?("Ingested "+n+" opportunity"+(n===1?"":"s")+" from every source ✓"):"No new opportunities found","teal");
+      load();
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setRunning(false));
+  };
+
+  const dismiss = (item)=>{
+    setBusyId(item.id);
+    API.engineDismiss(item.id).then(r=>{
+      if(r && r.error && !r.notProvisioned){ ctx.toast("Dismiss: "+r.error,"clay"); return; }
+      setItems(prev=>prev.filter(x=>x.id!==item.id));
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
+  };
+  const setStatus = (item,status)=>{
+    setBusyId(item.id);
+    API.engineSetStatus(item.id, status).then(r=>{
+      if(r && r.error && !r.notProvisioned){ ctx.toast("Status: "+r.error,"clay"); return; }
+      const next=(r&&r.item)||Object.assign({},item,{status});
+      setItems(prev=>prev.map(x=>x.id===item.id?Object.assign({},x,next):x));
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
+  };
+
+  // action_type → distinct tone; intent → tone (mirrors OpportunitiesScreen).
+  const actionTone = { article:"teal", answer_block:"plum", geo:"gold" };
+  const actionLabel = { article:"Article", answer_block:"Answer block", geo:"GEO" };
+  const intentTone = { informational:"teal", commercial:"gold", transactional:"plum", navigational:"gray" };
+  const sorted = items.slice().sort((a,b)=>(b.score||0)-(a.score||0));
+
+  return (
+    <div className="rise">
+      <PageHead title="Content Engine" sub="One unified, de-duped, scored worklist from every content source — keywords, trending, People Also Ask and AI-visibility.">
+        <NeoButton kind="primary" icon={running?undefined:"layers"} disabled={running||!live} onClick={runEngine} title={!live?"Connect a live WordPress site":undefined}>
+          {running&&<Icon name="cog" size={16} className="audit-spin" />}{running?"Running engine…":"Run engine"}
+        </NeoButton>
+      </PageHead>
+
+      {!live && <SoftCard hover={false}><div style={{ padding:"12px 4px", color:"var(--muted)", fontSize:13.5 }}>Connect a live WordPress site to run the Content Engine.</div></SoftCard>}
+
+      {live && notProv && (
+        <div style={{ display:"flex", alignItems:"flex-start", gap:10, padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", boxShadow:"var(--neo-in)", borderLeft:"3px solid var(--gold)" }}>
+          <Icon name="alert" size={16} style={{ color:"var(--gold)", flexShrink:0, marginTop:1 }} />
+          <div style={{ fontSize:12.5, color:"var(--ink)", lineHeight:1.5 }}>Run <b>supabase/content-engine.sql</b> in Supabase to enable the Content Engine.</div>
+        </div>
+      )}
+
+      {live && !notProv && running && items.length===0 && (
+        <SoftCard hover={false}><div style={{ padding:"14px 4px", color:"var(--muted)", fontSize:14, display:"flex", alignItems:"center", gap:11 }}><Icon name="cog" size={18} className="audit-spin" />Ingesting from every source (keywords, trending, People Also Ask, AI-visibility) and de-duping…</div></SoftCard>
+      )}
+
+      {live && !notProv && !running && loading && items.length===0 && (
+        <SoftCard hover={false}><div style={{ padding:"14px 4px", color:"var(--muted)", fontSize:14, display:"flex", alignItems:"center", gap:11 }}><Icon name="cog" size={18} className="audit-spin" />Loading worklist…</div></SoftCard>
+      )}
+
+      {live && !notProv && !running && !loading && items.length===0 && (
+        <SoftCard hover={false}><div style={{ padding:"14px 4px", color:"var(--muted)", fontSize:14 }}>No opportunities yet — click Run engine to ingest from every source.</div></SoftCard>
+      )}
+
+      {live && !notProv && sorted.length>0 && (
+        <div style={{ display:"flex", flexDirection:"column", gap:11 }}>
+          {sorted.map(item=>{
+            const scoreColor = tealForScore(Math.round((item.score||0)*4));  // scores ~0-15 → 0-60 for the color ramp
+            const evidence = Array.isArray(item.evidence)?item.evidence:[];
+            // Multi-source is the dedupe payoff — show ALL distinct sources.
+            const sources = [...new Set(evidence.map(e=>e&&e.source).filter(Boolean))];
+            const dim = busyId===item.id;
+            return (
+              <SoftCard key={item.id} hover={false} pad={16} style={{ opacity:dim?0.55:1 }}>
+                <div style={{ display:"flex", alignItems:"flex-start", gap:12, flexWrap:"wrap" }}>
+                  <span style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", minWidth:40, height:28, padding:"0 9px", borderRadius:"var(--r-pill)", background:"var(--bg)", boxShadow:"var(--neo-in)", color:scoreColor, fontWeight:800, fontSize:14, flexShrink:0 }} title="Opportunity score">{Math.round((item.score||0)*10)/10}</span>
+                  <div style={{ flex:1, minWidth:200 }}>
+                    <div style={{ fontSize:14, fontWeight:700, color:"var(--ink)" }}>{item.title||item.primary_keyword||"Untitled opportunity"}</div>
+                    <div style={{ display:"flex", alignItems:"center", gap:7, flexWrap:"wrap", marginTop:7 }}>
+                      <Chip tone={actionTone[item.action_type]||"gray"} size="sm">{actionLabel[item.action_type]||item.action_type||"opportunity"}</Chip>
+                      {sources.map((src,i)=><Chip key={i} tone="gray" size="sm" icon="layers">{src}</Chip>)}
+                      {item.intent && <Chip tone={intentTone[item.intent]||"gray"} size="sm">{item.intent}</Chip>}
+                      {item.status && <Chip tone={item.status==="done"?"teal":item.status==="dismissed"?"clay":"plum"} size="sm" dot>{item.status}</Chip>}
+                    </div>
+                  </div>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, flexShrink:0 }}>
+                    {item.status!=="done" && <NeoButton kind="soft" size="sm" icon="check" disabled={dim} onClick={()=>setStatus(item,"done")} title="Mark done">Done</NeoButton>}
+                    <NeoButton kind="ghost" size="sm" icon="x" disabled={dim} onClick={()=>dismiss(item)}>Dismiss</NeoButton>
+                  </div>
+                </div>
+              </SoftCard>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -5549,7 +5676,7 @@ function App() {
     },
   };
 
-  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen, experience:ExperienceScreen, uxactivation:UxActivationScreen };
+  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, engine:ContentEngineScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen, experience:ExperienceScreen, uxactivation:UxActivationScreen };
   const Screen = SCREENS[screen] || Dashboard;
 
   let content = <Screen ctx={ctx} run />;
