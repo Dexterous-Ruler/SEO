@@ -3010,6 +3010,17 @@ const routes = {
     if (!body.id) return { error: 'id required' };
     return engine.dismiss(body.id);
   },
+
+  // Auto-draft the top-N SCORED opportunities into the EXISTING Article Writer
+  // pipeline — the ONE n8n-watched Airtable table (cfg.table_gaps). Maps each to a
+  // Title + Keyword + Content Brief row, de-dupes by Keyword, pushes, and flips the
+  // drafted opportunities → 'queued'. HEAVY (Airtable read+write). Reuses the
+  // existing writer flow — it does NOT generate/publish here (n8n does that).
+  // → { drafted, queued, skippedDup, candidates, table } | { skipped, reason } | { notProvisioned }.
+  'POST /engine-autodraft': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    return engine.autoDraft(body.siteId, { topN: body.topN, actionType: body.actionType });
+  },
 };
 
 // --- server ----------------------------------------------------------------
@@ -3027,7 +3038,7 @@ const HEAVY_ROUTES = new Set([
   'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
   'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',
   'POST /aeo-answer-block', 'POST /aeo-snippet-format', 'POST /aeo-apply-block-schema',
-  'POST /apply-local-schema',
+  'POST /apply-local-schema', 'POST /engine-autodraft',
 ]);
 
 // ── Experience Monitor — UX beacon ingest (the high-volume hot path) ─────────

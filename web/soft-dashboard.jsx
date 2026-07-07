@@ -1366,6 +1366,7 @@ function ContentEngineScreen({ ctx }) {
   const [loading,setLoading] = useState(false);
   const [notProv,setNotProv] = useState(false);
   const [busyId,setBusyId] = useState("");   // id being dismissed / status-changed
+  const [drafting,setDrafting] = useState(false);   // auto-draft top-5 → Article Writer in flight
 
   const load = ()=>{
     if(!live) return;
@@ -1402,6 +1403,21 @@ function ContentEngineScreen({ ctx }) {
     }).catch(e=>{ ctx.toast(e.message,"clay"); setRunning(false); });
   };
 
+  // Auto-draft the top-5 scored items into the existing Airtable Article Writer. n8n drafts +
+  // publishes them → they land in Approve Changes for the operator to approve before publish.
+  const autodraft = ()=>{
+    if(!live) return;
+    setDrafting(true);
+    API.engineAutodraft(s.id, { topN:5, actionType:"article" }).then(r=>{
+      if(r && r.notProvisioned){ setNotProv(true); return; }
+      if(r && r.skipped){ ctx.toast(r.reason||"Nothing to auto-draft — connect Airtable Article Writer first","gold"); return; }
+      if(r && r.error){ ctx.toast("Auto-draft: "+r.error,"clay"); return; }
+      const n=(r&&r.drafted!=null)?r.drafted:0;
+      ctx.toast(n>0?("Queued "+n+" to the Article Writer — they'll draft via n8n and land in Approve Changes"+((r&&r.skippedDup)?" ("+r.skippedDup+" already there)":"")):"All top items already in the Article Writer", n>0?"teal":"gold");
+      load();
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setDrafting(false));
+  };
+
   const dismiss = (item)=>{
     setBusyId(item.id);
     API.engineDismiss(item.id).then(r=>{
@@ -1422,15 +1438,27 @@ function ContentEngineScreen({ ctx }) {
   const actionTone = { article:"teal", answer_block:"plum", geo:"gold" };
   const actionLabel = { article:"Article", answer_block:"Answer block", geo:"GEO" };
   const intentTone = { informational:"teal", commercial:"gold", transactional:"plum", navigational:"gray" };
+  // status flow: scored → queued (in the Article Writer) → in_review → done; dismissed is terminal.
+  const statusTone  = { scored:"gray", queued:"teal", in_review:"gold", done:"teal", dismissed:"gray" };
+  const statusLabel = { scored:"scored", queued:"Queued", in_review:"In review", done:"done", dismissed:"dismissed" };
   const sorted = items.slice().sort((a,b)=>(b.score||0)-(a.score||0));
 
   return (
     <div className="rise">
       <PageHead title="Content Engine" sub="One unified, de-duped, scored worklist from every content source — keywords, trending, People Also Ask and AI-visibility.">
+        <NeoButton kind="soft" icon={drafting?undefined:"edit"} disabled={drafting||running||!live||notProv} onClick={autodraft} title={!live?"Connect a live WordPress site":"Push the top 5 scored opportunities into your Article Writer"}>
+          {drafting&&<Icon name="cog" size={16} className="audit-spin" />}{drafting?"Queuing…":"Auto-draft top 5 → Article Writer"}
+        </NeoButton>
         <NeoButton kind="primary" icon={running?undefined:"layers"} disabled={running||!live} onClick={runEngine} title={!live?"Connect a live WordPress site":undefined}>
           {running&&<Icon name="cog" size={16} className="audit-spin" />}{running?"Running engine…":"Run engine"}
         </NeoButton>
       </PageHead>
+
+      {live && !notProv && (
+        <div style={{ fontSize:12, color:"var(--muted)", lineHeight:1.5, margin:"-2px 4px 2px" }}>
+          Auto-draft moves top items into your Article Writer → they come back in Approve Changes for you to approve before publish.
+        </div>
+      )}
 
       {!live && <SoftCard hover={false}><div style={{ padding:"12px 4px", color:"var(--muted)", fontSize:13.5 }}>Connect a live WordPress site to run the Content Engine.</div></SoftCard>}
 
@@ -1471,7 +1499,7 @@ function ContentEngineScreen({ ctx }) {
                       <Chip tone={actionTone[item.action_type]||"gray"} size="sm">{actionLabel[item.action_type]||item.action_type||"opportunity"}</Chip>
                       {sources.map((src,i)=><Chip key={i} tone="gray" size="sm" icon="layers">{src}</Chip>)}
                       {item.intent && <Chip tone={intentTone[item.intent]||"gray"} size="sm">{item.intent}</Chip>}
-                      {item.status && <Chip tone={item.status==="done"?"teal":item.status==="dismissed"?"clay":"plum"} size="sm" dot>{item.status}</Chip>}
+                      {item.status && <Chip tone={statusTone[item.status]||"gray"} size="sm" dot>{statusLabel[item.status]||item.status}</Chip>}
                     </div>
                   </div>
                   <div style={{ display:"flex", alignItems:"center", gap:8, flexShrink:0 }}>

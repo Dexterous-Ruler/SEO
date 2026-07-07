@@ -118,6 +118,9 @@
     engineWorklist(siteId, opts) { return engine("/engine-worklist", Object.assign({ siteId }, opts || {})); },
     engineSetStatus(id, status) { return engine("/engine-set-status", { id, status }); },
     engineDismiss(id) { return engine("/engine-dismiss", { id }); },
+    // Auto-draft: push the top-N scored opportunities into the existing Airtable Article Writer
+    // (n8n watches it → drafts + publishes → back in Approve Changes). Flips those rows → queued.
+    engineAutodraft(siteId, opts) { return engine("/engine-autodraft", Object.assign({ siteId }, opts || {})); },
     trendingIntel(siteId, niche, db) { return engine("/trending-intel", { siteId, niche, db }); },
     peopleAlsoAsk(siteId, keyword, depth) { return engine("/people-also-ask", { siteId, keyword, depth }); },
     // Same route with push:true → sends each PAA question to the Airtable Article Writer; returns { ..., airtable }.

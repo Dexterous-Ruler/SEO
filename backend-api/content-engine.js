@@ -176,6 +176,34 @@ function dedupeMerge(opps) {
   return [...byKey.values()];
 }
 
+// ---- 3b) fuzzy merge (near-duplicate topics across sources) ----------------
+// Exact dedupeMerge only collapses IDENTICAL token-sets. This second pass merges
+// NEAR-duplicates a cross-source worklist would otherwise duplicate — e.g. a
+// "self assessment tax return" keyword cluster and a "how to file a self
+// assessment" PAA question. Two items merge when their significant-token sets
+// overlap by Jaccard >= 0.6 AND share >= 2 core tokens (the second guard stops
+// tiny sets fusing on one common word). Conservative by design — better to
+// under-merge than wrongly fuse two distinct topics. mergeInto concatenates the
+// evidence, so the multi-source bonus applies when the caller re-scores.
+function tokenSet(o) { return new Set(tokens((o.title || '') + ' ' + (o.primaryKeyword || ''))); }
+function jaccard(a, b) { let inter = 0; for (const t of a) if (b.has(t)) inter++; const uni = a.size + b.size - inter; return uni ? inter / uni : 0; }
+export function fuzzyMerge(opps) {
+  const clusters = [];   // { rep, toks }
+  for (const o of opps) {
+    const toks = tokenSet(o);
+    let best = null, bestSim = 0;
+    for (const c of clusters) { const sim = jaccard(toks, c.toks); if (sim > bestSim) { bestSim = sim; best = c; } }
+    let shared = 0; if (best) for (const t of toks) if (best.toks.has(t)) shared++;
+    if (best && bestSim >= 0.6 && shared >= 2) {
+      mergeInto(best.rep, o);
+      for (const t of toks) best.toks.add(t);   // widen so later items match the merged topic
+    } else {
+      clusters.push({ rep: o, toks });
+    }
+  }
+  return clusters.map((c) => c.rep);
+}
+
 // ---- 1) ingest -------------------------------------------------------------
 // Call every producer (best-effort), normalize into common records, dedupe +
 // merge, then score. Returns { opps, sources } where sources is per-producer
@@ -300,7 +328,7 @@ export async function ingest(siteId, { db: region, includeTrending = true, inclu
   }
 
   // Dedupe + merge across producers, then score (multi-source bonus now applies).
-  const merged = dedupeMerge(raw);
+  const merged = fuzzyMerge(dedupeMerge(raw));
   for (const o of merged) score(o, scoreSite);
   merged.sort((a, b) => b.score - a.score);
 
@@ -536,4 +564,109 @@ export function startRun(siteId, opts = {}) {
 }
 export function runStatus(siteId) { return RUNS.get(siteId) || { status: 'idle' }; }
 
-export default { ingest, dedupeKey, tokens, score, persist, worklist, setStatus, dismiss, mirrorToAirtable, run, startRun, runStatus };
+// ---- 11) autoDraft ---------------------------------------------------------
+// One-click "queue for writing": take the top-N SCORED opportunities and hand
+// them to the EXISTING Article Writer pipeline — the ONE n8n-watched Airtable
+// table (stored as cfg.table_gaps, id tblVTpv8JG5lZRiF2). We DON'T rebuild the
+// writer: we map each opportunity into that table's row shape via
+// airtable.mapArticleBrief (Title + Keyword + Content Brief), de-dupe by Keyword
+// (case-insensitive) against what's already there, push, then flip the pushed
+// rows' status → 'queued' in Supabase so they leave the "scored" backlog. The
+// n8n flow watches the table and does the actual generate+publish (its Status
+// column is left for the operator to flip to the write trigger — a click here
+// never auto-fires generation). HEAVY (Airtable read+write). Graceful:
+//   • notProvisioned  → content_opportunities table missing
+//   • { skipped, reason } → no Airtable / no Article Writer table / nothing to draft
+// Rebuild a cluster-ish object from a persisted opportunity row (payload carries
+// the original cluster detail: keywords, volume, format, gap/coverage).
+function oppToCluster(row) {
+  const p = (row && row.payload && typeof row.payload === 'object') ? row.payload : {};
+  return {
+    suggestedTitle: row.title || p.suggestedTitle || null,
+    label: p.label || row.cluster_key || null,
+    primaryKeyword: row.primary_keyword || p.primaryKeyword || null,
+    keyword: row.primary_keyword || p.primaryKeyword || null,
+    intent: row.intent || p.intent || null,
+    format: p.format || null,
+    totalVolume: p.totalVolume || 0,
+    keywords: Array.isArray(p.keywords) ? p.keywords : [],
+    isGap: !!p.isGap,
+    coveringUrl: p.coveringUrl || null,
+  };
+}
+
+export async function autoDraft(siteId, { topN = 5, actionType } = {}) {
+  if (!siteId) return { error: 'No site selected.' };
+  const n = Math.min(Math.max(Number(topN) || 5, 1), 50);
+
+  // 1) Top-N SCORED opportunities (highest score first). worklist() surfaces
+  //    notProvisioned / errors, which we pass straight through.
+  const wl = await worklist(siteId, { status: 'scored', actionType, limit: n });
+  if (wl && wl.notProvisioned) return { ...NOT_PROVISIONED, drafted: 0 };
+  if (wl && wl.error && !(wl.items && wl.items.length)) return { error: wl.error, drafted: 0 };
+  const items = (wl.items || []).slice(0, n);
+  if (!items.length) return { drafted: 0, skipped: true, reason: 'no scored opportunities to draft' };
+
+  // 2) Resolve the Article Writer table — the ONE n8n-watched table (cfg.table_gaps).
+  let pat = null, cfg = null;
+  try { pat = await db.getAirtablePat(siteId); } catch (e) { pat = null; }
+  try { cfg = await db.getAirtableConfig(siteId); } catch (e) { cfg = null; }
+  if (!pat || !cfg || !cfg.base_id) return { drafted: 0, skipped: true, reason: 'Airtable not configured', candidates: items.length };
+  if (!cfg.table_gaps) return { drafted: 0, skipped: true, reason: 'No Article Writer table configured (table_gaps)', candidates: items.length };
+  const baseId = cfg.base_id;
+
+  let tables = [];
+  try { tables = await airtable.listTables(pat, baseId); } catch (e) { tables = []; }
+  const tbl = tables.find((t) => t.id === cfg.table_gaps || t.name === cfg.table_gaps);
+  if (!tbl) return { drafted: 0, skipped: true, reason: 'Configured Article Writer table no longer exists', candidates: items.length };
+
+  // Ensure a long-text "Content Brief" column (folds into Description if it can't be created).
+  const names = new Set((tbl.fields || []).map((f) => f.name));
+  let briefField = 'Content Brief';
+  if (!names.has('Content Brief')) { try { briefField = await airtable.ensureField(pat, baseId, tbl.id, 'Content Brief', 'multilineText'); } catch (e) { briefField = null; } }
+  if (briefField) names.add(briefField);
+
+  // 3) Map each opportunity → an Article Writer row (Title + Keyword + brief),
+  //    field-set-filtered so a differing per-site schema can't 422.
+  const rowById = new Map();   // opportunity id → { row, keyword }
+  for (const it of items) {
+    const cluster = oppToCluster(it);
+    const brief = (it.payload && it.payload.brief && typeof it.payload.brief === 'object') ? it.payload.brief : {};
+    const row = airtable.mapArticleBrief(cluster, brief, briefField, names);
+    if (row && row.Keyword) rowById.set(it.id, { row, keyword: String(row.Keyword).trim().toLowerCase() });
+  }
+  if (!rowById.size) return { drafted: 0, skipped: true, reason: 'nothing mappable to draft', candidates: items.length };
+
+  // De-dupe by Keyword (case-insensitive) against rows already in the table.
+  const existing = new Set();
+  try {
+    let offset;
+    do {
+      const page = await airtable.listRecords(pat, baseId, tbl.id, { pageSize: 100, offset, fields: ['Keyword'] });
+      for (const rec of (page.records || [])) { const v = String((rec.fields || {}).Keyword || '').trim().toLowerCase(); if (v) existing.add(v); }
+      offset = page.offset;
+    } while (offset);
+  } catch (e) { /* read failed → treat as none existing */ }
+
+  const toCreate = [], draftedIds = [], seen = new Set();
+  let skippedDup = 0;
+  for (const [id, { row, keyword }] of rowById) {
+    if (keyword && (existing.has(keyword) || seen.has(keyword))) { skippedDup++; continue; }
+    if (keyword) seen.add(keyword);
+    toCreate.push(row);
+    draftedIds.push(id);
+  }
+  if (!toCreate.length) return { drafted: 0, skipped: true, reason: 'all candidates already in Article Writer table', candidates: items.length, skippedDup };
+
+  // 4) Push to the n8n-watched table, then flip the drafted opportunities → 'queued'.
+  let pushed = 0;
+  try { pushed = await airtable.createRecords(pat, baseId, tbl.id, toCreate); }
+  catch (e) { return { error: `Article Writer push → ${String(e.message || e)}`, drafted: 0, candidates: items.length }; }
+
+  let queued = 0;
+  for (const id of draftedIds) { const r = await setStatus(id, 'queued').catch(() => null); if (r && r.updated) queued++; }
+
+  return { drafted: pushed, queued, skippedDup, candidates: items.length, table: tbl.name };
+}
+
+export default { ingest, dedupeKey, tokens, score, persist, worklist, setStatus, dismiss, mirrorToAirtable, run, startRun, runStatus, autoDraft, fuzzyMerge };
