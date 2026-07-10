@@ -39,6 +39,7 @@ const SNAV_GROUPS = [
   { group:"Account & Settings", items:[
     { k:"sites",    label:"Sites",     icon:"globe" },
     { k:"admin",    label:"Admin Panel", icon:"gauge" },
+    { k:"n8n",      label:"n8n Workflows", icon:"cog" },
     { k:"settings", label:"Settings",  icon:"cog" },
   ]},
 ];
@@ -67,6 +68,7 @@ const NAV_INDEX = [
   { title:"Audit History", screen:"history", icon:"trend", kw:"audit history past audits score trend regression timeline" },
   { title:"Content Plan", screen:"plan", icon:"sparkles", kw:"content plan trending topics find opportunities keyword clusters gaps calendar ideas" },
   { title:"Content Engine", screen:"engine", icon:"layers", kw:"content engine unified worklist deduped scored opportunities keywords trending people also ask paa ai visibility geo one queue run ingest sources" },
+  { title:"n8n Workflows", screen:"n8n", icon:"cog", kw:"n8n workflow automation edit prompts system prompt run execute trigger webhook node error execution writer article agent openai debug" },
   { title:"Content Intel", screen:"content", icon:"sparkles", kw:"content intelligence analyze content topic clusters suggestions" },
   { title:"AI Visibility (GEO)", screen:"geo", icon:"globe", kw:"ai visibility geo generative share of voice llms.txt ai robots chatgpt claude gemini perplexity citation competitors" },
   { title:"Search Console", screen:"gsc", icon:"search", kw:"search console gsc google clicks impressions ctr position connect google properties first party" },
@@ -1357,6 +1359,172 @@ function AdminScreen({ ctx }) {
    trending, People Also Ask, AI-visibility). "Run engine" is a HEAVY/slow route
    (~20-60s) that ingests + de-dupes; the worklist is loaded on mount & after a run.
    notProvisioned until supabase/content-engine.sql is run — amber notice, no error. */
+/* ---------------- n8n Workflows screen ----------------
+   Pick any n8n workflow, edit each node's prompts individually, run it, and
+   inspect node errors — a thin proxy to the n8n public API. The instance URL +
+   API key live in THIS browser (localStorage) and travel per request; the
+   Sentinel server proxies and never stores them. Backend: backend-api/n8n.js. */
+function N8nScreen({ ctx }){
+  const API = window.SentinelAPI;
+  const live = API && window.SENTINEL_LIVE;
+  const LS_BASE="sentinel-n8n-base", LS_KEY="sentinel-n8n-key";
+  const rd=(k,d)=>{ try{ return localStorage.getItem(k)||d; }catch(e){ return d; } };
+  const [base,setBase] = useState(()=>rd(LS_BASE,"https://karimfirmlaw.app.n8n.cloud"));
+  const [key,setKey] = useState(()=>rd(LS_KEY,""));
+  const [connected,setConnected] = useState(false);
+  const [workflows,setWorkflows] = useState([]);
+  const [wfId,setWfId] = useState("");
+  const [wf,setWf] = useState(null);
+  const [edits,setEdits] = useState({});
+  const [busy,setBusy] = useState("");
+  const [runOut,setRunOut] = useState(null);
+  const [errs,setErrs] = useState(null);
+  const canGo = live && base.trim() && key.trim();
+  const eKey=(nodeId,path)=>nodeId+"\n"+path;
+
+  const connect = ()=>{
+    if(!canGo){ ctx.toast("Enter your n8n instance URL and API key.","gold"); return; }
+    try{ localStorage.setItem(LS_BASE,base.trim()); localStorage.setItem(LS_KEY,key.trim()); }catch(e){}
+    setBusy("connect");
+    API.n8nWorkflows(base.trim(),key.trim()).then(r=>{
+      if(r&&r.error){ ctx.toast("n8n: "+r.error,"clay"); setConnected(false); return; }
+      setWorkflows((r&&r.workflows)||[]); setConnected(true);
+      ctx.toast(((r.workflows||[]).length)+" workflows loaded","teal");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
+  };
+  const loadWf = (id)=>{
+    setWfId(id); setWf(null); setEdits({}); setRunOut(null); setErrs(null);
+    if(!id) return;
+    setBusy("load");
+    API.n8nWorkflowPrompts(base.trim(),key.trim(),id).then(r=>{
+      if(r&&r.error){ ctx.toast("n8n: "+r.error,"clay"); return; }
+      setWf(r);
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
+  };
+  const save = ()=>{
+    const list = Object.keys(edits).map(k=>{ const [nodeId,path]=k.split("\n"); return { nodeId, path, value: edits[k] }; });
+    if(!list.length){ ctx.toast("No prompt changes to save.","gold"); return; }
+    setBusy("save");
+    API.n8nUpdatePrompts(base.trim(),key.trim(),wfId,list).then(r=>{
+      if(r&&r.error){ ctx.toast("n8n save: "+r.error,"clay"); return; }
+      ctx.toast("Saved "+((r&&r.updated)||list.length)+" prompt(s) to n8n ✓","teal");
+      setEdits({}); loadWf(wfId);
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
+  };
+  const run = ()=>{
+    setBusy("run"); setRunOut(null);
+    API.n8nRun(base.trim(),key.trim(),wfId,{}).then(r=>{
+      setRunOut(r||{});
+      if(r&&r.error) ctx.toast("n8n run: "+r.error,"clay");
+      else if(r&&r.ranVia==="none") ctx.toast("No webhook trigger — run it from the n8n editor.","gold");
+      else ctx.toast("Workflow triggered ✓","teal");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
+  };
+  const loadErrs = ()=>{
+    setBusy("errors"); setErrs(null);
+    API.n8nExecutions(base.trim(),key.trim(),wfId,"error").then(r=>{
+      if(r&&r.error){ ctx.toast("n8n: "+r.error,"clay"); return; }
+      setErrs((r&&r.executions)||[]);
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
+  };
+
+  const inp = { width:"100%", boxSizing:"border-box", padding:"10px 12px", borderRadius:"var(--r-md)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none", fontFamily:"inherit" };
+  const ta = Object.assign({}, inp, { fontFamily:"var(--mono)", fontSize:12, lineHeight:1.5, resize:"vertical" });
+  const nEdits = Object.keys(edits).length;
+
+  return (
+    <div>
+      <PageHead title="n8n Workflows" sub="Pick a workflow, edit each node's prompts, run it, and inspect node errors — straight from your n8n instance." />
+
+      <SoftCard hover={false}>
+        <div style={{ fontSize:13, fontWeight:700, marginBottom:10 }}>Connect n8n</div>
+        <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end" }}>
+          <div style={{ flex:"2 1 300px" }}>
+            <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:4 }}>Instance URL</div>
+            <input style={inp} value={base} onChange={e=>setBase(e.target.value)} placeholder="https://your-instance.app.n8n.cloud" />
+          </div>
+          <div style={{ flex:"2 1 300px" }}>
+            <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:4 }}>API key <span style={{ color:"var(--faint)" }}>· stored only in this browser</span></div>
+            <input style={inp} type="password" value={key} onChange={e=>setKey(e.target.value)} placeholder="n8n public API key" />
+          </div>
+          <NeoButton kind="primary" icon={busy==="connect"?undefined:"bolt"} disabled={!canGo||busy==="connect"} onClick={connect}>{busy==="connect"&&<Icon name="cog" size={15} className="audit-spin" />}{connected?"Reconnect":"Connect"}</NeoButton>
+        </div>
+        {!live && <div style={{ marginTop:8, fontSize:12.5, color:"var(--muted)" }}>Live mode required — the panel proxies through the Sentinel server.</div>}
+      </SoftCard>
+
+      {connected && (
+        <SoftCard hover={false}>
+          <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+            <div style={{ fontSize:13, fontWeight:700 }}>Workflow</div>
+            <select style={Object.assign({}, inp, { flex:"1 1 300px", cursor:"pointer" })} value={wfId} onChange={e=>loadWf(e.target.value)}>
+              <option value="">Select a workflow… ({workflows.length})</option>
+              {workflows.map(w=><option key={w.id} value={w.id}>{(w.active?"● ":"○ ")+w.name}</option>)}
+            </select>
+            {busy==="load" && <Icon name="cog" size={16} className="audit-spin" />}
+            {wf && <>
+              <NeoButton kind="primary" size="sm" icon={busy==="run"?undefined:"bolt"} disabled={busy==="run"||!wf.hasWebhook} onClick={run}>{busy==="run"&&<Icon name="cog" size={14} className="audit-spin" />}Run</NeoButton>
+              <NeoButton kind="soft" size="sm" icon={busy==="errors"?undefined:"radar"} disabled={busy==="errors"} onClick={loadErrs}>{busy==="errors"&&<Icon name="cog" size={14} className="audit-spin" />}Errors</NeoButton>
+              <NeoButton kind="soft" size="sm" icon={busy==="save"?undefined:"check"} disabled={busy==="save"||!nEdits} onClick={save}>{busy==="save"&&<Icon name="cog" size={14} className="audit-spin" />}Save prompts{nEdits?(" ("+nEdits+")"):""}</NeoButton>
+            </>}
+          </div>
+          {wf && !wf.hasWebhook && <div style={{ marginTop:8, fontSize:12, color:"var(--muted)" }}>No webhook trigger — Run from the n8n editor (this one is manual/schedule).</div>}
+        </SoftCard>
+      )}
+
+      {runOut && (
+        <SoftCard hover={false}>
+          <div style={{ fontSize:13, fontWeight:700, marginBottom:8 }}>Run result</div>
+          <pre style={{ margin:0, fontFamily:"var(--mono)", fontSize:11.5, color:"var(--ink)", whiteSpace:"pre-wrap", wordBreak:"break-word", maxHeight:220, overflow:"auto" }}>{JSON.stringify(runOut,null,2)}</pre>
+        </SoftCard>
+      )}
+
+      {errs && (
+        <SoftCard hover={false}>
+          <div style={{ fontSize:13, fontWeight:700, marginBottom:8 }}>Recent errors · {errs.length}</div>
+          {!errs.length ? <div style={{ padding:"6px 2px", fontSize:13, color:"var(--muted)" }}>No errors 🎉</div> :
+            errs.map(e=>(
+              <div key={e.id} style={{ padding:"10px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", marginBottom:8 }}>
+                <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+                  {e.node && <Chip tone="clay" size="sm">{e.node}</Chip>}
+                  <span style={{ fontSize:11, color:"var(--faint)" }}>{String(e.stoppedAt||e.startedAt||"").slice(0,19).replace("T"," ")}</span>
+                </div>
+                <div style={{ marginTop:4, fontSize:12.5, color:"var(--ink)", wordBreak:"break-word" }}>{e.message||"(no message)"}</div>
+              </div>
+            ))
+          }
+        </SoftCard>
+      )}
+
+      {wf && (
+        <div>
+          {(wf.nodes||[]).length===0 && <SoftCard hover={false}><div style={{ padding:"6px 2px", color:"var(--muted)", fontSize:13 }}>No editable prompts in this workflow.</div></SoftCard>}
+          {(wf.nodes||[]).map(n=>(
+            <SoftCard key={n.nodeId} hover={false}>
+              <div style={{ display:"flex", gap:8, alignItems:"center", marginBottom:8, flexWrap:"wrap" }}>
+                <div style={{ fontSize:13.5, fontWeight:700 }}>{n.nodeName}</div>
+                <Chip tone="teal" size="sm">{n.nodeType}</Chip>
+              </div>
+              {n.prompts.map(pr=>{
+                const k = eKey(n.nodeId, pr.path);
+                const val = (k in edits) ? edits[k] : pr.value;
+                return (
+                  <div key={pr.path} style={{ marginBottom:10 }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                      <span style={{ fontSize:11.5, fontWeight:700, color:"var(--muted)" }}>{pr.label}</span>
+                      <span style={{ fontSize:10.5, color:"var(--faint)" }}>{(k in edits)?"edited · ":""}{String(val).length} chars</span>
+                    </div>
+                    <textarea style={Object.assign({}, ta, { minHeight: Math.min(320, Math.max(70, Math.round(String(val).length/9))) })} value={val} onChange={e=>setEdits(s=>Object.assign({}, s, { [k]: e.target.value }))} />
+                  </div>
+                );
+              })}
+            </SoftCard>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ContentEngineScreen({ ctx }) {
   const s = ctx.site;
   const API = window.SentinelAPI;
@@ -5753,7 +5921,7 @@ function App() {
     },
   };
 
-  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, engine:ContentEngineScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen, experience:ExperienceScreen, uxactivation:UxActivationScreen };
+  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, engine:ContentEngineScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen, experience:ExperienceScreen, uxactivation:UxActivationScreen, n8n:N8nScreen };
   const Screen = SCREENS[screen] || Dashboard;
 
   let content = <Screen ctx={ctx} run />;

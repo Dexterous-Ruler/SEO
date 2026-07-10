@@ -50,6 +50,7 @@ import * as research from './research.js';
 import * as imageOpt from './image-optimize.js';
 import * as prompts from './prompts.js';
 import * as perplexity from './perplexity.js';
+import * as n8n from './n8n.js';
 import { limiters, infraStats, withTimeout, HEAVY_MAX_QUEUE, Limiter, TTLCache } from './infra.js';
 import * as jobs from './jobs.js';
 import * as drift from './drift.js';
@@ -3032,6 +3033,36 @@ const routes = {
     if (!body.siteId) return { error: 'No site selected.' };
     return engine.syncPublished(body.siteId);
   },
+
+  // ── n8n control panel ──────────────────────────────────────────────────────
+  // Thin, STATELESS proxy to the n8n public API. The base URL + API key arrive in
+  // each request body from the browser (localStorage) — never stored or logged
+  // here. Lets the operator pick a workflow, edit each node's prompts, run it, and
+  // inspect node errors. See backend-api/n8n.js.
+  'POST /n8n-workflows': async (body) => {
+    if (!body.baseUrl || !body.apiKey) return { error: 'Connect n8n first (base URL + API key).' };
+    return n8n.listWorkflows(body.baseUrl, body.apiKey);
+  },
+  'POST /n8n-workflow-prompts': async (body) => {
+    if (!body.baseUrl || !body.apiKey) return { error: 'Connect n8n first (base URL + API key).' };
+    if (!body.id) return { error: 'workflow id required' };
+    return n8n.getWorkflowPrompts(body.baseUrl, body.apiKey, body.id);
+  },
+  'POST /n8n-update-prompts': async (body) => {
+    if (!body.baseUrl || !body.apiKey) return { error: 'Connect n8n first (base URL + API key).' };
+    if (!body.id || !Array.isArray(body.edits)) return { error: 'id + edits[] required' };
+    return n8n.updatePrompts(body.baseUrl, body.apiKey, body.id, body.edits);
+  },
+  'POST /n8n-run': async (body) => {
+    if (!body.baseUrl || !body.apiKey) return { error: 'Connect n8n first (base URL + API key).' };
+    if (!body.id) return { error: 'workflow id required' };
+    return n8n.runWorkflow(body.baseUrl, body.apiKey, body.id, body.payload);
+  },
+  'POST /n8n-executions': async (body) => {
+    if (!body.baseUrl || !body.apiKey) return { error: 'Connect n8n first (base URL + API key).' };
+    if (!body.id) return { error: 'workflow id required' };
+    return n8n.getExecutions(body.baseUrl, body.apiKey, body.id, { status: body.status });
+  },
 };
 
 // --- server ----------------------------------------------------------------
@@ -3050,6 +3081,7 @@ const HEAVY_ROUTES = new Set([
   'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',
   'POST /aeo-answer-block', 'POST /aeo-snippet-format', 'POST /aeo-apply-block-schema',
   'POST /apply-local-schema', 'POST /engine-autodraft', 'POST /engine-sync-published',
+  'POST /n8n-run',
 ]);
 
 // ── Experience Monitor — UX beacon ingest (the high-volume hot path) ─────────

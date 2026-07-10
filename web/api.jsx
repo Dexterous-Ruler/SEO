@@ -118,6 +118,13 @@
     engineWorklist(siteId, opts) { return engine("/engine-worklist", Object.assign({ siteId }, opts || {})); },
     engineSetStatus(id, status) { return engine("/engine-set-status", { id, status }); },
     engineDismiss(id) { return engine("/engine-dismiss", { id }); },
+    // ---- n8n control panel — base URL + API key are held in the browser
+    // (localStorage) and sent per request; the server proxies + never stores them.
+    n8nWorkflows(baseUrl, apiKey) { return engine("/n8n-workflows", { baseUrl, apiKey }); },
+    n8nWorkflowPrompts(baseUrl, apiKey, id) { return engine("/n8n-workflow-prompts", { baseUrl, apiKey, id }); },
+    n8nUpdatePrompts(baseUrl, apiKey, id, edits) { return engine("/n8n-update-prompts", { baseUrl, apiKey, id, edits }); },
+    n8nRun(baseUrl, apiKey, id, payload) { return engine("/n8n-run", { baseUrl, apiKey, id, payload }); },
+    n8nExecutions(baseUrl, apiKey, id, status) { return engine("/n8n-executions", { baseUrl, apiKey, id, status }); },
     // Auto-draft: push the top-N scored opportunities into the existing Airtable Article Writer
     // (n8n watches it → drafts + publishes → back in Approve Changes). Flips those rows → queued.
     engineAutodraft(siteId, opts) { return engine("/engine-autodraft", Object.assign({ siteId }, opts || {})); },
