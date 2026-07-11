@@ -1379,8 +1379,21 @@ function N8nScreen({ ctx }){
   const [busy,setBusy] = useState("");
   const [runOut,setRunOut] = useState(null);
   const [errs,setErrs] = useState(null);
+  const [showAll,setShowAll] = useState(false);   // writers-only by default; toggle reveals every workflow
   const canGo = live && base.trim() && key.trim();
   const eKey=(nodeId,path)=>nodeId+"\n"+path;
+  // Group the workflow picker BY SITE and, by default, show only the real content
+  // writers (the classifier tags each). Nothing is hidden permanently — "Show all"
+  // reveals templates/experiments too. Duplicate (same site+type) writers are flagged.
+  const SITE_ORDER = ["Go Legal AI","Go Legal","Go Visa","Fast ILA","Settlement Agreement Lawyers","GoodFor","Other"];
+  const shownWf = (workflows||[]).filter(w=> showAll || w.isWriter);
+  const bySite = {}; for(const w of shownWf){ (bySite[w.site]=bySite[w.site]||[]).push(w); }
+  const groups = SITE_ORDER.filter(s=>bySite[s]&&bySite[s].length).map(s=>({ site:s, items:bySite[s] }));
+  const dupOf = {}; for(const w of (workflows||[])){ if(w.isWriter){ const k=w.site+"|"+(w.type||""); dupOf[k]=(dupOf[k]||0)+1; } }
+  const isDup = (w)=> w.isWriter && dupOf[w.site+"|"+(w.type||"")]>1;
+  const writerN = (workflows||[]).filter(w=>w.isWriter).length;
+  const dupGroups = Object.keys(dupOf).filter(k=>dupOf[k]>1).length;
+  const siteN = groups.filter(g=>g.site!=="Other").length;
 
   const connect = ()=>{
     if(!canGo){ ctx.toast("Enter your n8n instance URL and API key.","gold"); return; }
@@ -1457,16 +1470,33 @@ function N8nScreen({ ctx }){
           <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
             <div style={{ fontSize:13, fontWeight:700 }}>Workflow</div>
             <select style={Object.assign({}, inp, { flex:"1 1 300px", cursor:"pointer" })} value={wfId} onChange={e=>loadWf(e.target.value)}>
-              <option value="">Select a workflow… ({workflows.length})</option>
-              {workflows.map(w=><option key={w.id} value={w.id}>{(w.active?"● ":"○ ")+w.name}</option>)}
+              <option value="">Select a workflow…</option>
+              {groups.map(g=>(
+                <optgroup key={g.site} label={g.site+"  ("+g.items.length+")"}>
+                  {g.items.map(w=>{
+                    const dup=isDup(w);
+                    const lbl=(w.active?"● ":"○ ")+(w.isWriter?(w.type||"Writer"):w.name)+(dup?("  ⚠ "+String(w.id).slice(0,6)):"")+(w.isWriter&&!w.active?"  · inactive":"");
+                    return <option key={w.id} value={w.id}>{lbl}</option>;
+                  })}
+                </optgroup>
+              ))}
             </select>
+            <NeoButton kind="soft" size="sm" onClick={()=>setShowAll(v=>!v)}>{showAll?"Writers only":("Show all ("+(workflows||[]).length+")")}</NeoButton>
             {busy==="load" && <Icon name="cog" size={16} className="audit-spin" />}
-            {wf && <>
+          </div>
+          <div style={{ fontSize:12, color:"var(--muted)", marginTop:6 }}>
+            {writerN} content writer{writerN===1?"":"s"} across {siteN} site{siteN===1?"":"s"}
+            {dupGroups?(<> · <span style={{ color:"var(--clay,#c06a4a)", fontWeight:600 }}>{dupGroups} duplicate group{dupGroups>1?"s":""} flagged ⚠</span></>):null}
+            {!showAll&&(workflows||[]).length>writerN?(<> · <span style={{ color:"var(--faint)" }}>{(workflows||[]).length-writerN} other flows hidden</span></>):null}
+          </div>
+          {wf && (
+            <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap", marginTop:10 }}>
+              {(()=>{ const sel=(workflows||[]).find(w=>w.id===wfId); return sel? (<>{sel.site!=="Other"&&<Chip tone="teal" size="sm">{sel.site}</Chip>}{sel.type&&<Chip tone="gray" size="sm">{sel.type}</Chip>}<Chip tone={sel.active?"teal":"gray"} size="sm">{sel.active?"active":"inactive"}</Chip>{isDup(sel)&&<Chip tone="clay" size="sm">duplicate ⚠</Chip>}</>):null; })()}
               <NeoButton kind="primary" size="sm" icon={busy==="run"?undefined:"bolt"} disabled={busy==="run"||!wf.hasWebhook} onClick={run}>{busy==="run"&&<Icon name="cog" size={14} className="audit-spin" />}Run</NeoButton>
               <NeoButton kind="soft" size="sm" icon={busy==="errors"?undefined:"radar"} disabled={busy==="errors"} onClick={loadErrs}>{busy==="errors"&&<Icon name="cog" size={14} className="audit-spin" />}Errors</NeoButton>
               <NeoButton kind="soft" size="sm" icon={busy==="save"?undefined:"check"} disabled={busy==="save"||!nEdits} onClick={save}>{busy==="save"&&<Icon name="cog" size={14} className="audit-spin" />}Save prompts{nEdits?(" ("+nEdits+")"):""}</NeoButton>
-            </>}
-          </div>
+            </div>
+          )}
           {wf && !wf.hasWebhook && <div style={{ marginTop:8, fontSize:12, color:"var(--muted)" }}>No webhook trigger — Run from the n8n editor (this one is manual/schedule).</div>}
         </SoftCard>
       )}

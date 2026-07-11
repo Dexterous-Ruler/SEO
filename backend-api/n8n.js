@@ -157,16 +157,46 @@ function nodePrompts(node) {
 }
 
 // ===========================================================================
-// 1) listWorkflows — { workflows:[{id,name,active}] } sorted by name, or {error}
+// 1) listWorkflows — { workflows:[{id,name,active,site,type,isWriter}], ... }
 // ===========================================================================
+// The instance mixes real per-site content WRITERS with templates, lead-gen
+// bots, competitor/video experiments and scratch "My workflow" files. classify()
+// derives the SITE + content TYPE from a name so the panel can group by site and
+// show only the writers by default (nothing is deleted — a "show all" toggle
+// still lists everything). Site order matters: go-visa/goodfor and "…legal AI"
+// are matched before the bare "go legal".
+function classify(name) {
+  const n = String(name || '').toLowerCase().trim();
+  let site = 'Other';
+  if (/go[\s-]?visa/.test(n)) site = 'Go Visa';
+  else if (/fast[\s-]?ila/.test(n)) site = 'Fast ILA';
+  else if (/\bsal\b|settlement/.test(n)) site = 'Settlement Agreement Lawyers';
+  else if (/good\s?for/.test(n)) site = 'GoodFor';
+  else if (/go[\s-]?legal[\s-]?ai\b/.test(n)) site = 'Go Legal AI';
+  else if (/go[\s-]?legal/.test(n)) site = 'Go Legal';
+  let type = '';
+  if (/recipe/.test(n)) type = 'Recipe';
+  else if (/ingredient|legal definition|glossary|\bdefinition/.test(n)) type = 'Definition';
+  else if (/how[\s-]?to/.test(n)) type = 'How-To Guide';
+  else if (/smart\s?template/.test(n)) type = 'Smart Template';
+  else if (/blog|content[\s-]?publish|ai[\s-]?writer/.test(n)) type = 'Blog';
+  if (/multilingual|jurisdiction/.test(n)) type = (type || 'Blog') + ' · Multilingual';
+  // A REAL content writer (vs a competitor/video/lead flow that merely mentions a
+  // site): AI-WRITER-*, "Go-LEGAL AI ( … )", GoodFor definition/recipe/… Workflow,
+  // *content-publish, or the legacy "Blog-…-legal" flow.
+  const isWriter = /^ai[\s-]?writer|go-?legal ai\s*\(|goodfor.*(definition|recipe|workflow)|content[\s-]?publish|^blog-.*legal/.test(n);
+  return { site, type: type || (isWriter ? 'Blog' : ''), isWriter };
+}
+
 async function listWorkflows(baseUrl, apiKey) {
   try {
-    const { ok, status, data } = await api('GET', baseUrl, apiKey, '/workflows?limit=100');
+    const { ok, status, data } = await api('GET', baseUrl, apiKey, '/workflows?limit=200');
     if (!ok) return apiError(status, data, apiKey);
     const workflows = (Array.isArray(data.data) ? data.data : [])
-      .map((w) => ({ id: w.id, name: w.name, active: !!w.active }))
+      .map((w) => { const c = classify(w.name); return { id: w.id, name: w.name, active: !!w.active, site: c.site, type: c.type, isWriter: c.isWriter }; })
       .sort((a, b) => String(a.name).localeCompare(String(b.name)));
-    return { workflows };
+    const writerCount = workflows.filter((w) => w.isWriter).length;
+    return { workflows, writerCount, total: workflows.length };
   } catch (e) {
     return apiError(0, null, apiKey, e);
   }
