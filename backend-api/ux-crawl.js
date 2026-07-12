@@ -34,30 +34,51 @@ function originOf(u) { try { return new URL(u).origin; } catch { return ''; } }
 // --- HTML extraction (delivered markup only; no JS execution) ---------------
 function extract(html, pageUrl) {
   const origin = originOf(pageUrl);
+  const raw = String(html || '');
+  const notData = (s) => s && !/^data:/i.test(s);
+  const grab = (re, src) => { const out = []; let x; while ((x = re.exec(src))) out.push((x[2] != null ? x[2] : x[3] || '').trim()); return out; };
+
+  // Resource tags (<script src>, <link stylesheet>) are self-referencing — the URL is
+  // real even when the tag is a <script>, so read them from the RAW html.
+  const scripts = grab(/<script\b[^>]*?\bsrc\s*=\s*("([^"]*)"|'([^']*)')[^>]*>/gi, raw).filter(notData);
+  const styles = [];
+  const linkRe = /<link\b[^>]*?>/gi; let lk;
+  while ((lk = linkRe.exec(raw))) {
+    const tag = lk[0];
+    if (!/\brel\s*=\s*("[^"]*stylesheet[^"]*"|'[^']*stylesheet[^']*'|stylesheet)/i.test(tag)) continue;
+    const hm = /\bhref\s*=\s*("([^"]*)"|'([^']*)')/i.exec(tag);
+    if (hm) { const v = (hm[2] != null ? hm[2] : hm[3] || '').trim(); if (notData(v)) styles.push(v); }
+  }
+
+  // Anchors + images come from the LIVE html — strip <script>/<template>/<noscript>/<style>
+  // first, because those hold CLIENT-SIDE templates (e.g. JetSearch's
+  // tmpl-jet-ajax-search-results-item with {{{data.link}}} Handlebars) whose <a>/<img> are
+  // NOT live links. Extracting them = false positives: the un-hydrated placeholder 404s,
+  // but real users (whose browser runs the JS) never see it.
+  const live = raw
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<template[\s\S]*?<\/template>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ');
+
   const anchors = [];
   const aRe = /<a\b([^>]*?)href\s*=\s*("([^"]*)"|'([^']*)')([^>]*)>([\s\S]*?)<\/a>/gi;
   let m;
-  while ((m = aRe.exec(html))) {
+  while ((m = aRe.exec(live))) {
     const attrs = (m[1] || '') + (m[5] || '');
     const rawHref = (m[3] != null ? m[3] : m[4] || '').trim();
     const text = (m[6] || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     const looksButton = /\b(class|role)\s*=\s*("[^"]*"|'[^']*')/i.test(attrs) && /btn|button|cta|elementor-button|wp-block-button/i.test(attrs);
     anchors.push({ rawHref, text, looksButton });
   }
-  const grab = (re) => { const out = []; let x; while ((x = re.exec(html))) out.push((x[2] != null ? x[2] : x[3] || '').trim()); return out; };
-  const notData = (s) => s && !/^data:/i.test(s);
-  const images = grab(/<img\b[^>]*?\bsrc\s*=\s*("([^"]*)"|'([^']*)')[^>]*>/gi).filter(notData);
-  const scripts = grab(/<script\b[^>]*?\bsrc\s*=\s*("([^"]*)"|'([^']*)')[^>]*>/gi).filter(notData);
-  const styles = [];
-  const linkRe = /<link\b[^>]*?>/gi; let lk;
-  while ((lk = linkRe.exec(html))) {
-    const tag = lk[0];
-    if (!/\brel\s*=\s*("[^"]*stylesheet[^"]*"|'[^']*stylesheet[^']*'|stylesheet)/i.test(tag)) continue;
-    const hm = /\bhref\s*=\s*("([^"]*)"|'([^']*)')/i.exec(tag);
-    if (hm) { const v = (hm[2] != null ? hm[2] : hm[3] || '').trim(); if (notData(v)) styles.push(v); }
-  }
+  const images = grab(/<img\b[^>]*?\bsrc\s*=\s*("([^"]*)"|'([^']*)')[^>]*>/gi, live).filter(notData);
+
   return { origin, anchors, images, resources: [...new Set([...scripts, ...styles])] };
 }
+
+// Template syntax that leaked into an href/src is never a real URL (belt-and-suspenders
+// for page-builder dynamic tags that survive outside <script>): {{ }}, {% %}, ${ }.
+const hasTemplateSyntax = (u) => /%7[bd]|[{}]|%24%7b|\$\{/i.test(u || '');
 
 // Only flag DEFINITIVELY-dead targets: 404 (not found) / 410 (gone). We deliberately
 // do NOT flag 0 (network/timeout — usually the site rate-limiting our burst), 401/403
@@ -126,7 +147,7 @@ export async function crawlSite(topPages, { limit = 12, maxPerPage = 40 } = {}) 
     // 1) Broken internal links + CTAs — same-origin only (external bot-block → false positives).
     const links = [...new Set(anchors
       .map((a) => absolutize(a.rawHref, p.page))
-      .filter((u) => u && originOf(u) === origin && !/^(mailto|tel):/i.test(u) && bare(u) !== bare(p.page) && !SKIP_PATH.test(u)))
+      .filter((u) => u && originOf(u) === origin && !/^(mailto|tel):/i.test(u) && bare(u) !== bare(p.page) && !SKIP_PATH.test(u) && !hasTemplateSyntax(u)))
     ].slice(0, maxPerPage);
     await runPool(links, (url, s) => {
       if (!isBadStatus(s)) return;
@@ -136,7 +157,7 @@ export async function crawlSite(topPages, { limit = 12, maxPerPage = 40 } = {}) 
     });
 
     // 2) Broken images / scripts / stylesheets — same-origin (off-site CDN often bot-blocks).
-    const assets = [...new Set([...images, ...resources].map((s) => absolutize(s, p.page)).filter((u) => u && originOf(u) === origin))].slice(0, maxPerPage);
+    const assets = [...new Set([...images, ...resources].map((s) => absolutize(s, p.page)).filter((u) => u && originOf(u) === origin && !hasTemplateSyntax(u)))].slice(0, maxPerPage);
     await runPool(assets, (url, s) => { if (isBadStatus(s)) defects.push({ type: 'broken_resource', page: p.page, url, status: s, clicks: p.clicks || 0, detail: `resource → ${s || 'unreachable'}` }); });
   }
 
