@@ -50,15 +50,15 @@ function extract(html, pageUrl) {
     if (hm) { const v = (hm[2] != null ? hm[2] : hm[3] || '').trim(); if (notData(v)) styles.push(v); }
   }
 
-  // Anchors + images come from the LIVE html — strip <script>/<template>/<noscript>/<style>
-  // first, because those hold CLIENT-SIDE templates (e.g. JetSearch's
-  // tmpl-jet-ajax-search-results-item with {{{data.link}}} Handlebars) whose <a>/<img> are
-  // NOT live links. Extracting them = false positives: the un-hydrated placeholder 404s,
-  // but real users (whose browser runs the JS) never see it.
+  // Anchors + images come from the LIVE html — strip <script>/<template>/<style> because
+  // those hold CLIENT-SIDE templates (e.g. JetSearch's tmpl-jet-ajax-search-results-item
+  // with {{{data.link}}} Handlebars) whose <a>/<img> are NOT live links (the un-hydrated
+  // placeholder 404s, but real users whose browser runs the JS never see it).
+  // We KEEP <noscript>: WP lazy-load plugins put the REAL <img src> there as the no-JS
+  // fallback, so stripping it would blind us to broken lazy-loaded images.
   const live = raw
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<template[\s\S]*?<\/template>/gi, ' ')
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ');
 
   const anchors = [];
@@ -71,7 +71,15 @@ function extract(html, pageUrl) {
     const looksButton = /\b(class|role)\s*=\s*("[^"]*"|'[^']*')/i.test(attrs) && /btn|button|cta|elementor-button|wp-block-button/i.test(attrs);
     anchors.push({ rawHref, text, looksButton });
   }
-  const images = grab(/<img\b[^>]*?\bsrc\s*=\s*("([^"]*)"|'([^']*)')[^>]*>/gi, live).filter(notData);
+  // Images — prefer the real lazy-load URL (data-lazy-src / data-src / data-lazyload) that
+  // WP LazyLoad/a3/Elementor inject, falling back to src; skip data: URI placeholders.
+  const images = [];
+  for (const tag of (live.match(/<img\b[^>]*>/gi) || [])) {
+    for (const attr of ['data-lazy-src', 'data-src', 'data-lazyload', 'src']) {
+      const mm = new RegExp('\\b' + attr + '\\s*=\\s*("([^"]*)"|\'([^\']*)\')', 'i').exec(tag);
+      if (mm) { const v = (mm[2] != null ? mm[2] : mm[3] || '').trim(); if (notData(v)) { images.push(v); break; } }
+    }
+  }
 
   return { origin, anchors, images, resources: [...new Set([...scripts, ...styles])] };
 }
