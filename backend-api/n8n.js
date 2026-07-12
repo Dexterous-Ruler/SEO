@@ -176,16 +176,58 @@ function classify(name) {
   else if (/go[\s-]?legal/.test(n)) site = 'Go Legal';
   let type = '';
   if (/recipe/.test(n)) type = 'Recipe';
+  else if (/multilingual|jurisdiction/.test(n)) type = 'Multilingual';
   else if (/ingredient|legal definition|glossary|\bdefinition/.test(n)) type = 'Definition';
   else if (/how[\s-]?to/.test(n)) type = 'How-To Guide';
   else if (/smart\s?template/.test(n)) type = 'Smart Template';
   else if (/blog|content[\s-]?publish|ai[\s-]?writer/.test(n)) type = 'Blog';
-  if (/multilingual|jurisdiction/.test(n)) type = (type || 'Blog') + ' · Multilingual';
+  // Per Karim: the multi-language / jurisdiction knowledge content is a Go Legal AI
+  // line, even though the flow is named "…go-legal-multilingual" (no "ai" in it).
+  if (type === 'Multilingual' && site === 'Go Legal') site = 'Go Legal AI';
   // A REAL content writer (vs a competitor/video/lead flow that merely mentions a
   // site): AI-WRITER-*, "Go-LEGAL AI ( … )", GoodFor definition/recipe/… Workflow,
   // *content-publish, or the legacy "Blog-…-legal" flow.
   const isWriter = /^ai[\s-]?writer|go-?legal ai\s*\(|goodfor.*(definition|recipe|workflow)|content[\s-]?publish|^blog-.*legal/.test(n);
   return { site, type: type || (isWriter ? 'Blog' : ''), isWriter };
+}
+
+// Karim's intended per-site content structure — the "master set" each site should
+// have. The panel reconciles the live workflows against this so the messy 50 reads
+// as a clean grid: which planned type is covered, duplicated, inactive, or missing,
+// plus any live writers that fall OUTSIDE the plan (extras — kept, never deleted).
+const SITE_PLAN = {
+  'Go Legal AI': ['Definition', 'Blog', 'Multilingual'],
+  'Go Legal': ['Blog'],
+  'Fast ILA': ['Blog'],
+  'Settlement Agreement Lawyers': ['Blog'],
+  'GoodFor': ['Definition', 'Blog', 'Recipe'],
+  'Go Visa': ['Blog'],
+};
+
+// For each planned (site, type): status = ok | duplicate | inactive | missing, with
+// the matching workflow ids. extras = writers whose type isn't in that site's plan.
+function reconcilePlan(workflows) {
+  const writers = (workflows || []).filter((w) => w.isWriter);
+  const bySite = {};
+  for (const w of writers) (bySite[w.site] = bySite[w.site] || []).push(w);
+  return Object.keys(SITE_PLAN).map((site) => {
+    const items = bySite[site] || [];
+    const planned = SITE_PLAN[site].map((type) => {
+      const matches = items.filter((w) => w.type === type);
+      const active = matches.filter((m) => m.active);
+      let status = 'missing';
+      if (matches.length) status = active.length > 1 ? 'duplicate' : (active.length === 1 ? 'ok' : 'inactive');
+      return {
+        type, status, count: matches.length, activeCount: active.length,
+        workflows: matches.map((m) => ({ id: m.id, name: m.name, active: m.active })),
+      };
+    });
+    const plannedTypes = new Set(SITE_PLAN[site]);
+    const extras = items
+      .filter((w) => !plannedTypes.has(w.type))
+      .map((m) => ({ id: m.id, name: m.name, type: m.type, active: m.active }));
+    return { site, planned, extras };
+  });
 }
 
 async function listWorkflows(baseUrl, apiKey) {
@@ -196,7 +238,7 @@ async function listWorkflows(baseUrl, apiKey) {
       .map((w) => { const c = classify(w.name); return { id: w.id, name: w.name, active: !!w.active, site: c.site, type: c.type, isWriter: c.isWriter }; })
       .sort((a, b) => String(a.name).localeCompare(String(b.name)));
     const writerCount = workflows.filter((w) => w.isWriter).length;
-    return { workflows, writerCount, total: workflows.length };
+    return { workflows, writerCount, total: workflows.length, structure: reconcilePlan(workflows) };
   } catch (e) {
     return apiError(0, null, apiKey, e);
   }

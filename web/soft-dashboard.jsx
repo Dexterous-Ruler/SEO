@@ -1376,6 +1376,7 @@ function N8nScreen({ ctx }){
   const [checking,setChecking] = useState(true);    // initial server-status probe in flight
   const [connected,setConnected] = useState(false); // workflows loaded (panel visible)
   const [workflows,setWorkflows] = useState([]);
+  const [structure,setStructure] = useState([]);    // intended per-site plan vs live workflows
   const [wfId,setWfId] = useState("");
   const [wf,setWf] = useState(null);
   const [edits,setEdits] = useState({});
@@ -1402,7 +1403,7 @@ function N8nScreen({ ctx }){
     setBusy("connect");
     API.n8nWorkflows(base.trim()).then(r=>{
       if(r&&r.error){ ctx.toast("n8n: "+r.error,"clay"); setConnected(false); return; }
-      setWorkflows((r&&r.workflows)||[]); setConnected(true);
+      setWorkflows((r&&r.workflows)||[]); setStructure((r&&r.structure)||[]); setConnected(true);
       ctx.toast(((r.workflows||[]).length)+" workflows loaded","teal");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
   };
@@ -1423,7 +1424,7 @@ function N8nScreen({ ctx }){
     setBusy("connect");
     API.n8nDisconnect().then(()=>{
       setStored(false); setConnected(false); setChanging(false); setKey("");
-      setWorkflows([]); setWf(null); setWfId("");
+      setWorkflows([]); setStructure([]); setWf(null); setWfId("");
       ctx.toast("Disconnected — n8n key removed from the server.","gold");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
   };
@@ -1526,6 +1527,55 @@ function N8nScreen({ ctx }){
         {!live && <div style={{ marginTop:8, fontSize:12.5, color:"var(--muted)" }}>Live mode required — the panel proxies through the Sentinel server.</div>}
         {live && checking && <div style={{ marginTop:8, fontSize:12.5, color:"var(--muted)" }}>Checking connection…</div>}
       </SoftCard>
+
+      {connected && structure.length>0 && (
+        <SoftCard hover={false}>
+          <div style={{ display:"flex", alignItems:"baseline", gap:8, marginBottom:2 }}>
+            <div style={{ fontSize:13, fontWeight:700 }}>Content structure</div>
+            <span style={{ fontSize:12, color:"var(--muted)" }}>— the master set each site should have, mapped to your live workflows</span>
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(300px, 1fr))", gap:10, marginTop:10 }}>
+            {structure.map(s=>{
+              const missing = s.planned.filter(p=>p.status==="missing").length;
+              const dup = s.planned.filter(p=>p.status==="duplicate").length;
+              return (
+                <div key={s.site} style={{ padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+                  <div style={{ fontSize:12.5, fontWeight:700, marginBottom:8 }}>{s.site}</div>
+                  <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                    {s.planned.map(p=>{
+                      const one = p.workflows.find(w=>w.active) || p.workflows[0];
+                      const off = (p.count||0)-(p.activeCount||0);
+                      const tone = p.status==="ok"?"teal":p.status==="duplicate"?"clay":p.status==="inactive"?"gold":"gray";
+                      const suffix = p.status==="ok"?(off>0?(" ✓ ·+"+off+" old"):" ✓")
+                                   : p.status==="duplicate"?(" ⚠ ×"+p.activeCount+" active")
+                                   : p.status==="inactive"?" · all off"
+                                   : " — missing";
+                      return (
+                        <span key={p.type} onClick={one?()=>loadWf(one.id):undefined} style={{ cursor:one?"pointer":"default" }} title={one?one.name:"no workflow for this type yet"}>
+                          <Chip tone={tone} size="sm">{p.type}{suffix}</Chip>
+                        </span>
+                      );
+                    })}
+                  </div>
+                  {s.extras&&s.extras.length>0 && (
+                    <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:8 }}>
+                      <span style={{ color:"var(--faint)" }}>Extra (not in your plan): </span>
+                      {s.extras.map((e,i)=>(<span key={e.id}>{i>0?", ":""}<span onClick={()=>loadWf(e.id)} style={{ cursor:"pointer", textDecoration:"underline dotted" }} title={e.name}>{e.type||"?"}{e.active?"":" (off)"}</span></span>))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap", fontSize:11.5, color:"var(--muted)", marginTop:12 }}>
+            <Chip tone="teal" size="sm">✓ covered</Chip>
+            <Chip tone="clay" size="sm">⚠ duplicate</Chip>
+            <Chip tone="gold" size="sm">off</Chip>
+            <Chip tone="gray" size="sm">missing</Chip>
+            <span>· click a type to open its prompts · nothing is deleted — extras &amp; duplicates are only flagged.</span>
+          </div>
+        </SoftCard>
+      )}
 
       {connected && (
         <SoftCard hover={false}>
