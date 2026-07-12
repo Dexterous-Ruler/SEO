@@ -865,7 +865,7 @@ const routes = {
     }
     if (!topPages.length) return { error: 'No pages to scan — connect Google Search Console (or set the site URL) first.', needsConnect: true };
     const res = await uxcrawl.crawlSite(topPages, { limit: Math.min(body.limit || 10, 20) });
-    if (body.file) { const filed = await uxcrawl.fileCrawlDefects(db, body.siteId, site, res.defects); return { ...res, filed: filed.filed }; }
+    if (body.file) { const filed = await uxcrawl.fileCrawlDefects(db, body.siteId, site, res.defects); return { ...res, filed: filed.filed, skipped: filed.skipped }; }
     return res;
   },
   // File selected crawl defects into the Review Queue (the "Send to review" action).

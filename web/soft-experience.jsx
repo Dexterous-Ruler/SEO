@@ -282,6 +282,7 @@ function ExperienceScreen({ ctx }) {
   const [crawl, setCrawl] = useState(null);        // static-scan result { defects, byType, pagesCrawled }
   const [crawling, setCrawling] = useState(false);
   const [filingCrawl, setFilingCrawl] = useState(false);
+  const [crawlSent, setCrawlSent] = useState(false); // this scan's defects are in the queue
   const [signingOff, setSigningOff] = useState(false);
 
   const toast = (m, t) => ctx && ctx.toast && ctx.toast(m, t);
@@ -357,7 +358,7 @@ function ExperienceScreen({ ctx }) {
   /* ---- static UX scan (NO consent — crawls top pages for broken links/CTAs/assets) ---- */
   const runCrawl = () => {
     if (!API || !API.uxCrawl) { toast("Crawler API unavailable.", "clay"); return; }
-    setCrawling(true); setCrawl(null);
+    setCrawling(true); setCrawl(null); setCrawlSent(false);
     Promise.resolve(API.uxCrawl(s.id, {}))
       .then((r) => { if (r && r.error) { toast(r.error, "clay"); return; } setCrawl(r || { defects: [] }); toast((r.totalDefects || 0) + " defect(s) across " + (r.pagesCrawled || 0) + " page(s)", r.totalDefects ? "gold" : "teal"); })
       .catch((e) => toast((e && e.message) || "Scan failed", "clay"))
@@ -367,7 +368,14 @@ function ExperienceScreen({ ctx }) {
     if (!crawl || !crawl.defects || !crawl.defects.length) return;
     setFilingCrawl(true);
     Promise.resolve(API.uxCrawlFile(s.id, crawl.defects))
-      .then((r) => { if (r && r.error) { toast(r.error, "clay"); return; } toast("Sent " + (r.filed || 0) + " defect(s) to Approve Changes", "teal"); })
+      .then((r) => {
+        if (r && r.error) { toast(r.error, "clay"); return; }
+        const filed = (r && r.filed) || 0, skipped = (r && r.skipped) || 0;
+        if (filed > 0) toast("Sent " + filed + " to Approve Changes" + (skipped ? " · " + skipped + " already there" : ""), "teal");
+        else if (skipped > 0) toast("Already in Approve Changes — all " + skipped + " were filed earlier ✓", "teal");
+        else toast("Nothing new to send.", "gold");
+        setCrawlSent(true);   // this scan's defects are now in the queue (new or pre-existing)
+      })
       .catch((e) => toast((e && e.message) || "Couldn't file to review", "clay"))
       .finally(() => setFilingCrawl(false));
   };
@@ -517,7 +525,7 @@ function ExperienceScreen({ ctx }) {
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
                     <span style={{ fontSize: 13, fontWeight: 700 }}>{crawl.totalDefects} defect(s) · {crawl.pagesCrawled} page(s) scanned</span>
                     <div style={{ flex: 1 }} />
-                    <NeoButton kind="soft" size="sm" icon={filingCrawl ? undefined : "check"} disabled={filingCrawl} onClick={sendCrawlToReview}>{filingCrawl && <Icon name="cog" size={13} className="audit-spin" />}Send all to Approve Changes</NeoButton>
+                    <NeoButton kind="soft" size="sm" icon={filingCrawl ? undefined : "check"} disabled={filingCrawl || crawlSent} onClick={sendCrawlToReview}>{filingCrawl && <Icon name="cog" size={13} className="audit-spin" />}{crawlSent ? "In Approve Changes ✓" : "Send all to Approve Changes"}</NeoButton>
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                     {crawl.defects.slice(0, 30).map((d, i) => (

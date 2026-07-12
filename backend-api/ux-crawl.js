@@ -214,10 +214,10 @@ const CRAWL_FIX = {
 // File defects into the Review Queue as proposals, de-duped against any still-open
 // proposal for the same finding (so the weekly job never stacks duplicates).
 export async function fileCrawlDefects(db, siteId, site, defects, { limit = 30 } = {}) {
-  let filed = 0; const created = [];
+  let filed = 0, skipped = 0; const created = [];
   for (const d of (Array.isArray(defects) ? defects : []).slice(0, limit)) {
     const sig = defectSignature(siteId, d);
-    try { if (await db.findOpenProposal(siteId, sig)) continue; } catch { /* dedup best-effort */ }
+    try { if (await db.findOpenProposal(siteId, sig)) { skipped++; continue; } } catch { /* dedup best-effort */ }
     const m = CRAWL_FIX[d.type] || CRAWL_FIX.dest_404;
     try {
       const p = await db.createProposal({
@@ -229,7 +229,7 @@ export async function fileCrawlDefects(db, siteId, site, defects, { limit = 30 }
       filed++; if (p && p.id) created.push(p.id);
     } catch { /* transient insert error — next run retries */ }
   }
-  return { filed, created };
+  return { filed, skipped, created };
 }
 
 export default { crawlSite, defectSignature, fileCrawlDefects };
