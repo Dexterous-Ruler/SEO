@@ -140,20 +140,36 @@ export async function crawlSite(topPages, { limit = 12, maxPerPage = 40 } = {}) 
     await runPool(assets, (url, s) => { if (isBadStatus(s)) defects.push({ type: 'broken_resource', page: p.page, url, status: s, clicks: p.clicks || 0, detail: `resource → ${s || 'unreachable'}` }); });
   }
 
-  // Dedupe (page,type,url|detail); rank by organic clicks at risk, then type.
-  const seen = new Set();
-  const uniq = [];
-  for (const d of defects.sort((a, b) => (b.clicks || 0) - (a.clicks || 0))) {
-    const k = `${d.page}|${d.type}|${d.url || d.detail}`;
-    if (!seen.has(k)) { seen.add(k); uniq.push(d); }
+  // Collapse by TARGET, not by page: a dead link/asset in shared nav/footer is ONE
+  // fix however many pages reference it. Aggregate the referencing pages' clicks so
+  // exposure is summed, and report the highest-traffic referrer as the example page.
+  // (Defects with no url — rare — stay keyed by page + detail.)
+  const byKey = new Map();
+  for (const d of defects) {
+    const k = d.url ? `${d.type}|${d.url}` : `${d.type}|${d.page}|${d.detail}`;
+    const ex = byKey.get(k);
+    if (ex) {
+      ex.refs += 1;
+      ex.clicks += (d.clicks || 0);
+      if ((d.clicks || 0) > ex._top) { ex._top = d.clicks || 0; ex.page = d.page; }
+    } else {
+      byKey.set(k, Object.assign({}, d, { refs: 1, clicks: d.clicks || 0, _top: d.clicks || 0 }));
+    }
   }
+  const uniq = [...byKey.values()].map((d) => {
+    const out = Object.assign({}, d); delete out._top;
+    if (d.refs > 1) out.detail = `${d.detail} · on ${d.refs} pages`;
+    return out;
+  }).sort((a, b) => (b.clicks || 0) - (a.clicks || 0));
   const byType = uniq.reduce((acc, d) => { acc[d.type] = (acc[d.type] || 0) + 1; return acc; }, {});
   return { defects: uniq, pagesCrawled: pages.length, totalDefects: uniq.length, byType };
 }
 
 // Stable signature so re-runs update instead of duplicating (used when filing).
+// Keyed by the broken TARGET (url) so a site-wide dead link is one proposal, not one
+// per referencing page. Falls back to page+detail for the rare url-less defect.
 export function defectSignature(siteId, d) {
-  return `crawl:${siteId}:${d.type}:${d.page}:${d.url || d.detail}`.slice(0, 200);
+  return `crawl:${siteId}:${d.type}:${d.url || (d.page + ':' + d.detail)}`.slice(0, 200);
 }
 
 // How each crawl defect maps into a Review-Queue proposal. All 'manual' — the fix
@@ -161,9 +177,9 @@ export function defectSignature(siteId, d) {
 // surface exactly what's broken and where. `db` is injected so this file stays free
 // of a Supabase import; caller passes the shared db from supabase.js.
 const CRAWL_FIX = {
-  dest_404: { channel: 'manual', field: 'internal link', after: 'Re-point this internal link to the correct live URL, or add a 301 redirect.' },
-  broken_cta: { channel: 'manual', field: 'CTA / button link', after: 'This button/CTA links to an error page. Point it at the correct live URL.' },
-  broken_resource: { channel: 'manual', field: 'page resource', after: 'Replace or remove this broken image / script / stylesheet.' },
+  dest_404: { label: 'broken link', channel: 'manual', field: 'internal link', after: 'Re-point this internal link to the correct live URL, or add a 301 redirect.' },
+  broken_cta: { label: 'dead CTA', channel: 'manual', field: 'CTA / button link', after: 'This button/CTA links to an error page. Point it at the correct live URL.' },
+  broken_resource: { label: 'broken asset', channel: 'manual', field: 'page resource', after: 'Replace or remove this broken image / script / stylesheet.' },
 };
 
 // File defects into the Review Queue as proposals, de-duped against any still-open
@@ -177,9 +193,9 @@ export async function fileCrawlDefects(db, siteId, site, defects, { limit = 30 }
     try {
       const p = await db.createProposal({
         site_id: siteId, owner: (site && site.owner) || null, finding_id: sig, disc: 'experience', risk: 'low',
-        channel: m.channel, title: `UX: ${d.type.replace(/_/g, ' ')} — ${d.page}`,
+        channel: m.channel, title: `UX: ${m.label} — ${String(d.url || d.page || '').replace(/^https?:\/\/[^/]+/, '') || '(page)'}`,
         page: d.page, impact: '+UX', target: 'staging', field: m.field,
-        before_val: String(d.url || d.detail || '').slice(0, 500), after_val: m.after, status: 'proposed',
+        before_val: String((d.url || '') + (d.detail ? (d.url ? ' — ' : '') + d.detail : '')).slice(0, 500), after_val: m.after, status: 'proposed',
       });
       filed++; if (p && p.id) created.push(p.id);
     } catch { /* transient insert error — next run retries */ }
