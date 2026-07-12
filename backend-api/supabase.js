@@ -19,6 +19,9 @@ let _anyGsc = { v: null, exp: 0 };
 // Same idea for the Airtable PAT — one token accesses all the user's bases, so
 // the connection is global; each site only differs by which base it writes to.
 let _anyAt = { v: null, exp: 0 };
+// n8n instance config (base URL + public API key). ONE instance serves every site,
+// so this is a single global credential (encrypted at rest in app_secrets).
+let _n8n = { v: null, exp: 0 };
 
 function headers(extra) {
   return Object.assign({
@@ -93,6 +96,33 @@ export const db = {
       }
     } catch (e) {}
     return null;
+  },
+
+  // n8n instance config — base URL + public API key, ENCRYPTED at rest via the
+  // generic app_secrets store (pgcrypto). GLOBAL: one n8n instance serves every
+  // site, so this is a single credential, not per-site. The browser stores nothing:
+  // it connects once, the key is encrypted here, and every /n8n-* call resolves it
+  // server-side. getN8nConfig().apiKey MUST NEVER be returned to a browser route.
+  async setN8nConfig(baseUrl, apiKey) {
+    _n8n = { v: null, exp: 0 };
+    if (baseUrl != null) await rpc('set_app_secret', { p_name: 'n8n_base_url', p_val: String(baseUrl), p_key: ENC_KEY });
+    if (apiKey != null) await rpc('set_app_secret', { p_name: 'n8n_api_key', p_val: String(apiKey), p_key: ENC_KEY });
+    return { ok: true };
+  },
+  async getN8nConfig() {
+    const now = Date.now();
+    if (_n8n.v && _n8n.exp > now) return _n8n.v;
+    const baseUrl = await rpc('get_app_secret', { p_name: 'n8n_base_url', p_key: ENC_KEY }).catch(() => null);
+    const apiKey = await rpc('get_app_secret', { p_name: 'n8n_api_key', p_key: ENC_KEY }).catch(() => null);
+    const v = { baseUrl: baseUrl || null, apiKey: apiKey || null };
+    _n8n = { v, exp: now + 60000 };
+    return v;
+  },
+  async clearN8nConfig() {
+    _n8n = { v: null, exp: 0 };
+    await rpc('set_app_secret', { p_name: 'n8n_api_key', p_val: '', p_key: ENC_KEY }).catch(() => {});
+    await rpc('set_app_secret', { p_name: 'n8n_base_url', p_val: '', p_key: ENC_KEY }).catch(() => {});
+    return { ok: true };
   },
 
   // GSC credential (OAuth refresh token OR service-account JSON), encrypted.

@@ -51,6 +51,17 @@ import * as imageOpt from './image-optimize.js';
 import * as prompts from './prompts.js';
 import * as perplexity from './perplexity.js';
 import * as n8n from './n8n.js';
+
+// Resolve n8n credentials for a request: PREFER the encrypted server-side config
+// (connect once — the key lives only in Supabase, pgcrypto-encrypted), and fall
+// back to creds in the request body only for legacy BYO-key browsers. The key is
+// never logged. Hoisted so the /n8n-* route handlers below can call it.
+async function n8nCreds(body) {
+  const cfg = await db.getN8nConfig().catch(() => null);
+  const baseUrl = (cfg && cfg.baseUrl) || (body && body.baseUrl) || '';
+  const apiKey = (cfg && cfg.apiKey) || (body && body.apiKey) || '';
+  return { baseUrl, apiKey };
+}
 import { limiters, infraStats, withTimeout, HEAVY_MAX_QUEUE, Limiter, TTLCache } from './infra.js';
 import * as jobs from './jobs.js';
 import * as drift from './drift.js';
@@ -3039,29 +3050,54 @@ const routes = {
   // each request body from the browser (localStorage) — never stored or logged
   // here. Lets the operator pick a workflow, edit each node's prompts, run it, and
   // inspect node errors. See backend-api/n8n.js.
+  // Connect ONCE: validate the creds, then store the base URL + API key ENCRYPTED
+  // server-side (pgcrypto in Supabase). After this the browser never sends the key
+  // again — every /n8n-* call resolves it from the encrypted store. Never echoes it.
+  'POST /n8n-connect': async (body) => {
+    if (!body.baseUrl || !body.apiKey) return { error: 'Provide the n8n base URL and API key to connect.' };
+    const probe = await n8n.listWorkflows(body.baseUrl, body.apiKey);  // reject a bad key before persisting
+    if (probe && probe.error) return { error: probe.error };
+    await db.setN8nConfig(body.baseUrl, body.apiKey);
+    return { ok: true, connected: true, baseUrl: body.baseUrl, writerCount: probe.writerCount, total: probe.total };
+  },
+  // Is n8n connected server-side? Returns the base URL (safe) but NEVER the key.
+  'POST /n8n-status': async () => {
+    const cfg = await db.getN8nConfig().catch(() => null);
+    return { connected: !!(cfg && cfg.apiKey && cfg.baseUrl), baseUrl: (cfg && cfg.baseUrl) || null };
+  },
+  // Remove the stored n8n credential (blank the ciphertext).
+  'POST /n8n-disconnect': async () => {
+    await db.clearN8nConfig().catch(() => {});
+    return { ok: true, connected: false };
+  },
   'POST /n8n-workflows': async (body) => {
-    if (!body.baseUrl || !body.apiKey) return { error: 'Connect n8n first (base URL + API key).' };
-    return n8n.listWorkflows(body.baseUrl, body.apiKey);
+    const { baseUrl, apiKey } = await n8nCreds(body);
+    if (!baseUrl || !apiKey) return { error: 'Connect n8n first (base URL + API key).' };
+    return n8n.listWorkflows(baseUrl, apiKey);
   },
   'POST /n8n-workflow-prompts': async (body) => {
-    if (!body.baseUrl || !body.apiKey) return { error: 'Connect n8n first (base URL + API key).' };
+    const { baseUrl, apiKey } = await n8nCreds(body);
+    if (!baseUrl || !apiKey) return { error: 'Connect n8n first (base URL + API key).' };
     if (!body.id) return { error: 'workflow id required' };
-    return n8n.getWorkflowPrompts(body.baseUrl, body.apiKey, body.id);
+    return n8n.getWorkflowPrompts(baseUrl, apiKey, body.id);
   },
   'POST /n8n-update-prompts': async (body) => {
-    if (!body.baseUrl || !body.apiKey) return { error: 'Connect n8n first (base URL + API key).' };
+    const { baseUrl, apiKey } = await n8nCreds(body);
+    if (!baseUrl || !apiKey) return { error: 'Connect n8n first (base URL + API key).' };
     if (!body.id || !Array.isArray(body.edits)) return { error: 'id + edits[] required' };
-    return n8n.updatePrompts(body.baseUrl, body.apiKey, body.id, body.edits);
+    return n8n.updatePrompts(baseUrl, apiKey, body.id, body.edits);
   },
   'POST /n8n-run': async (body) => {
-    if (!body.baseUrl || !body.apiKey) return { error: 'Connect n8n first (base URL + API key).' };
+    const { baseUrl, apiKey } = await n8nCreds(body);
+    if (!baseUrl || !apiKey) return { error: 'Connect n8n first (base URL + API key).' };
     if (!body.id) return { error: 'workflow id required' };
-    return n8n.runWorkflow(body.baseUrl, body.apiKey, body.id, body.payload);
+    return n8n.runWorkflow(baseUrl, apiKey, body.id, body.payload);
   },
   'POST /n8n-executions': async (body) => {
-    if (!body.baseUrl || !body.apiKey) return { error: 'Connect n8n first (base URL + API key).' };
+    const { baseUrl, apiKey } = await n8nCreds(body);
+    if (!baseUrl || !apiKey) return { error: 'Connect n8n first (base URL + API key).' };
     if (!body.id) return { error: 'workflow id required' };
-    return n8n.getExecutions(body.baseUrl, body.apiKey, body.id, { status: body.status });
+    return n8n.getExecutions(baseUrl, apiKey, body.id, { status: body.status });
   },
 };
 

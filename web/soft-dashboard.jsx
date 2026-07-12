@@ -1370,8 +1370,11 @@ function N8nScreen({ ctx }){
   const LS_BASE="sentinel-n8n-base", LS_KEY="sentinel-n8n-key";
   const rd=(k,d)=>{ try{ return localStorage.getItem(k)||d; }catch(e){ return d; } };
   const [base,setBase] = useState(()=>rd(LS_BASE,"https://karimfirmlaw.app.n8n.cloud"));
-  const [key,setKey] = useState(()=>rd(LS_KEY,""));
-  const [connected,setConnected] = useState(false);
+  const [key,setKey] = useState("");
+  const [stored,setStored] = useState(false);       // an encrypted n8n key already lives on the server
+  const [changing,setChanging] = useState(false);   // user chose to (re)enter the key
+  const [checking,setChecking] = useState(true);    // initial server-status probe in flight
+  const [connected,setConnected] = useState(false); // workflows loaded (panel visible)
   const [workflows,setWorkflows] = useState([]);
   const [wfId,setWfId] = useState("");
   const [wf,setWf] = useState(null);
@@ -1380,7 +1383,6 @@ function N8nScreen({ ctx }){
   const [runOut,setRunOut] = useState(null);
   const [errs,setErrs] = useState(null);
   const [showAll,setShowAll] = useState(false);   // writers-only by default; toggle reveals every workflow
-  const canGo = live && base.trim() && key.trim();
   const eKey=(nodeId,path)=>nodeId+"\n"+path;
   // Group the workflow picker BY SITE and, by default, show only the real content
   // writers (the classifier tags each). Nothing is hidden permanently — "Show all"
@@ -1395,21 +1397,41 @@ function N8nScreen({ ctx }){
   const dupGroups = Object.keys(dupOf).filter(k=>dupOf[k]>1).length;
   const siteN = groups.filter(g=>g.site!=="Other").length;
 
-  const connect = ()=>{
-    if(!canGo){ ctx.toast("Enter your n8n instance URL and API key.","gold"); return; }
-    try{ localStorage.setItem(LS_BASE,base.trim()); localStorage.setItem(LS_KEY,key.trim()); }catch(e){}
+  // List workflows using the server-stored key (no key in the browser).
+  const loadWorkflows = ()=>{
     setBusy("connect");
-    API.n8nWorkflows(base.trim(),key.trim()).then(r=>{
+    API.n8nWorkflows(base.trim()).then(r=>{
       if(r&&r.error){ ctx.toast("n8n: "+r.error,"clay"); setConnected(false); return; }
       setWorkflows((r&&r.workflows)||[]); setConnected(true);
       ctx.toast(((r.workflows||[]).length)+" workflows loaded","teal");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
+  };
+  // Connect once: validate + ENCRYPT the key into Supabase server-side, then load.
+  // After this the key never leaves the server again — no re-pasting.
+  const connect = ()=>{
+    if(!(live && base.trim() && key.trim())){ ctx.toast("Enter your n8n instance URL and API key.","gold"); return; }
+    try{ localStorage.setItem(LS_BASE,base.trim()); }catch(e){}
+    setBusy("connect");
+    API.n8nConnect(base.trim(),key.trim()).then(r=>{
+      if(r&&r.error){ ctx.toast("n8n: "+r.error,"clay"); return; }
+      setStored(true); setChanging(false); setKey("");
+      ctx.toast("Key encrypted & stored on the server ✓","teal");
+      loadWorkflows();
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
+  };
+  const disconnect = ()=>{
+    setBusy("connect");
+    API.n8nDisconnect().then(()=>{
+      setStored(false); setConnected(false); setChanging(false); setKey("");
+      setWorkflows([]); setWf(null); setWfId("");
+      ctx.toast("Disconnected — n8n key removed from the server.","gold");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
   };
   const loadWf = (id)=>{
     setWfId(id); setWf(null); setEdits({}); setRunOut(null); setErrs(null);
     if(!id) return;
     setBusy("load");
-    API.n8nWorkflowPrompts(base.trim(),key.trim(),id).then(r=>{
+    API.n8nWorkflowPrompts(base.trim(),undefined,id).then(r=>{
       if(r&&r.error){ ctx.toast("n8n: "+r.error,"clay"); return; }
       setWf(r);
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
@@ -1418,7 +1440,7 @@ function N8nScreen({ ctx }){
     const list = Object.keys(edits).map(k=>{ const [nodeId,path]=k.split("\n"); return { nodeId, path, value: edits[k] }; });
     if(!list.length){ ctx.toast("No prompt changes to save.","gold"); return; }
     setBusy("save");
-    API.n8nUpdatePrompts(base.trim(),key.trim(),wfId,list).then(r=>{
+    API.n8nUpdatePrompts(base.trim(),undefined,wfId,list).then(r=>{
       if(r&&r.error){ ctx.toast("n8n save: "+r.error,"clay"); return; }
       ctx.toast("Saved "+((r&&r.updated)||list.length)+" prompt(s) to n8n ✓","teal");
       setEdits({}); loadWf(wfId);
@@ -1426,7 +1448,7 @@ function N8nScreen({ ctx }){
   };
   const run = ()=>{
     setBusy("run"); setRunOut(null);
-    API.n8nRun(base.trim(),key.trim(),wfId,{}).then(r=>{
+    API.n8nRun(base.trim(),undefined,wfId,{}).then(r=>{
       setRunOut(r||{});
       if(r&&r.error) ctx.toast("n8n run: "+r.error,"clay");
       else if(r&&r.ranVia==="none") ctx.toast("No webhook trigger — run it from the n8n editor.","gold");
@@ -1435,11 +1457,30 @@ function N8nScreen({ ctx }){
   };
   const loadErrs = ()=>{
     setBusy("errors"); setErrs(null);
-    API.n8nExecutions(base.trim(),key.trim(),wfId,"error").then(r=>{
+    API.n8nExecutions(base.trim(),undefined,wfId,"error").then(r=>{
       if(r&&r.error){ ctx.toast("n8n: "+r.error,"clay"); return; }
       setErrs((r&&r.executions)||[]);
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
   };
+  // On mount: is a key already stored server-side? If so, load straight away (no
+  // paste). Otherwise migrate a legacy browser-held key into the encrypted store once.
+  useEffect(()=>{
+    if(!live){ setChecking(false); return; }
+    API.n8nStatus().then(s=>{
+      if(s&&s.connected){
+        setStored(true);
+        if(s.baseUrl){ setBase(s.baseUrl); try{ localStorage.setItem(LS_BASE,s.baseUrl); }catch(e){} }
+        loadWorkflows();
+        return;
+      }
+      let legacy=""; try{ legacy=localStorage.getItem(LS_KEY)||""; }catch(e){}
+      if(legacy && base.trim()){
+        API.n8nConnect(base.trim(),legacy).then(r=>{
+          if(r&&!r.error){ setStored(true); try{ localStorage.removeItem(LS_KEY); }catch(e){} loadWorkflows(); }
+        }).catch(()=>{});
+      }
+    }).catch(()=>{}).finally(()=>setChecking(false));
+  },[]);   // eslint-disable-line
 
   const inp = { width:"100%", boxSizing:"border-box", padding:"10px 12px", borderRadius:"var(--r-md)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none", fontFamily:"inherit" };
   const ta = Object.assign({}, inp, { fontFamily:"var(--mono)", fontSize:12, lineHeight:1.5, resize:"vertical" });
@@ -1451,18 +1492,31 @@ function N8nScreen({ ctx }){
 
       <SoftCard hover={false}>
         <div style={{ fontSize:13, fontWeight:700, marginBottom:10 }}>Connect n8n</div>
-        <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end" }}>
-          <div style={{ flex:"2 1 300px" }}>
-            <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:4 }}>Instance URL</div>
-            <input style={inp} value={base} onChange={e=>setBase(e.target.value)} placeholder="https://your-instance.app.n8n.cloud" />
+        {stored && !changing ? (
+          <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+            <Chip tone="teal" size="sm">Connected ✓</Chip>
+            <span style={{ fontSize:12.5, color:"var(--muted)", fontFamily:"var(--mono)" }}>{base}</span>
+            <span style={{ fontSize:12, color:"var(--faint)" }}>· key encrypted on the server (never in this browser)</span>
+            <div style={{ flex:1 }} />
+            <NeoButton kind="soft" size="sm" disabled={busy==="connect"} onClick={()=>{ setChanging(true); setKey(""); }}>Change key</NeoButton>
+            <NeoButton kind="soft" size="sm" disabled={busy==="connect"} onClick={disconnect}>{busy==="connect"&&<Icon name="cog" size={13} className="audit-spin" />}Disconnect</NeoButton>
           </div>
-          <div style={{ flex:"2 1 300px" }}>
-            <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:4 }}>API key <span style={{ color:"var(--faint)" }}>· stored only in this browser</span></div>
-            <input style={inp} type="password" value={key} onChange={e=>setKey(e.target.value)} placeholder="n8n public API key" />
+        ) : (
+          <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end" }}>
+            <div style={{ flex:"2 1 300px" }}>
+              <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:4 }}>Instance URL</div>
+              <input style={inp} value={base} onChange={e=>setBase(e.target.value)} placeholder="https://your-instance.app.n8n.cloud" />
+            </div>
+            <div style={{ flex:"2 1 300px" }}>
+              <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:4 }}>API key <span style={{ color:"var(--faint)" }}>· encrypted &amp; stored on the server — pasted once</span></div>
+              <input style={inp} type="password" value={key} onChange={e=>setKey(e.target.value)} placeholder="n8n public API key" />
+            </div>
+            <NeoButton kind="primary" icon={busy==="connect"?undefined:"bolt"} disabled={!(live&&base.trim()&&key.trim())||busy==="connect"} onClick={connect}>{busy==="connect"&&<Icon name="cog" size={15} className="audit-spin" />}{stored?"Save key":"Connect"}</NeoButton>
+            {stored && changing && <NeoButton kind="soft" onClick={()=>{ setChanging(false); setKey(""); }}>Cancel</NeoButton>}
           </div>
-          <NeoButton kind="primary" icon={busy==="connect"?undefined:"bolt"} disabled={!canGo||busy==="connect"} onClick={connect}>{busy==="connect"&&<Icon name="cog" size={15} className="audit-spin" />}{connected?"Reconnect":"Connect"}</NeoButton>
-        </div>
+        )}
         {!live && <div style={{ marginTop:8, fontSize:12.5, color:"var(--muted)" }}>Live mode required — the panel proxies through the Sentinel server.</div>}
+        {live && checking && <div style={{ marginTop:8, fontSize:12.5, color:"var(--muted)" }}>Checking connection…</div>}
       </SoftCard>
 
       {connected && (

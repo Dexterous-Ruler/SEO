@@ -120,6 +120,9 @@
     engineDismiss(id) { return engine("/engine-dismiss", { id }); },
     // ---- n8n control panel — base URL + API key are held in the browser
     // (localStorage) and sent per request; the server proxies + never stores them.
+    n8nConnect(baseUrl, apiKey) { return engine("/n8n-connect", { baseUrl, apiKey }); },
+    n8nStatus() { return engine("/n8n-status", {}); },
+    n8nDisconnect() { return engine("/n8n-disconnect", {}); },
     n8nWorkflows(baseUrl, apiKey) { return engine("/n8n-workflows", { baseUrl, apiKey }); },
     n8nWorkflowPrompts(baseUrl, apiKey, id) { return engine("/n8n-workflow-prompts", { baseUrl, apiKey, id }); },
     n8nUpdatePrompts(baseUrl, apiKey, id, edits) { return engine("/n8n-update-prompts", { baseUrl, apiKey, id, edits }); },
