@@ -20,6 +20,7 @@ import * as airtable from './airtable.js';
 import * as imageOpt from './image-optimize.js';
 import { generateCssFixes } from './css-fixes.js';
 import * as semrush from './dataforseo.js';
+import * as engine from './content-engine.js';
 import { WordPressClient } from '../src/wp/client.js';
 
 const DAY = 86400000;
@@ -149,6 +150,19 @@ async function jobKeywordPush(site) {
   } catch (e) { /* surface nothing on transient airtable errors */ }
 }
 
+// ── Job: refresh the Content Engine worklist (weekly, DataForSEO-gated cost) ─
+// Nothing populated the unified worklist on a schedule before, so a site's list
+// went empty/stale until someone clicked "Run engine". This runs the SAME ingest
+// as the UI's /engine-run, per site, weekly. engine.run is best-effort per source
+// and only writes to content_opportunities (+ the Airtable mirror) — never a live
+// page. Weekly cadence + persisted scheduler_runs keep the DataForSEO spend bounded.
+async function jobEngineRefresh(site) {
+  try {
+    const r = await engine.run(site.id, { includeTrending: true, includePaa: true, includeGeo: false });
+    if (r && r.count) await note(site.id, `Content Engine refreshed — ${r.count} opportunity(ies) in the worklist`);
+  } catch (e) { /* transient source/units error — next week retries */ }
+}
+
 // ── Job: auto-optimise images → WebP (write-armed sites only) ───────────────
 // Compresses the heaviest images and uploads WebP to the media library, skipping
 // any already converted. This is a media-library write (not a page-content edit),
@@ -275,6 +289,7 @@ const JOBS = [
   { name: 'auto-index', every: DAY, run: jobAutoIndex },
   { name: 'gsc-health', every: DAY, run: jobGscHealth },
   { name: 'keyword-push', every: 7 * DAY, run: jobKeywordPush },
+  { name: 'engine-refresh', every: 7 * DAY, run: jobEngineRefresh },
   { name: 'image-optimize', every: 7 * DAY, run: jobAutoOptimizeImages },
   { name: 'apply-css', every: 7 * DAY, run: jobAutoApplyCss },
   { name: 'ux-rollup', every: HOUR, run: jobUxRollup },   // inert until RUM_ENABLED + rum_armed
