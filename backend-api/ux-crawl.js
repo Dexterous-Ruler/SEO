@@ -18,7 +18,7 @@
 const UA = 'Mozilla/5.0 (compatible; SentinelUXBot/1.0; +https://sentinel-goodfor-2e75db85.koyeb.app)';
 const PAGE_TIMEOUT = 15000;
 const LINK_TIMEOUT = 12000;
-const POOL = 8;
+const POOL = 5;   // gentle concurrency — bursting made some sites rate-limit (false 0s)
 
 async function fetchWithTimeout(url, opts = {}, ms = LINK_TIMEOUT) {
   const ctrl = new AbortController();
@@ -59,7 +59,12 @@ function extract(html, pageUrl) {
   return { origin, anchors, images, resources: [...new Set([...scripts, ...styles])] };
 }
 
-const isBadStatus = (s) => s === 0 || s >= 400;   // 0 = network/timeout, 4xx/5xx = broken
+// Only flag DEFINITIVELY-dead targets: 404 (not found) / 410 (gone). We deliberately
+// do NOT flag 0 (network/timeout — usually the site rate-limiting our burst), 401/403
+// (auth / bot-block), 429 (our own rate-limit), or 5xx (transient) — those manufacture
+// false positives that would poison an autopilot review queue. A truly-removed WP page
+// returns a real 404 anyway, so this misses nothing that matters.
+const isBadStatus = (s) => s === 404 || s === 410;
 // System / auth / commerce-action endpoints — not content, and often legitimately
 // 401/403 for a logged-out crawler, so checking them just manufactures false positives.
 const SKIP_PATH = /\/(wp-admin|wp-login\.php|wp-json|xmlrpc\.php|wp-cron\.php)|\/feed\/?(\?|$)|[?&]add-to-cart=/i;
