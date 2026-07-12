@@ -1384,6 +1384,7 @@ function N8nScreen({ ctx }){
   const [runOut,setRunOut] = useState(null);
   const [errs,setErrs] = useState(null);
   const [showAll,setShowAll] = useState(false);   // writers-only by default; toggle reveals every workflow
+  const [maxPrompt,setMaxPrompt] = useState(null);  // { k, label, nodeName, value } — prompt shown maximized
   const eKey=(nodeId,path)=>nodeId+"\n"+path;
   // Group the workflow picker BY SITE and, by default, show only the real content
   // writers (the classifier tags each). Nothing is hidden permanently — "Show all"
@@ -1651,9 +1652,12 @@ function N8nScreen({ ctx }){
                 const val = (k in edits) ? edits[k] : pr.value;
                 return (
                   <div key={pr.path} style={{ marginBottom:10 }}>
-                    <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
                       <span style={{ fontSize:11.5, fontWeight:700, color:"var(--muted)" }}>{pr.label}</span>
-                      <span style={{ fontSize:10.5, color:"var(--faint)" }}>{(k in edits)?"edited · ":""}{String(val).length} chars</span>
+                      <div style={{ display:"flex", alignItems:"center", gap:9 }}>
+                        <span style={{ fontSize:10.5, color:"var(--faint)" }}>{(k in edits)?"edited · ":""}{String(val).length} chars</span>
+                        <button type="button" title="Maximize — edit in a large window" onClick={()=>setMaxPrompt({ k, label:pr.label, nodeName:n.nodeName, value:pr.value })} style={{ border:"none", background:"var(--bg)", boxShadow:"var(--neo-xs)", cursor:"pointer", color:"var(--muted)", fontSize:13, lineHeight:1, padding:"4px 7px", borderRadius:7 }}>⤢</button>
+                      </div>
                     </div>
                     <textarea style={Object.assign({}, ta, { minHeight: Math.min(320, Math.max(70, Math.round(String(val).length/9))) })} value={val} onChange={e=>setEdits(s=>Object.assign({}, s, { [k]: e.target.value }))} />
                   </div>
@@ -1663,6 +1667,26 @@ function N8nScreen({ ctx }){
           ))}
         </div>
       )}
+
+      {maxPrompt && (() => {
+        const mval = (maxPrompt.k in edits) ? edits[maxPrompt.k] : maxPrompt.value;
+        return (
+          <div onClick={()=>setMaxPrompt(null)} onKeyDown={e=>{ if(e.key==="Escape") setMaxPrompt(null); }} style={{ position:"fixed", inset:0, zIndex:9999, background:"rgba(20,20,28,0.55)", backdropFilter:"blur(2px)", display:"flex", alignItems:"center", justifyContent:"center", padding:"3vh 3vw" }}>
+            <div onClick={e=>e.stopPropagation()} style={{ background:"var(--surface)", borderRadius:"var(--r-lg)", boxShadow:"0 24px 70px rgba(0,0,0,.4)", width:"min(1100px, 96vw)", height:"92vh", display:"flex", flexDirection:"column", padding:18, boxSizing:"border-box" }}>
+              <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:12 }}>
+                <div style={{ minWidth:0 }}>
+                  <div style={{ fontSize:15, fontWeight:800, letterSpacing:"-.01em", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{maxPrompt.nodeName}</div>
+                  <div style={{ fontSize:12, color:"var(--muted)", marginTop:1 }}>{maxPrompt.label} · {String(mval).length} chars{(maxPrompt.k in edits)?" · edited":""}</div>
+                </div>
+                <div style={{ flex:1 }} />
+                <NeoButton kind="soft" size="sm" onClick={()=>setMaxPrompt(null)}>Close ✕</NeoButton>
+              </div>
+              <textarea autoFocus value={mval} onChange={e=>setEdits(st=>Object.assign({}, st, { [maxPrompt.k]: e.target.value }))} style={{ flex:1, width:"100%", boxSizing:"border-box", resize:"none", border:"none", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", padding:"16px 18px", fontFamily:"var(--mono)", fontSize:13.5, lineHeight:1.65, color:"var(--ink)", outline:"none" }} />
+              <div style={{ fontSize:11, color:"var(--faint)", marginTop:8, textAlign:"right" }}>Edits sync live — press <b>Save prompts</b> below to write them to n8n · Esc to close</div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
