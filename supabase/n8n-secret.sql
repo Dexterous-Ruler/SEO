@@ -28,7 +28,12 @@ begin
   return v;
 end $$;
 
--- The key (SITE_SECRET_KEY) is the guard, but revoke execute from the public roles
--- for defence in depth — only the service role (server) should ever call these.
-revoke execute on function public.set_app_secret(text, text, text) from anon, authenticated;
-revoke execute on function public.get_app_secret(text, text) from anon, authenticated;
+-- The key (SITE_SECRET_KEY) is the guard, but lock EXECUTE down to the server too.
+-- NOTE: functions carry a default GRANT EXECUTE TO PUBLIC — revoking only anon/
+-- authenticated leaves PUBLIC intact, so anon could still call these via PostgREST
+-- and (since set_app_secret does no key check) overwrite/corrupt the store. Revoke
+-- from PUBLIC and re-grant to just the service_role the server authenticates as.
+revoke execute on function public.set_app_secret(text, text, text) from public, anon, authenticated;
+revoke execute on function public.get_app_secret(text, text) from public, anon, authenticated;
+grant execute on function public.set_app_secret(text, text, text) to service_role;
+grant execute on function public.get_app_secret(text, text) to service_role;

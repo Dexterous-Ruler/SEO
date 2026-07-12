@@ -1413,11 +1413,11 @@ function N8nScreen({ ctx }){
     try{ localStorage.setItem(LS_BASE,base.trim()); }catch(e){}
     setBusy("connect");
     API.n8nConnect(base.trim(),key.trim()).then(r=>{
-      if(r&&r.error){ ctx.toast("n8n: "+r.error,"clay"); return; }
+      if(r&&r.error){ ctx.toast("n8n: "+r.error,"clay"); setBusy(""); return; }
       setStored(true); setChanging(false); setKey("");
       ctx.toast("Key encrypted & stored on the server ✓","teal");
-      loadWorkflows();
-    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
+      loadWorkflows();   // hands off `busy` — it stays "connect" until workflows finish loading
+    }).catch(e=>{ ctx.toast(e.message,"clay"); setBusy(""); });
   };
   const disconnect = ()=>{
     setBusy("connect");
@@ -1493,13 +1493,21 @@ function N8nScreen({ ctx }){
       <SoftCard hover={false}>
         <div style={{ fontSize:13, fontWeight:700, marginBottom:10 }}>Connect n8n</div>
         {stored && !changing ? (
-          <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
-            <Chip tone="teal" size="sm">Connected ✓</Chip>
-            <span style={{ fontSize:12.5, color:"var(--muted)", fontFamily:"var(--mono)" }}>{base}</span>
-            <span style={{ fontSize:12, color:"var(--faint)" }}>· key encrypted on the server (never in this browser)</span>
-            <div style={{ flex:1 }} />
-            <NeoButton kind="soft" size="sm" disabled={busy==="connect"} onClick={()=>{ setChanging(true); setKey(""); }}>Change key</NeoButton>
-            <NeoButton kind="soft" size="sm" disabled={busy==="connect"} onClick={disconnect}>{busy==="connect"&&<Icon name="cog" size={13} className="audit-spin" />}Disconnect</NeoButton>
+          <div>
+            <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+              <Chip tone={connected?"teal":"gold"} size="sm">{connected?"Connected ✓":"Key stored"}</Chip>
+              <span style={{ fontSize:12.5, color:"var(--muted)", fontFamily:"var(--mono)" }}>{base}</span>
+              <span style={{ fontSize:12, color:"var(--faint)" }}>· key encrypted on the server (never in this browser)</span>
+              <div style={{ flex:1 }} />
+              <NeoButton kind="soft" size="sm" disabled={busy==="connect"} onClick={loadWorkflows}>{busy==="connect"&&<Icon name="cog" size={13} className="audit-spin" />}Reload</NeoButton>
+              <NeoButton kind="soft" size="sm" disabled={busy==="connect"} onClick={()=>{ setChanging(true); setKey(""); }}>Change key</NeoButton>
+              <NeoButton kind="soft" size="sm" disabled={busy==="connect"} onClick={disconnect}>Disconnect</NeoButton>
+            </div>
+            {stored && !connected && !checking && busy!=="connect" && (
+              <div style={{ marginTop:8, fontSize:12.5, color:"var(--clay,#c06a4a)" }}>
+                Key is stored, but workflows didn't load — the key may be rotated/revoked or the n8n instance unreachable. Try <b>Reload</b>, or <b>Change key</b>.
+              </div>
+            )}
           </div>
         ) : (
           <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end" }}>
