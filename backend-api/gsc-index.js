@@ -44,8 +44,7 @@ export async function submitUrls(sa, urls, { type = 'URL_UPDATED' } = {}) {
 export async function inspectUrls(sa, property, urls) {
   const token = await getAccessToken(sa); // readonly scope is fine for inspection
   const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean).slice(0, 60);
-  const out = [];
-  for (const url of list) {
+  const inspectOne = async (url) => {
     try {
       const res = await fetch('https://searchconsole.googleapis.com/v1/urlInspection/index:inspect', {
         method: 'POST',
@@ -53,15 +52,25 @@ export async function inspectUrls(sa, property, urls) {
         body: JSON.stringify({ inspectionUrl: url, siteUrl: property }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) { out.push({ url, error: data.error?.message || `HTTP ${res.status}` }); continue; }
+      if (!res.ok) return { url, error: data.error?.message || `HTTP ${res.status}` };
       const r = data.inspectionResult?.indexStatusResult || {};
       const indexed = r.verdict === 'PASS' && /indexed|submitted and indexed/i.test(r.coverageState || '');
-      out.push({
+      return {
         url, verdict: r.verdict, coverageState: r.coverageState,
         indexed, lastCrawl: r.lastCrawlTime || null, robotsState: r.robotsTxtState,
         googleCanonical: r.googleCanonical, userCanonical: r.userCanonical,
-      });
-    } catch (e) { out.push({ url, error: String(e.message || e) }); }
+      };
+    } catch (e) { return { url, error: String(e.message || e) }; }
+  };
+  // Bounded-parallel. The URL Inspection API is slow (~1-3s/call); inspecting 40-60
+  // URLs SERIALLY blew past the gateway timeout (observed: 504 at ~100s). POOL in
+  // flight keeps us well under Google's per-minute quota while cutting wall-clock to
+  // ~1/POOL. Order is preserved so callers can zip results back to inputs.
+  const out = new Array(list.length);
+  const POOL = 8;
+  for (let i = 0; i < list.length; i += POOL) {
+    const results = await Promise.all(list.slice(i, i + POOL).map(inspectOne));
+    for (let j = 0; j < results.length; j++) out[i + j] = results[j];
   }
   return out;
 }

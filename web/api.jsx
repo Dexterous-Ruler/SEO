@@ -157,6 +157,7 @@
     uxDefectAction(id, action, siteId) { return engine("/ux-defect-action", { id, action, siteId }); },
     armBeacon(siteId, on, sample, consent) { return engine("/arm-beacon", { siteId, on, sample, consent }); },
     siteProbe(siteId) { return engine("/site-probe", siteId ? { siteId } : {}); },
+    signOffCompliance(siteId, on, confirm) { return engine("/sign-off-compliance", { siteId, on, confirm }); },
     beaconSelftest(siteId) { return engine("/beacon-selftest", { siteId }); },
     setConsentBanner(siteId, opts) { return engine("/set-consent-banner", Object.assign({ siteId }, opts || {})); },
     pushMuUpdate(siteId) { return engine("/push-mu-update", { siteId }); },

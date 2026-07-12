@@ -833,6 +833,19 @@ const routes = {
     return { ok: true, armed: !!body.on };
   },
 
+  // Record (or revoke) the per-site compliance sign-off (DPIA) that GATES arming.
+  // This is the operator asserting the privacy review is done — it only flips the
+  // rum_signed_off flag; it does NOT arm the beacon (that stays a separate, explicit
+  // step in /arm-beacon). Without this route the flag had no setter, so no site could
+  // ever be armed from the UI — the whole Experience Monitor stayed unusable.
+  'POST /sign-off-compliance': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    if (body.on && !body.confirm) return { error: 'Confirm the compliance sign-off (DPIA) to proceed.', needsConfirm: true };
+    try { await db.updateSite(body.siteId, { rum_signed_off: !!body.on }); }
+    catch (e) { return { error: 'Could not record sign-off: ' + e.message }; }
+    return { ok: true, signedOff: !!body.on };
+  },
+
   // Probe a site's consent + tracker stack (READ-ONLY) — drives the UX Activation panel.
   // Detects the installed CMP + the consent cookie to gate on, lists trackers needing a
   // gate, and reports armed / signed-off / mu-plugin state. siteId optional → all sites.
@@ -1953,15 +1966,20 @@ const routes = {
     try { decay = await gsc.contentDecay(JSON.parse(saStr), property, { windowDays: body.windowDays || 28 }); }
     catch (e) { if (e.code === 'NO_ACCESS') return { error: e.message, noAccess: true }; return { error: e.message }; }
 
-    // Enrich with WP modified-date where we can resolve the page → post.
+    // Enrich with WP modified-date where we can resolve the page → post. Run the
+    // per-page lookups CONCURRENTLY (bounded pool) — doing them serially meant up to
+    // 20 pages × 2 WP calls = ~40 sequential round-trips (~30s of "Analyzing…", and a
+    // timeout risk on slower WP hosts). Bounded to POOL in flight so we don't trip a
+    // site's rate limiter / security plugin.
     try {
       const { baseUrl, username, appPassword } = await credsForSite(body.siteId);
       const wp = new WordPressClient({ baseUrl, username, appPassword });
-      for (const d of decay.pages.slice(0, 20)) {
+      const targets = decay.pages.slice(0, 20);
+      const enrichOne = async (d) => {
         try {
           const path = new URL(d.page).pathname.replace(/\/+$/, '');
           const slug = path.split('/').filter(Boolean).pop();
-          if (!slug) continue;
+          if (!slug) return;
           for (const type of ['posts', 'pages']) {
             const hits = await wp.request(`/${type}?slug=${encodeURIComponent(slug)}&_fields=id,modified`, { method: 'GET' }).catch(() => []);
             if (Array.isArray(hits) && hits.length) {
@@ -1974,6 +1992,10 @@ const routes = {
             }
           }
         } catch (e) {}
+      };
+      const POOL = 8;
+      for (let i = 0; i < targets.length; i += POOL) {
+        await Promise.all(targets.slice(i, i + POOL).map(enrichOne));
       }
     } catch (e) {}
 

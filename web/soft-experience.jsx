@@ -686,8 +686,28 @@ function UxActivationScreen({ ctx }) {
       .finally(() => setBusyFor(id, null));
   };
 
+  // Compliance sign-off (DPIA) — the gate that must pass before arming. Requires an
+  // explicit operator confirmation because it asserts the privacy review is complete.
+  const signOff = (site, on) => {
+    if (on) {
+      const ok = (typeof window !== "undefined" && window.confirm)
+        ? window.confirm("Compliance sign-off — " + (site.name || site.url) + "\n\nConfirming records that the privacy / DPIA review for this site is complete and a consent gate is in place. This only ENABLES arming — it does NOT start the beacon (that's a separate step). Proceed?")
+        : true;
+      if (!ok) return;
+    }
+    setBusyFor(site.siteId, "signoff");
+    Promise.resolve(API.signOffCompliance(site.siteId, on, true))
+      .then((r) => {
+        if (r && r.error) { toast(r.error, "clay"); return; }
+        toast(on ? ("Compliance signed off — " + (site.name || "site") + ". You can arm it now.") : ("Sign-off revoked — " + (site.name || "site")), on ? "teal" : "gold");
+        load();
+      })
+      .catch((e) => toast((e && e.message) || "Sign-off failed", "clay"))
+      .finally(() => setBusyFor(site.siteId, null));
+  };
+
   const arm = (site) => {
-    if (!site.signedOff) { toast("Sign off compliance for this site first (set rum_signed_off).", "gold"); return; }
+    if (!site.signedOff) { toast("Sign off compliance for this site first — use the Sign off button.", "gold"); return; }
     if (!site.consent) { toast("No consent cookie detected — install a CMP or enable the first-party banner first.", "gold"); return; }
     setBusyFor(site.siteId, "arm");
     Promise.resolve(API.armBeacon(site.siteId, true, 5, site.consent))
@@ -837,7 +857,13 @@ function UxActivationScreen({ ctx }) {
                 ) : (
                   <NeoButton kind="primary" size="sm" icon={action === "arm" ? undefined : "bolt"} disabled={!!action || !site.signedOff || !cmpOk} onClick={() => arm(site)}>{action === "arm" && <Icon name="cog" size={14} className="audit-spin" />}Arm at 5%</NeoButton>
                 )}
-                {!site.signedOff && <span style={{ fontSize: 11.5, color: "var(--faint)" }}>Sign off compliance to enable arming</span>}
+                {!site.signedOff && (
+                  <NeoButton kind="soft" size="sm" icon={action === "signoff" ? undefined : "lock"} disabled={!!action} onClick={() => signOff(site, true)}>{action === "signoff" && <Icon name="cog" size={14} className="audit-spin" />}Sign off compliance</NeoButton>
+                )}
+                {site.signedOff && !site.armed && (
+                  <NeoButton kind="soft" size="sm" disabled={!!action} onClick={() => signOff(site, false)}>{action === "signoff" && <Icon name="cog" size={14} className="audit-spin" />}Revoke sign-off</NeoButton>
+                )}
+                {!site.signedOff && <span style={{ fontSize: 11.5, color: "var(--faint)" }}>then Arm{!cmpOk ? " (needs a consent gate too)" : ""}</span>}
                 {site.signedOff && !cmpOk && <span style={{ fontSize: 11.5, color: "var(--faint)" }}>Install a CMP (or first-party banner) to enable arming</span>}
               </div>
             </SoftCard>
