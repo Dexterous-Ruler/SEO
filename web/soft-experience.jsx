@@ -279,6 +279,10 @@ function ExperienceScreen({ ctx }) {
   const [sampling, setSampling] = useState(5);     // 2 / 5 / 10  (%)
   const [drill, setDrill] = useState(null);
   const [bulk, setBulk] = useState(false);
+  const [crawl, setCrawl] = useState(null);        // static-scan result { defects, byType, pagesCrawled }
+  const [crawling, setCrawling] = useState(false);
+  const [filingCrawl, setFilingCrawl] = useState(false);
+  const [signingOff, setSigningOff] = useState(false);
 
   const toast = (m, t) => ctx && ctx.toast && ctx.toast(m, t);
 
@@ -334,6 +338,38 @@ function ExperienceScreen({ ctx }) {
       })
       .catch((e) => toast((e && e.message) || "Couldn't install the beacon.", "clay"))
       .finally(() => setInstalling(false));
+  };
+
+  /* ---- compliance sign-off (enables arming; a DPIA assertion the owner makes) ---- */
+  const signOff = () => {
+    if (!API || !API.signOffCompliance) return;
+    const ok = (typeof window !== "undefined" && window.confirm)
+      ? window.confirm("Compliance sign-off — " + (s.name || s.url || "this site") + "\n\nConfirming records that the privacy / DPIA review for this site is complete and a consent gate is in place. This only ENABLES the beacon — it does NOT start collection (that's still the separate Install step). Proceed?")
+      : true;
+    if (!ok) return;
+    setSigningOff(true);
+    Promise.resolve(API.signOffCompliance(s.id, true, true))
+      .then((r) => { if (r && r.error) { toast(r.error, "clay"); return; } setStatus((st) => Object.assign({}, st || {}, { signedOff: true })); toast("Compliance signed off — you can install the beacon now.", "teal"); })
+      .catch((e) => toast((e && e.message) || "Sign-off failed", "clay"))
+      .finally(() => setSigningOff(false));
+  };
+
+  /* ---- static UX scan (NO consent — crawls top pages for broken links/CTAs/assets) ---- */
+  const runCrawl = () => {
+    if (!API || !API.uxCrawl) { toast("Crawler API unavailable.", "clay"); return; }
+    setCrawling(true); setCrawl(null);
+    Promise.resolve(API.uxCrawl(s.id, {}))
+      .then((r) => { if (r && r.error) { toast(r.error, "clay"); return; } setCrawl(r || { defects: [] }); toast((r.totalDefects || 0) + " defect(s) across " + (r.pagesCrawled || 0) + " page(s)", r.totalDefects ? "gold" : "teal"); })
+      .catch((e) => toast((e && e.message) || "Scan failed", "clay"))
+      .finally(() => setCrawling(false));
+  };
+  const sendCrawlToReview = () => {
+    if (!crawl || !crawl.defects || !crawl.defects.length) return;
+    setFilingCrawl(true);
+    Promise.resolve(API.uxCrawlFile(s.id, crawl.defects))
+      .then((r) => { if (r && r.error) { toast(r.error, "clay"); return; } toast("Sent " + (r.filed || 0) + " defect(s) to Approve Changes", "teal"); })
+      .catch((e) => toast((e && e.message) || "Couldn't file to review", "clay"))
+      .finally(() => setFilingCrawl(false));
   };
 
   /* ---- kill switch: toggle beacon OFF/ON from the header ---- */
@@ -462,6 +498,47 @@ function ExperienceScreen({ ctx }) {
         </SoftCard>
       )}
 
+      {/* ===== STATIC SCAN — no consent needed (the crawler; complements the beacon) ===== */}
+      {status && !statusErr && (
+        <SoftCard hover={false} style={{ maxWidth: 720, margin: "0 auto 14px" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 14.5, fontWeight: 800, display: "flex", alignItems: "center", gap: 8 }}><Icon name="radar" size={16} style={{ color: "var(--t-700)" }} />Static scan <Chip tone="teal" size="sm">no consent needed</Chip></div>
+              <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 4, lineHeight: 1.55, maxWidth: 470 }}>
+                Crawls your top organic pages and flags HTTP-verified breakage — broken links, dead CTAs, missing images/scripts — ranked by clicks at risk. No beacon, no sign-off. Runs weekly on autopilot too.
+              </div>
+            </div>
+            <NeoButton kind="primary" size="sm" icon={crawling ? undefined : "radar"} disabled={crawling} onClick={runCrawl}>{crawling && <Icon name="cog" size={14} className="audit-spin" />}{crawling ? "Scanning…" : "Scan ranking pages"}</NeoButton>
+          </div>
+          {crawl && (
+            <div style={{ marginTop: 14 }}>
+              {crawl.defects && crawl.defects.length > 0 ? (
+                <>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700 }}>{crawl.totalDefects} defect(s) · {crawl.pagesCrawled} page(s) scanned</span>
+                    <div style={{ flex: 1 }} />
+                    <NeoButton kind="soft" size="sm" icon={filingCrawl ? undefined : "check"} disabled={filingCrawl} onClick={sendCrawlToReview}>{filingCrawl && <Icon name="cog" size={13} className="audit-spin" />}Send all to Approve Changes</NeoButton>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                    {crawl.defects.slice(0, 30).map((d, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 11px", background: "var(--bg)", borderRadius: "var(--r-md)", boxShadow: "var(--neo-in)" }}>
+                        <Chip tone={d.type === "broken_cta" ? "clay" : d.type === "dest_404" ? "gold" : "gray"} size="sm">{d.type === "broken_cta" ? "dead CTA" : d.type === "dest_404" ? "broken link" : "broken asset"}{d.status ? " " + d.status : ""}</Chip>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontFamily: "var(--mono)" }}>{d.url || d.detail}</div>
+                          <div style={{ fontSize: 11, color: "var(--faint)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>on {d.page}{d.clicks ? " · " + d.clicks + " clicks/mo" : ""}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: 13, color: "var(--t-700)", display: "flex", alignItems: "center", gap: 8 }}><Icon name="check" size={15} />No broken links, CTAs or assets found on your top {crawl.pagesCrawled} page(s). 🎉</div>
+              )}
+            </div>
+          )}
+        </SoftCard>
+      )}
+
       {/* ===== ONBOARDING (beacon OFF — the default) ===== */}
       {status && !armed && !statusErr && (
         <SoftCard hover={false} style={{ maxWidth: 720, margin: "0 auto" }}>
@@ -491,11 +568,14 @@ function ExperienceScreen({ ctx }) {
             </div>
           </Well>
 
-          {/* compliance gate notice */}
-          <div style={{ display: "flex", justifyContent: "center", marginBottom: 16 }}>
+          {/* compliance gate notice + sign-off action (same screen as install) */}
+          <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
             <Chip tone={status.signedOff ? "teal" : "gold"} icon={status.signedOff ? "check" : "lock"}>
               {status.signedOff ? "Compliance signed off ✓" : "Compliance: review & sign off before enabling"}
             </Chip>
+            {!status.signedOff && (
+              <NeoButton kind="soft" size="sm" icon={signingOff ? undefined : "check"} disabled={signingOff} onClick={signOff}>{signingOff && <Icon name="cog" size={13} className="audit-spin" />}Sign off compliance</NeoButton>
+            )}
           </div>
 
           {/* sampling segmented control */}

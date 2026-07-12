@@ -21,6 +21,7 @@ import * as imageOpt from './image-optimize.js';
 import { generateCssFixes } from './css-fixes.js';
 import * as semrush from './dataforseo.js';
 import * as engine from './content-engine.js';
+import * as uxcrawl from './ux-crawl.js';
 import { WordPressClient } from '../src/wp/client.js';
 
 const DAY = 86400000;
@@ -163,6 +164,22 @@ async function jobEngineRefresh(site) {
   } catch (e) { /* transient source/units error — next week retries */ }
 }
 
+// ── Job: static UX crawl of top ranking pages (weekly, NO consent) ──────────
+// The consent-free counterpart to the RUM beacon: fetches each site's top GSC
+// pages and files HTTP-verified breakage (broken links / CTAs / images / scripts
+// / styles) into the Review Queue, de-duped. Read-only crawl → safe hands-off.
+async function jobUxCrawl(site) {
+  const saStr = await db.getGscSa(site.id).catch(() => null);
+  if (!saStr || !site.gsc_property) return;   // needs GSC top pages to prioritise
+  let topPages = [];
+  try { const snap = await gsc.snapshot(JSON.parse(saStr), site.gsc_property, { days: 28 }); topPages = snap.topPages || []; } catch (e) { return; }
+  if (!topPages.length) return;
+  const res = await uxcrawl.crawlSite(topPages, { limit: 25 }).catch(() => null);
+  if (!res || !res.defects.length) return;
+  const filed = await uxcrawl.fileCrawlDefects(db, site.id, site, res.defects, { limit: 30 }).catch(() => ({ filed: 0 }));
+  if (filed.filed) await note(site.id, `UX scan: ${filed.filed} broken link/CTA/resource(s) on your ranking pages → added to Approve Changes`);
+}
+
 // ── Job: auto-optimise images → WebP (write-armed sites only) ───────────────
 // Compresses the heaviest images and uploads WebP to the media library, skipping
 // any already converted. This is a media-library write (not a page-content edit),
@@ -290,6 +307,7 @@ const JOBS = [
   { name: 'gsc-health', every: DAY, run: jobGscHealth },
   { name: 'keyword-push', every: 7 * DAY, run: jobKeywordPush },
   { name: 'engine-refresh', every: 7 * DAY, run: jobEngineRefresh },
+  { name: 'ux-crawl', every: 7 * DAY, run: jobUxCrawl },
   { name: 'image-optimize', every: 7 * DAY, run: jobAutoOptimizeImages },
   { name: 'apply-css', every: 7 * DAY, run: jobAutoApplyCss },
   { name: 'ux-rollup', every: HOUR, run: jobUxRollup },   // inert until RUM_ENABLED + rum_armed

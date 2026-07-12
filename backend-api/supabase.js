@@ -209,6 +209,11 @@ export const db = {
     return Array.isArray(out) ? out[0] : out;
   },
   async getProposal(id) { const o = await rest(`proposals?id=eq.${id}&select=*`); return o && o[0]; },
+  // Still-pending proposal for a finding signature — used to de-dupe re-filed defects.
+  async findOpenProposal(siteId, findingId) {
+    const o = await rest(`proposals?site_id=eq.${siteId}&finding_id=eq.${encodeURIComponent(findingId)}&status=eq.proposed&select=id&limit=1`).catch(() => []);
+    return o && o[0];
+  },
   async createAudit(row) { return rest('audits', { method: 'POST', body: JSON.stringify(row) }); },
   async logActivity(row) { return rest('activity', { method: 'POST', body: JSON.stringify(row) }); },
 };

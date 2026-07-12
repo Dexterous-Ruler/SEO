@@ -51,6 +51,7 @@ import * as imageOpt from './image-optimize.js';
 import * as prompts from './prompts.js';
 import * as perplexity from './perplexity.js';
 import * as n8n from './n8n.js';
+import * as uxcrawl from './ux-crawl.js';
 
 // Resolve n8n credentials for a request: PREFER the encrypted server-side config
 // (connect once — the key lives only in Supabase, pgcrypto-encrypted), and fall
@@ -844,6 +845,35 @@ const routes = {
     try { await db.updateSite(body.siteId, { rum_signed_off: !!body.on }); }
     catch (e) { return { error: 'Could not record sign-off: ' + e.message }; }
     return { ok: true, signedOff: !!body.on };
+  },
+
+  // ── Static UX crawler (NO consent — the beacon's structural counterpart) ────
+  // Fetches the site's top ORGANIC pages (GSC) and flags HTTP-verified breakage —
+  // broken internal links, dead CTAs, broken images/scripts/styles — clicks-weighted.
+  // `file:true` (and the weekly scheduler job) route findings into the Review Queue,
+  // de-duped. No visitor is observed, so unlike the beacon this needs no sign-off.
+  'POST /ux-crawl': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    const saStr = await db.getGscSa(body.siteId).catch(() => null);
+    let topPages = [];
+    if (saStr && site && site.gsc_property) {
+      try { const snap = await gsc.snapshot(JSON.parse(saStr), site.gsc_property, { days: 28 }); topPages = snap.topPages || []; } catch (e) {}
+    }
+    if (!topPages.length && site && site.url) {
+      topPages = [{ page: /^https?:/i.test(site.url) ? site.url : 'https://' + site.url, clicks: 0 }];  // fallback: scan the homepage
+    }
+    if (!topPages.length) return { error: 'No pages to scan — connect Google Search Console (or set the site URL) first.', needsConnect: true };
+    const res = await uxcrawl.crawlSite(topPages, { limit: Math.min(body.limit || 10, 20) });
+    if (body.file) { const filed = await uxcrawl.fileCrawlDefects(db, body.siteId, site, res.defects); return { ...res, filed: filed.filed }; }
+    return res;
+  },
+  // File selected crawl defects into the Review Queue (the "Send to review" action).
+  'POST /ux-crawl-file': async (body) => {
+    if (!body.siteId || !Array.isArray(body.defects)) return { error: 'siteId + defects[] required' };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    const filed = await uxcrawl.fileCrawlDefects(db, body.siteId, site, body.defects);
+    return { ok: true, ...filed };
   },
 
   // Probe a site's consent + tracker stack (READ-ONLY) — drives the UX Activation panel.
@@ -3140,6 +3170,7 @@ const HEAVY_ROUTES = new Set([
   'POST /aeo-answer-block', 'POST /aeo-snippet-format', 'POST /aeo-apply-block-schema',
   'POST /apply-local-schema', 'POST /engine-autodraft', 'POST /engine-sync-published',
   'POST /n8n-run',
+  'POST /ux-crawl',
 ]);
 
 // ── Experience Monitor — UX beacon ingest (the high-volume hot path) ─────────
