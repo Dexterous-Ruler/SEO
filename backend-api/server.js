@@ -2037,9 +2037,13 @@ const routes = {
   'POST /content-decay-brief': async (body) => {
     const page = body.page;
     if (!page) return { error: 'No page specified' };
+    // The decay page object stores its URL in `.page` (GSC shape); older callers pass a
+    // raw string or a `.url`. Reading only `.url` meant we fetched the object itself
+    // ("[object Object]") → empty → "No Page Content Available". Resolve all three.
+    const pageUrl = (typeof page === 'string') ? page : (page.page || page.url);
     let pageText = '';
-    try {
-      const res = await fetch(page.url || page, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } });
+    if (pageUrl) try {
+      const res = await fetch(pageUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36' } });
       const html = await res.text();
       pageText = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
     } catch (e) {}
