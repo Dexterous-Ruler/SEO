@@ -115,6 +115,29 @@ async function elementorContentState(wp, postId) {
     return { elementor: !!(r && r.elementor), widgets: (r && r.widgets) || [] };
   } catch (e) { return { elementor: false, widgets: [] }; }
 }
+
+// The heavy part of a content rewrite = decayBrief + refreshArticle (two Claude calls).
+// On long pages this exceeds the edge gateway's ~100s response cap → 504. So it runs in
+// the BACKGROUND (started via /content-rewrite {start:true}); the client polls
+// /content-rewrite-status. This helper does the generation and returns the preview.
+async function generateRewritePreview({ wp, found, page, site, siteId, brief }) {
+  const builder = (site && site.stack && site.stack.builder) || '';
+  const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content,title`).catch(() => null);
+  const rawHtml = (post && post.content && (post.content.raw != null ? post.content.raw : '')) || '';
+  const rawText = rawHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  if (rawText.length < 60) return { status: 'manual', builder, reason: `This page has no editable post content to auto-rewrite${builder ? ` (it’s built with ${builder})` : ''} — generate the Brief and edit it directly in your builder.` };
+  const title = (post && post.title && (post.title.raw || post.title.rendered)) || page.title || '';
+  let br = brief;
+  if (!br) { try { br = await claude.decayBrief({ page, pageContext: { excerpt: rawText.slice(0, 4000) }, siteId }); } catch (e) { br = ''; } }
+  let newHtml = '';
+  try { newHtml = await claude.refreshArticle({ page: { ...page, title }, currentContent: rawHtml || rawText, brief: br, siteId }); }
+  catch (e) { return { error: 'Rewrite failed: ' + e.message }; }
+  const clean = String(newHtml || '').replace(/^\s*```(?:html)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+  if (clean.length < 80) return { error: 'The rewrite came back empty — try again.' };
+  return { status: 'preview', postId: found.id, type: found.type, title, brief: br, newHtml: clean,
+    oldWords: rawText.split(/\s+/).filter(Boolean).length, newWords: clean.replace(/<[^>]+>/g, ' ').split(/\s+/).filter(Boolean).length };
+}
+const REWRITES = new Map();   // `${siteId}:${postId}` -> { status:'running'|'done'|'error', result?, error?, at }
 import { limiters, infraStats, withTimeout, HEAVY_MAX_QUEUE, Limiter, TTLCache } from './infra.js';
 import * as jobs from './jobs.js';
 import * as drift from './drift.js';
@@ -2294,38 +2317,41 @@ const routes = {
       if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'You', icon: 'sparkles', text: `Rewrote & refreshed “${page.title || pageUrl}”`, meta: 'reviewed full rewrite + re-indexed (WordPress revision saved)' }).catch(() => {});
       return { status: 'applied', postId: found.id, url: pageUrl, indexed, modified: after && after.modified, reversible: 'WordPress keeps a revision — restore the previous version from the post’s Revisions if needed.' };
     }
-    // Decide rewritability per-PAGE by its actual editable content, NOT the site's builder
-    // flag: classic/Gutenberg blog posts on an Elementor/Divi site still have editable
-    // post_content (rewrite works + renders), whereas a true page-builder layout returns
-    // little/no post_content → we fall back to manual below.
-    const builder = (site && site.stack && site.stack.builder) || '';
-    const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content,title`).catch(() => null);
-    const rawHtml = (post && post.content && (post.content.raw != null ? post.content.raw : '')) || '';
-    const rawText = rawHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    if (rawText.length < 60) return { status: 'manual', builder, reason: `This page has no editable post content to auto-rewrite${builder ? ` (it’s built with ${builder})` : ''} — generate the Brief and edit it directly in your builder.` };
-    const title = (post && post.title && (post.title.raw || post.title.rendered)) || page.title || '';
-    let brief = body.brief;
-    if (!brief) { try { brief = await claude.decayBrief({ page, pageContext: { excerpt: rawText.slice(0, 4000) }, siteId: body.siteId }); } catch (e) { brief = ''; } }
-    let newHtml = '';
-    try { newHtml = await claude.refreshArticle({ page: { ...page, title }, currentContent: rawHtml || rawText, brief, siteId: body.siteId }); }
-    catch (e) { return { error: 'Rewrite failed: ' + e.message }; }
-    const clean = String(newHtml || '').replace(/^\s*```(?:html)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-    if (clean.length < 80) return { error: 'The rewrite came back empty — try again.' };
-    if (!body.apply) {
-      return { status: 'preview', postId: found.id, type: found.type, title, brief, newHtml: clean,
-        oldWords: rawText.split(/\s+/).filter(Boolean).length, newWords: clean.replace(/<[^>]+>/g, ' ').split(/\s+/).filter(Boolean).length };
+    // Generation is heavy (2 Claude calls) and 504s at the edge on long pages, so when the
+    // caller asks (start:true) run it in the BACKGROUND and let them poll /content-rewrite-status.
+    const jobId = `${body.siteId}:${found.id}`;
+    if (body.start && !body.apply) {
+      const prevJob = REWRITES.get(jobId);
+      if (prevJob && prevJob.status === 'running') return { started: true, jobId, postId: found.id, status: 'running' };
+      REWRITES.set(jobId, { status: 'running', at: Date.now() });
+      generateRewritePreview({ wp, found, page, site, siteId: body.siteId, brief: body.brief })
+        .then((r) => REWRITES.set(jobId, { status: (r && !r.error) ? 'done' : 'error', result: r, error: r && r.error, at: Date.now() }))
+        .catch((e) => REWRITES.set(jobId, { status: 'error', error: String(e.message || e), at: Date.now() }));
+      return { started: true, jobId, postId: found.id, status: 'running' };
     }
-    if (site && site.write_armed === false && !body.force) {
-      return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then apply the rewrite.' };
-    }
+    // Synchronous generate (short pages / preview), or the generation half of an apply.
+    const gen = await generateRewritePreview({ wp, found, page, site, siteId: body.siteId, brief: body.brief });
+    if (!gen || gen.status !== 'preview') return gen || { error: 'Rewrite failed.' };
+    if (!body.apply) return gen;
+    if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then apply the rewrite.' };
+    const clean = gen.newHtml, title = gen.title;
     const elx = await elementorContentState(wp, found.id);
-    if (elx.elementor && elx.widgets.length && !body.force) return { status: 'manual-builder', builder: 'Elementor', canElementorPush: true, postId: found.id, type: found.type, title, brief, newHtml: clean, reason: 'This page’s content lives in Elementor widgets — writing it to the raw content field would break the layout. Use “Push into Elementor (safe)” (it swaps only the article widget, and saves a backup).', reversible: 'Reversible — a backup is saved (use Restore).' };
+    if (elx.elementor && elx.widgets.length && !body.force) return { status: 'manual-builder', builder: 'Elementor', canElementorPush: true, postId: found.id, type: found.type, title, brief: gen.brief, newHtml: clean, reason: 'This page’s content lives in Elementor widgets — writing it to the raw content field would break the layout. Use “Push into Elementor (safe)” (it swaps only the article widget, and saves a backup).', reversible: 'Reversible — a backup is saved (use Restore).' };
     const upd = await wp.update(found.type, found.id, { content: balanceBlockTags(clean) }, { force: true });   // balance tags so it can't break out of the theme’s content widget
     if (upd && upd.dryRun) return { status: 'dry-run', newHtml: clean };
     const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=modified`).catch(() => null);
     const indexed = await submitOneForIndex(body.siteId, pageUrl);
     if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'sparkles', text: `Rewrote & refreshed “${title || pageUrl}”`, meta: 'full content rewrite + re-indexed (WordPress revision saved)' }).catch(() => {});
     return { status: 'applied', postId: found.id, url: pageUrl, indexed, modified: after && after.modified, reversible: 'WordPress keeps a revision — restore the previous version from the post’s Revisions if needed.' };
+  },
+  // Poll a background rewrite generation started with /content-rewrite {start:true}.
+  'POST /content-rewrite-status': async (body) => {
+    if (!body.siteId || !body.postId) return { error: 'siteId + postId required' };
+    const j = REWRITES.get(`${body.siteId}:${body.postId}`);
+    if (!j) return { status: 'idle' };
+    if (j.status === 'done') return { status: 'done', ...(j.result || {}) };
+    if (j.status === 'error') return { status: 'error', error: j.error || 'generation failed' };
+    return { status: 'running', at: j.at };
   },
 
   // Undo a bad auto-apply: restore a page's PREVIOUS WordPress revision — the one-click

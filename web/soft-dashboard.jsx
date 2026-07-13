@@ -3886,10 +3886,24 @@ function GscScreen({ ctx }) {
   const [rewriteFor,setRewriteFor] = useState(null);  // { page, loading?|applying?, preview?|manual?|applied?|error? }
   const doRewrite = (d)=>{
     setRewriteFor({ page:d.page, loading:true });
-    API.contentRewrite(s.id, d, {}).then(r=>{
-      if(r.error){ setRewriteFor({ page:d.page, error:r.error }); ctx.toast("Rewrite: "+r.error,"clay"); return; }
+    const handle=(r)=>{
+      if(!r||r.error){ setRewriteFor({ page:d.page, error:(r&&r.error)||"Rewrite failed" }); ctx.toast("Rewrite: "+((r&&r.error)||"failed"),"clay"); return; }
       if(r.status==="manual"){ setRewriteFor({ page:d.page, manual:r }); ctx.toast(r.reason||"Edit this page in your builder","gold"); return; }
       setRewriteFor({ page:d.page, preview:r });
+    };
+    // Generation runs in the BACKGROUND (long pages exceed the ~100s gateway cap) → poll.
+    API.contentRewrite(s.id, d, { start:true }).then(r=>{
+      if(r&&r.error){ handle(r); return; }
+      const postId = r && r.postId;
+      if(!postId){ handle(r); return; }
+      let tries=0;
+      const poll=()=>{
+        API.contentRewriteStatus(s.id, postId).then(st=>{
+          if(st && st.status==="running"){ if(++tries>75){ setRewriteFor({ page:d.page, error:"Rewrite timed out — try again." }); return; } setTimeout(poll,4000); return; }
+          handle(st);
+        }).catch(e=>{ if(++tries>75){ setRewriteFor({ page:d.page, error:e.message }); return; } setTimeout(poll,4000); });
+      };
+      setTimeout(poll,3000);
     }).catch(e=>{ setRewriteFor({ page:d.page, error:e.message }); ctx.toast(e.message,"clay"); });
   };
   const applyRewrite = (d)=>{
