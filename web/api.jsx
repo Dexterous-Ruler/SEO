@@ -255,6 +255,7 @@
     speedTest(url, strategy) { return engine("/speed-test", { url, strategy }); },
     contentDecay(siteId, windowDays) { return engine("/content-decay", { siteId, windowDays }); },
     contentDecayBrief(page) { return engine("/content-decay-brief", { page }); },
+    contentRestore(page, siteId, opts) { return engine("/content-restore", Object.assign({ page, siteId }, opts || {})); },
     contentRefresh(siteId, page, apply) { return engine("/content-refresh", { siteId, page, apply: !!apply }); },
     contentRefreshUndo(siteId, page) { return engine("/content-refresh-undo", { siteId, page }); },
     contentRewrite(siteId, page, opts) { return engine("/content-rewrite", Object.assign({ siteId, page }, opts || {})); },

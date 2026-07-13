@@ -3898,9 +3898,23 @@ function GscScreen({ ctx }) {
     API.contentRewrite(s.id, d, { html:prev.newHtml, brief:prev.brief, apply:true }).then(r=>{
       if(r.error){ ctx.toast("Apply: "+r.error,"clay"); setRewriteFor(f=>({ ...(f||{}), applying:false })); return; }
       if(r.status==="blocked"){ ctx.toast(r.reason||"Site is read-only — arm writes first","gold"); setRewriteFor(f=>({ ...(f||{}), applying:false })); return; }
+      // Builder page (Elementor/Divi…): NOT applied — overwriting content would break the layout.
+      if(r.status==="manual-builder"){ setRewriteFor(f=>({ ...(f||{}), applying:false, builderBlocked:r })); ctx.toast(("Not pushed — this is a "+(r.builder||"page-builder")+" page. Copy the rewrite into the builder instead."),"gold"); return; }
       setRewriteFor({ page:d.page, applied:r });
       ctx.toast("Rewrote & refreshed the live page"+(r.indexed&&r.indexed.ok?" · re-indexed":"")+" ✓","teal");
     }).catch(e=>{ ctx.toast(e.message,"clay"); setRewriteFor(f=>({ ...(f||{}), applying:false })); });
+  };
+  // Undo a bad auto-apply: restore the page's previous WordPress revision.
+  const [restoreBusy,setRestoreBusy] = useState("");
+  const doRestore = (d)=>{
+    if(!(typeof window!=="undefined" && window.confirm && window.confirm("Restore the previous version of this page?\n\n"+d.page+"\n\nThis reverts the page content to the WordPress revision saved before the last change (fixes a layout an auto-rewrite broke)."))) return;
+    setRestoreBusy(d.page);
+    API.contentRestore(d, s.id, {}).then(r=>{
+      if(r&&r.error){ ctx.toast("Restore: "+r.error,"clay"); return; }
+      if(r&&r.status==="blocked"){ ctx.toast(r.reason||"Site is read-only — arm writes first","gold"); return; }
+      if(r&&r.status==="restored"){ ctx.toast("Restored the previous version ✓ — reload the page to confirm the layout","teal"); }
+      else ctx.toast("Nothing to restore.","gold");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setRestoreBusy(""));
   };
   const doRefreshAll = async ()=>{
     const pages=(decay&&decay.pages)||[]; if(!pages.length) return;
@@ -4309,6 +4323,7 @@ function GscScreen({ ctx }) {
                             <NeoButton kind="primary" size="sm" icon={(refreshFor&&refreshFor.page===d.page&&refreshFor.loading)?undefined:"sparkles"} disabled={refreshFor&&refreshFor.page===d.page&&refreshFor.loading} onClick={()=>doRefresh(d)}>{refreshFor&&refreshFor.page===d.page&&refreshFor.loading&&<Icon name="cog" size={14} className="audit-spin" />}{refreshFor&&refreshFor.page===d.page&&refreshFor.loading?(refreshFor.step==="images"?"Optimising images…":"Refreshing…"):"Refresh & optimise"}</NeoButton>
                             <NeoButton kind="ghost" size="sm" icon="doc" onClick={()=>genBrief(d)}>Brief</NeoButton>
                             <NeoButton kind="soft" size="sm" icon={(rewriteFor&&rewriteFor.page===d.page&&(rewriteFor.loading||rewriteFor.applying))?undefined:"sparkles"} disabled={rewriteFor&&rewriteFor.page===d.page&&(rewriteFor.loading||rewriteFor.applying)} onClick={()=>doRewrite(d)} title="Claude rewrites & expands this existing page per a fresh brief — you review it, then it updates the SAME live post">{rewriteFor&&rewriteFor.page===d.page&&rewriteFor.loading&&<Icon name="cog" size={14} className="audit-spin" />}{rewriteFor&&rewriteFor.page===d.page&&rewriteFor.loading?"Rewriting…":"Rewrite & refresh"}</NeoButton>
+                            <NeoButton kind="ghost" size="sm" disabled={restoreBusy===d.page} onClick={()=>doRestore(d)} title="Undo a bad apply — restore this page's previous WordPress version (fixes a layout an earlier rewrite broke)">{restoreBusy===d.page&&<Icon name="cog" size={13} className="audit-spin" />}Restore</NeoButton>
                           </span>
                         </div>
                         {/* One-click refresh result */}

@@ -63,6 +63,22 @@ async function n8nCreds(body) {
   const apiKey = (cfg && cfg.apiKey) || (body && body.apiKey) || '';
   return { baseUrl, apiKey };
 }
+
+// Is THIS page rendered by a page-builder (Elementor/Divi/Bricks/WPBakery)? Overwriting
+// post_content on a builder page can break its layout (the builder owns the columns/
+// sidebar), so content-rewrite refuses to auto-apply there and hands the rewrite back to
+// paste in the builder. Best-effort: fetch the live page and match builder fingerprints.
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+async function detectPageBuilder(pageUrl) {
+  try {
+    const html = await (await fetch(pageUrl, { headers: { 'User-Agent': BROWSER_UA } })).text();
+    if (/data-elementor-type|class="[^"]*\belementor-page\b/i.test(html)) return 'Elementor';
+    if (/id="et-boc"|class="[^"]*\bet_pb_/i.test(html)) return 'Divi';
+    if (/class="[^"]*\bbrxe-|id="bricks-/i.test(html)) return 'Bricks';
+    if (/data-vc-|class="[^"]*\bwpb_|js_composer/i.test(html)) return 'WPBakery';
+    return null;
+  } catch (e) { return null; }
+}
 import { limiters, infraStats, withTimeout, HEAVY_MAX_QUEUE, Limiter, TTLCache } from './infra.js';
 import * as jobs from './jobs.js';
 import * as drift from './drift.js';
@@ -2233,6 +2249,8 @@ const routes = {
     if (body.apply && body.html && String(body.html).trim().length > 80) {
       if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then apply the rewrite.' };
       const clean = String(body.html).replace(/^\s*```(?:html)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+      const pageBuilder = await detectPageBuilder(pageUrl);
+      if (pageBuilder && !body.force) return { status: 'manual-builder', builder: pageBuilder, postId: found.id, type: found.type, url: pageUrl, newHtml: clean, reason: `This page is built with ${pageBuilder} — auto-replacing its content overwrites post_content and breaks the layout (${pageBuilder} owns the columns/sidebar). Copy the rewrite into the ${pageBuilder} editor for this page instead.`, reversible: 'If a prior apply broke the layout, use “Restore previous version” below (or WordPress → Revisions).' };
       const upd = await wp.update(found.type, found.id, { content: clean }, { force: true });
       if (upd && upd.dryRun) return { status: 'dry-run' };
       const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=modified`).catch(() => null);
@@ -2264,12 +2282,43 @@ const routes = {
     if (site && site.write_armed === false && !body.force) {
       return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then apply the rewrite.' };
     }
+    const pageBuilder = await detectPageBuilder(pageUrl);
+    if (pageBuilder && !body.force) return { status: 'manual-builder', builder: pageBuilder, postId: found.id, type: found.type, title, brief, newHtml: clean, reason: `This page is built with ${pageBuilder} — auto-replacing its content overwrites post_content and breaks the layout (${pageBuilder} owns the columns/sidebar). Copy the rewrite into the ${pageBuilder} editor for this page instead.`, reversible: 'If a prior apply broke the layout, use “Restore previous version” (or WordPress → Revisions).' };
     const upd = await wp.update(found.type, found.id, { content: clean }, { force: true });
     if (upd && upd.dryRun) return { status: 'dry-run', newHtml: clean };
     const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=modified`).catch(() => null);
     const indexed = await submitOneForIndex(body.siteId, pageUrl);
     if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'sparkles', text: `Rewrote & refreshed “${title || pageUrl}”`, meta: 'full content rewrite + re-indexed (WordPress revision saved)' }).catch(() => {});
     return { status: 'applied', postId: found.id, url: pageUrl, indexed, modified: after && after.modified, reversible: 'WordPress keeps a revision — restore the previous version from the post’s Revisions if needed.' };
+  },
+
+  // Undo a bad auto-apply: restore a page's PREVIOUS WordPress revision — the one-click
+  // revert for when a rewrite broke the layout. `list:true` returns recent revisions with a
+  // text preview so the UI can offer a picker; otherwise restores `revisionId` (or the
+  // version just before the latest save) into post_content.
+  'POST /content-restore': async (body) => {
+    const pageUrl = (body.page && (body.page.url || body.page.page)) || body.url;
+    if (!body.siteId || !pageUrl) return { error: 'siteId and page url required' };
+    let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
+    const site = await db.getSite(body.siteId).catch(() => null);
+    const wp = new WordPressClient(creds);
+    let found = (body.page && body.page._id && body.page._type) ? { id: body.page._id, type: body.page._type } : null;
+    if (!found) { try { found = await wp.resolvePostByUrl(pageUrl); } catch (e) {} }
+    if (!found || !found.id) return { error: 'Could not match this URL to a WordPress post/page.' };
+    let revs;
+    try { revs = await wp.request(`/${found.type}/${found.id}/revisions?per_page=8&context=edit&_fields=id,modified,content`); } catch (e) { return { error: 'Could not read revisions: ' + e.message }; }
+    if (!Array.isArray(revs) || revs.length < 2) return { error: 'No earlier revision available to restore for this page.' };
+    if (body.list) {
+      return { status: 'revisions', postId: found.id, revisions: revs.map((r) => ({ id: r.id, modified: r.modified, preview: String((r.content && (r.content.raw || r.content.rendered)) || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140) })) };
+    }
+    if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then restore.' };
+    const target = body.revisionId ? revs.find((r) => r.id === body.revisionId) : revs[1];  // revs[0]=current, revs[1]=version before it
+    const raw = target && target.content && (target.content.raw != null ? target.content.raw : '');
+    if (!raw || raw.length < 20) return { error: 'That revision has no restorable content.' };
+    await wp.update(found.type, found.id, { content: raw }, { force: true });
+    const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=modified`).catch(() => null);
+    if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'You', icon: 'undo', text: `Restored previous version of “${pageUrl}”`, meta: `reverted to revision ${target.id} (${target.modified})` }).catch(() => {});
+    return { status: 'restored', postId: found.id, url: pageUrl, revisionId: target.id, restoredFrom: target.modified, modified: after && after.modified };
   },
 
   // Site-wide cleanup: strip any legacy freshness block from EVERY post/page that has one.
@@ -3167,7 +3216,7 @@ const REQ_TIMEOUT_MS = Number(process.env.REQ_TIMEOUT_MS) || 280000; // safety n
 const HEAVY_ROUTES = new Set([
   'POST /content-intel', 'POST /generate-content', 'POST /generate-schema', 'POST /generate-css',
   'POST /ai-seo-facts', 'POST /internal-links', 'POST /external-links', 'POST /apply-link',
-  'POST /content-decay', 'POST /content-decay-brief', 'POST /content-refresh', 'POST /content-rewrite', 'POST /content-brief', 'POST /project-plan',
+  'POST /content-decay', 'POST /content-decay-brief', 'POST /content-refresh', 'POST /content-rewrite', 'POST /content-restore', 'POST /content-brief', 'POST /project-plan',
   'POST /narrate', 'POST /scorecard', 'POST /weekly-briefing', 'POST /research', 'POST /auditPage',
   'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
   'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',
