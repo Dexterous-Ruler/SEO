@@ -3916,6 +3916,18 @@ function GscScreen({ ctx }) {
       else ctx.toast("Nothing to restore.","gold");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setRestoreBusy(""));
   };
+  const copyText = (txt)=>{ try{ (navigator.clipboard&&navigator.clipboard.writeText(txt)); ctx.toast("Copied — paste into the Elementor text widget","teal"); }catch(e){ ctx.toast("Copy failed — select the text and copy manually","gold"); } };
+  // Safe Elementor push: swap ONLY the article-body text widget's content (backup + undo), layout intact.
+  const applyElementor = (d)=>{
+    const bb = rewriteFor && rewriteFor.builderBlocked; if(!bb || !bb.newHtml) return;
+    setRewriteFor(f=>({ ...(f||{}), applyingEl:true }));
+    API.contentApplyElementor(d, s.id, bb.newHtml, {}).then(r=>{
+      if(r&&r.error){ ctx.toast("Elementor push: "+r.error,"clay"); setRewriteFor(f=>({ ...(f||{}), applyingEl:false })); return; }
+      if(r&&(r.status==="not-elementor"||r.status==="no-widget"||r.status==="blocked")){ ctx.toast(r.reason||"Couldn't push — copy the text into Elementor manually","gold"); setRewriteFor(f=>({ ...(f||{}), applyingEl:false })); return; }
+      setRewriteFor({ page:d.page, applied:Object.assign({ elementor:true }, r) });
+      ctx.toast("Pushed into Elementor — layout preserved ✓"+(r.indexed&&r.indexed.ok?" · re-indexed":""),"teal");
+    }).catch(e=>{ ctx.toast(e.message,"clay"); setRewriteFor(f=>({ ...(f||{}), applyingEl:false })); });
+  };
   const doRefreshAll = async ()=>{
     const pages=(decay&&decay.pages)||[]; if(!pages.length) return;
     let applied=0,manual=0,blocked=0,imgs=0,skipped=0;
@@ -4367,12 +4379,21 @@ function GscScreen({ ctx }) {
                               : <div className="md" style={{ fontSize:12.5 }} dangerouslySetInnerHTML={{ __html:(window.SentinelHelpers&&window.SentinelHelpers.renderMarkdown(briefFor.brief))||briefFor.brief }} />}
                           </div>
                         )}
-                        {rewriteFor && rewriteFor.page===d.page && (rewriteFor.loading||rewriteFor.error||rewriteFor.manual||rewriteFor.applied||rewriteFor.preview) && (
+                        {rewriteFor && rewriteFor.page===d.page && (rewriteFor.loading||rewriteFor.error||rewriteFor.manual||rewriteFor.applied||rewriteFor.preview||rewriteFor.builderBlocked) && (
                           <div style={{ marginTop:10, padding:"12px 14px", background:"var(--surface)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", borderLeft:"3px solid var(--t-500)" }}>
                             {rewriteFor.loading && <div style={{ fontSize:12.5, color:"var(--muted)", display:"flex", alignItems:"center", gap:8 }}><Icon name="cog" size={14} className="audit-spin" />Claude is rewriting this page from a fresh brief…</div>}
                             {rewriteFor.error && <div style={{ fontSize:12.5, color:"var(--clay)" }}>{rewriteFor.error}</div>}
                             {rewriteFor.manual && <div style={{ fontSize:12.5, color:"var(--gold)" }}>{rewriteFor.manual.reason}</div>}
-                            {rewriteFor.applied && <div style={{ fontSize:12.5, fontWeight:700, color:"var(--teal)", display:"flex", alignItems:"center", gap:7, flexWrap:"wrap" }}><Icon name="check" size={14} />Rewrote the live page (previous version saved as a WordPress revision){rewriteFor.applied.indexed&&rewriteFor.applied.indexed.ok?" · re-indexed":""}. <a href={d.page} target="_blank" style={{ color:"var(--t-700)" }}>View page →</a></div>}
+                            {rewriteFor.applied && <div style={{ fontSize:12.5, fontWeight:700, color:"var(--teal)", display:"flex", alignItems:"center", gap:7, flexWrap:"wrap" }}><Icon name="check" size={14} />{rewriteFor.applied.elementor?"Pushed into the Elementor content — layout preserved, previous version backed up":"Rewrote the live page (previous version saved as a WordPress revision)"}{rewriteFor.applied.indexed&&rewriteFor.applied.indexed.ok?" · re-indexed":""}. <a href={d.page} target="_blank" style={{ color:"var(--t-700)" }}>View page →</a></div>}
+                            {rewriteFor.builderBlocked && (()=>{ const bb=rewriteFor.builderBlocked; return (<>
+                              <div style={{ fontSize:12.5, color:"#7E5A14", fontWeight:700, marginBottom:7, display:"flex", alignItems:"flex-start", gap:6 }}><Icon name="alert" size={14} style={{ color:"var(--gold)", flexShrink:0, marginTop:1 }} />{bb.reason}</div>
+                              <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom:8 }}>
+                                {bb.canElementorPush && <NeoButton kind="primary" size="sm" icon={rewriteFor.applyingEl?undefined:"sparkles"} disabled={rewriteFor.applyingEl} onClick={()=>applyElementor(d)} title="Swaps ONLY the article text widget inside Elementor — your columns/sidebar stay put; a backup is saved for one-click Restore">{rewriteFor.applyingEl&&<Icon name="cog" size={14} className="audit-spin" />}{rewriteFor.applyingEl?"Pushing…":"Push into Elementor (safe)"}</NeoButton>}
+                                <NeoButton kind="soft" size="sm" icon="doc" onClick={()=>copyText(bb.newHtml||"")}>Copy HTML</NeoButton>
+                                <NeoButton kind="ghost" size="sm" onClick={()=>setRewriteFor(null)}>Close</NeoButton>
+                              </div>
+                              <div className="scroll md" style={{ maxHeight:300, overflow:"auto", fontSize:12.5, lineHeight:1.5, background:"var(--bg)", padding:"10px 13px", borderRadius:8, boxShadow:"var(--neo-in)" }} dangerouslySetInnerHTML={{ __html: bb.newHtml }} />
+                            </>); })()}
                             {rewriteFor.preview && (<>
                               <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:7, flexWrap:"wrap" }}>
                                 <span style={{ fontSize:12.5, fontWeight:700 }}>Rewrite preview — review before it goes live</span>

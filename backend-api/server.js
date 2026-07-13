@@ -2250,7 +2250,7 @@ const routes = {
       if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then apply the rewrite.' };
       const clean = String(body.html).replace(/^\s*```(?:html)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
       const pageBuilder = await detectPageBuilder(pageUrl);
-      if (pageBuilder && !body.force) return { status: 'manual-builder', builder: pageBuilder, postId: found.id, type: found.type, url: pageUrl, newHtml: clean, reason: `This page is built with ${pageBuilder} — auto-replacing its content overwrites post_content and breaks the layout (${pageBuilder} owns the columns/sidebar). Copy the rewrite into the ${pageBuilder} editor for this page instead.`, reversible: 'If a prior apply broke the layout, use “Restore previous version” below (or WordPress → Revisions).' };
+      if (pageBuilder && !body.force) return { status: 'manual-builder', builder: pageBuilder, canElementorPush: pageBuilder === 'Elementor', postId: found.id, type: found.type, url: pageUrl, newHtml: clean, reason: `This page is built with ${pageBuilder} — auto-replacing its content overwrites post_content and breaks the layout (${pageBuilder} owns the columns/sidebar). Copy the rewrite into the ${pageBuilder} editor for this page instead.`, reversible: 'If a prior apply broke the layout, use “Restore previous version” below (or WordPress → Revisions).' };
       const upd = await wp.update(found.type, found.id, { content: clean }, { force: true });
       if (upd && upd.dryRun) return { status: 'dry-run' };
       const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=modified`).catch(() => null);
@@ -2283,7 +2283,7 @@ const routes = {
       return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then apply the rewrite.' };
     }
     const pageBuilder = await detectPageBuilder(pageUrl);
-    if (pageBuilder && !body.force) return { status: 'manual-builder', builder: pageBuilder, postId: found.id, type: found.type, title, brief, newHtml: clean, reason: `This page is built with ${pageBuilder} — auto-replacing its content overwrites post_content and breaks the layout (${pageBuilder} owns the columns/sidebar). Copy the rewrite into the ${pageBuilder} editor for this page instead.`, reversible: 'If a prior apply broke the layout, use “Restore previous version” (or WordPress → Revisions).' };
+    if (pageBuilder && !body.force) return { status: 'manual-builder', builder: pageBuilder, canElementorPush: pageBuilder === 'Elementor', postId: found.id, type: found.type, title, brief, newHtml: clean, reason: `This page is built with ${pageBuilder} — auto-replacing its content overwrites post_content and breaks the layout (${pageBuilder} owns the columns/sidebar). Copy the rewrite into the ${pageBuilder} editor for this page instead.`, reversible: 'If a prior apply broke the layout, use “Restore previous version” (or WordPress → Revisions).' };
     const upd = await wp.update(found.type, found.id, { content: clean }, { force: true });
     if (upd && upd.dryRun) return { status: 'dry-run', newHtml: clean };
     const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=modified`).catch(() => null);
@@ -2305,6 +2305,20 @@ const routes = {
     let found = (body.page && body.page._id && body.page._type) ? { id: body.page._id, type: body.page._type } : null;
     if (!found) { try { found = await wp.resolvePostByUrl(pageUrl); } catch (e) {} }
     if (!found || !found.id) return { error: 'Could not match this URL to a WordPress post/page.' };
+    // Elementor pages: prefer the Elementor content backup (the correct undo for a builder
+    // page — the layout lives in _elementor_data, not post_content). Only when there's no
+    // such backup do we fall back to post_content revisions below.
+    if (!body.list && !body.revisionId) {
+      if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then restore.' };
+      try {
+        const er = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/elementor-restore`, { method: 'POST', body: { post_id: found.id } });
+        if (er && er.ok && er.restored) {
+          if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'You', icon: 'undo', text: `Restored previous Elementor content of “${pageUrl}”`, meta: 'elementor backup' }).catch(() => {});
+          await submitOneForIndex(body.siteId, pageUrl).catch(() => {});
+          return { status: 'restored', mode: 'elementor', postId: found.id, url: pageUrl };
+        }
+      } catch (e) { /* mu-plugin < 1.15.0 or no Elementor backup → post_content revisions */ }
+    }
     let revs;
     try { revs = await wp.request(`/${found.type}/${found.id}/revisions?per_page=8&context=edit&_fields=id,modified,content`); } catch (e) { return { error: 'Could not read revisions: ' + e.message }; }
     if (!Array.isArray(revs) || revs.length < 2) return { error: 'No earlier revision available to restore for this page.' };
@@ -2319,6 +2333,41 @@ const routes = {
     const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=modified`).catch(() => null);
     if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'You', icon: 'undo', text: `Restored previous version of “${pageUrl}”`, meta: `reverted to revision ${target.id} (${target.modified})` }).catch(() => {});
     return { status: 'restored', postId: found.id, url: pageUrl, revisionId: target.id, restoredFrom: target.modified, modified: after && after.modified };
+  },
+
+  // SAFE Elementor push — the "push automatically" for builder pages. Instead of
+  // overwriting post_content (which breaks the layout), it locates the article-body TEXT
+  // widget inside _elementor_data and swaps ONLY that widget's content (mu-plugin v1.15.0
+  // backs it up first for one-click undo). Layout/columns/sidebar untouched.
+  'POST /content-apply-elementor': async (body) => {
+    const page = body.page || {};
+    const pageUrl = page.url || page.page || body.url;
+    const html = String(body.html || '');
+    if (!body.siteId || !pageUrl || html.trim().length < 40) return { error: 'siteId, page url, and html required' };
+    let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
+    const site = await db.getSite(body.siteId).catch(() => null);
+    if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then push.' };
+    const wp = new WordPressClient(creds);
+    let found = (page._id && page._type) ? { id: page._id, type: page._type } : null;
+    if (!found) { try { found = await wp.resolvePostByUrl(pageUrl); } catch (e) {} }
+    if (!found || !found.id) return { error: 'Could not match this URL to a WordPress post/page.' };
+    const clean = html.replace(/^\s*```(?:html)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    let listed;
+    try { listed = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/elementor-content`, { method: 'POST', body: { post_id: found.id, list: true } }); }
+    catch (e) { return { error: 'This needs mu-plugin v1.15.0 — update it on the site (UX Activation → Update mu-plugin): ' + e.message, needsMuUpdate: true }; }
+    if (listed && listed.elementor === false) return { status: 'not-elementor', reason: 'This page is not built with Elementor — use the normal Rewrite apply.' };
+    const widgets = (listed && listed.widgets) || [];
+    if (!widgets.length) return { status: 'no-widget', reason: 'No editable text widget found in this Elementor page — paste the rewrite into the builder manually.' };
+    if (body.listOnly) return { status: 'widgets', postId: found.id, widgets };   // read-only: inspect the widgets without writing
+    const target = body.widgetId ? widgets.find((w) => w.id === body.widgetId) : widgets.slice().sort((a, b) => (b.chars || 0) - (a.chars || 0))[0];  // article body = largest text widget
+    if (!target) return { status: 'no-widget', reason: 'Target widget not found on the page.' };
+    let rep;
+    try { rep = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/elementor-content`, { method: 'POST', body: { post_id: found.id, widget_id: target.id, html: clean } }); }
+    catch (e) { return { error: 'Elementor content replace failed: ' + e.message }; }
+    if (!rep || !rep.ok) return { error: (rep && rep.reason) || 'Elementor replace did not apply.' };
+    const indexed = await submitOneForIndex(body.siteId, pageUrl);
+    if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'You', icon: 'sparkles', text: `Pushed rewrite into Elementor content of “${page.title || pageUrl}”`, meta: `widget ${target.id} · layout preserved · backup saved` }).catch(() => {});
+    return { status: 'applied-elementor', postId: found.id, url: pageUrl, widgetId: target.id, widgetChars: target.chars, widgetCount: widgets.length, indexed, reversible: 'Use “Restore” to undo — the previous Elementor content was backed up.' };
   },
 
   // Site-wide cleanup: strip any legacy freshness block from EVERY post/page that has one.
@@ -3216,7 +3265,7 @@ const REQ_TIMEOUT_MS = Number(process.env.REQ_TIMEOUT_MS) || 280000; // safety n
 const HEAVY_ROUTES = new Set([
   'POST /content-intel', 'POST /generate-content', 'POST /generate-schema', 'POST /generate-css',
   'POST /ai-seo-facts', 'POST /internal-links', 'POST /external-links', 'POST /apply-link',
-  'POST /content-decay', 'POST /content-decay-brief', 'POST /content-refresh', 'POST /content-rewrite', 'POST /content-restore', 'POST /content-brief', 'POST /project-plan',
+  'POST /content-decay', 'POST /content-decay-brief', 'POST /content-refresh', 'POST /content-rewrite', 'POST /content-restore', 'POST /content-apply-elementor', 'POST /content-brief', 'POST /project-plan',
   'POST /narrate', 'POST /scorecard', 'POST /weekly-briefing', 'POST /research', 'POST /auditPage',
   'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
   'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',

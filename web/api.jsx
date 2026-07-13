@@ -256,6 +256,7 @@
     contentDecay(siteId, windowDays) { return engine("/content-decay", { siteId, windowDays }); },
     contentDecayBrief(page) { return engine("/content-decay-brief", { page }); },
     contentRestore(page, siteId, opts) { return engine("/content-restore", Object.assign({ page, siteId }, opts || {})); },
+    contentApplyElementor(page, siteId, html, opts) { return engine("/content-apply-elementor", Object.assign({ page, siteId, html }, opts || {})); },
     contentRefresh(siteId, page, apply) { return engine("/content-refresh", { siteId, page, apply: !!apply }); },
     contentRefreshUndo(siteId, page) { return engine("/content-refresh-undo", { siteId, page }); },
     contentRewrite(siteId, page, opts) { return engine("/content-rewrite", Object.assign({ siteId, page }, opts || {})); },

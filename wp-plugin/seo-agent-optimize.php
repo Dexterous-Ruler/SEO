@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.14.0
+ * Version:     1.15.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.14.0';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.15.0';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -463,6 +463,62 @@ class SEO_Agent_Optimize {
             },
         ]);
 
+        // TARGETED Elementor content edit — the SAFE way to push a rewrite to an
+        // Elementor page: `list:true` returns the page's text widgets (id + preview +
+        // char count) so the caller can pick the article body; otherwise it REPLACES a
+        // single widget's content by id, backing up the whole _elementor_data first so
+        // the edit is one-click reversible. Never overwrites post_content, so the layout
+        // (columns/sidebar) is untouched.
+        register_rest_route('seoagent/v1', '/elementor-content', [
+            'methods'  => 'POST',
+            'permission_callback' => $perm,
+            'callback' => function ($req) {
+                $p = $req->get_json_params();
+                $id = (int) ($p['post_id'] ?? 0);
+                if (!$id) return new WP_Error('bad', 'post_id required', ['status' => 400]);
+                $data = get_post_meta($id, '_elementor_data', true);
+                if (empty($data)) return ['ok' => true, 'elementor' => false, 'reason' => 'This page is not built with Elementor.'];
+                $arr = is_string($data) ? json_decode($data, true) : $data;
+                if (!is_array($arr)) return ['ok' => false, 'reason' => 'Could not parse _elementor_data.'];
+                if (!empty($p['list'])) {
+                    $widgets = []; seoagent_collect_text_widgets($arr, $widgets);
+                    return ['ok' => true, 'elementor' => true, 'post_id' => $id, 'widgets' => $widgets];
+                }
+                $wid = (string) ($p['widget_id'] ?? '');
+                $html = (string) ($p['html'] ?? '');
+                if ($wid === '' || strlen(trim($html)) < 20) return new WP_Error('bad', 'widget_id + html required', ['status' => 400]);
+                $done = false; seoagent_replace_widget($arr, $wid, $html, $done);
+                if (!$done) return ['ok' => false, 'reason' => 'Widget id not found on this page.'];
+                update_post_meta($id, '_seoagent_content_backup', wp_slash(is_string($data) ? $data : wp_json_encode($data)));  // backup BEFORE write → one-click undo
+                update_post_meta($id, '_elementor_data', wp_slash(wp_json_encode($arr)));
+                delete_post_meta($id, '_elementor_css');
+                if (class_exists('\\Elementor\\Plugin')) { try { \Elementor\Plugin::$instance->files_manager->clear_cache(); } catch (\Throwable $e) {} }
+                wp_update_post(['ID' => $id]);   // bump modified date
+                $this->purge();
+                return ['ok' => true, 'mode' => 'elementor', 'post_id' => $id, 'widget_id' => $wid, 'backed_up' => true];
+            },
+        ]);
+
+        // Undo the last /elementor-content replace — restore the backed-up _elementor_data.
+        register_rest_route('seoagent/v1', '/elementor-restore', [
+            'methods'  => 'POST',
+            'permission_callback' => $perm,
+            'callback' => function ($req) {
+                $p = $req->get_json_params();
+                $id = (int) ($p['post_id'] ?? 0);
+                if (!$id) return new WP_Error('bad', 'post_id required', ['status' => 400]);
+                $bak = get_post_meta($id, '_seoagent_content_backup', true);
+                if (empty($bak)) return ['ok' => false, 'reason' => 'No Elementor backup to restore for this page.'];
+                update_post_meta($id, '_elementor_data', wp_slash(is_string($bak) ? $bak : wp_json_encode($bak)));
+                delete_post_meta($id, '_elementor_css');
+                delete_post_meta($id, '_seoagent_content_backup');
+                if (class_exists('\\Elementor\\Plugin')) { try { \Elementor\Plugin::$instance->files_manager->clear_cache(); } catch (\Throwable $e) {} }
+                wp_update_post(['ID' => $id]);
+                $this->purge();
+                return ['ok' => true, 'restored' => true, 'post_id' => $id];
+            },
+        ]);
+
         // Content-decay REFRESH: prepend (or replace, or remove) a marked
         // "freshness" block at the TOP of the page. Elementor-aware — on a builder
         // page it inserts an HTML widget as the first section (which actually
@@ -839,6 +895,39 @@ function seoagent_collect_units($els, &$units) {
             seoagent_collect_settings_units($el['settings'], $units);
         }
         if (!empty($el['elements']) && is_array($el['elements'])) seoagent_collect_units($el['elements'], $units);
+    }
+}
+
+/* Collect the editable TEXT widgets of an Elementor tree (text-editor → settings.editor,
+   text → settings.text) with a plain-text preview + length, so the caller can pick the
+   article-body widget (usually the largest). Recurses sections/columns/inner. */
+function seoagent_collect_text_widgets($els, &$out) {
+    if (!is_array($els)) return;
+    foreach ($els as $el) {
+        $wt = isset($el['widgetType']) ? $el['widgetType'] : '';
+        $s = isset($el['settings']) && is_array($el['settings']) ? $el['settings'] : [];
+        $field = ($wt === 'text-editor' && isset($s['editor'])) ? 'editor' : (($wt === 'text' && isset($s['text'])) ? 'text' : '');
+        if ($field !== '') {
+            $txt = trim(wp_strip_all_tags((string) $s[$field]));
+            if ($txt !== '') $out[] = ['id' => (string) (isset($el['id']) ? $el['id'] : ''), 'type' => $wt, 'chars' => strlen($txt), 'preview' => function_exists('mb_substr') ? mb_substr($txt, 0, 140) : substr($txt, 0, 140)];
+        }
+        if (!empty($el['elements']) && is_array($el['elements'])) seoagent_collect_text_widgets($el['elements'], $out);
+    }
+}
+
+/* Replace ONE Elementor widget's content (by id) with new HTML — text-editor→editor,
+   text→text. Mutates $els in place; sets $done when the id is found + replaced. */
+function seoagent_replace_widget(&$els, $wid, $html, &$done) {
+    if ($done || !is_array($els)) return;
+    foreach ($els as &$el) {
+        if ($done) return;
+        if ((isset($el['id']) ? (string) $el['id'] : '') === $wid) {
+            $wt = isset($el['widgetType']) ? $el['widgetType'] : '';
+            if ($wt === 'text' && isset($el['settings']['text'])) { $el['settings']['text'] = $html; $done = true; return; }
+            if (!isset($el['settings']) || !is_array($el['settings'])) $el['settings'] = [];
+            $el['settings']['editor'] = $html; $done = true; return;   // default: text-editor
+        }
+        if (!empty($el['elements']) && is_array($el['elements'])) seoagent_replace_widget($el['elements'], $wid, $html, $done);
     }
 }
 
