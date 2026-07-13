@@ -79,6 +79,42 @@ async function detectPageBuilder(pageUrl) {
     return null;
   } catch (e) { return null; }
 }
+
+// Balance block-level tags so injected content can't break OUT of its container — an
+// unclosed/orphan <div> is exactly what dropped Fast ILA's sidebar (the malformed HTML
+// escaped the theme's Post Content widget). Stack-based: drop orphan closers that would
+// close an ancestor, and close anything still open at the end.
+const BALANCE_BLOCK = new Set(['div', 'section', 'article', 'aside', 'header', 'footer', 'main', 'ul', 'ol', 'li', 'table', 'tbody', 'thead', 'tr', 'td', 'th', 'figure', 'blockquote']);
+const BALANCE_VOID = new Set(['br', 'hr', 'img', 'input', 'meta', 'link', 'source', 'area', 'base', 'col', 'embed', 'param', 'track', 'wbr']);
+function balanceBlockTags(html) {
+  const stack = [], out = [];
+  const re = /<(\/?)([a-z][a-z0-9]*)\b[^>]*?(\/?)>/gi;
+  let last = 0, m;
+  while ((m = re.exec(html))) {
+    out.push(html.slice(last, m.index)); last = re.lastIndex;
+    const closing = m[1] === '/', tag = m[2].toLowerCase(), selfC = m[3] === '/' || BALANCE_VOID.has(tag), full = m[0];
+    if (!BALANCE_BLOCK.has(tag) || selfC) { out.push(full); continue; }
+    if (!closing) { stack.push(tag); out.push(full); continue; }
+    const idx = stack.lastIndexOf(tag);
+    if (idx === -1) { /* orphan closer → drop it */ continue; }
+    while (stack.length > idx + 1) out.push('</' + stack.pop() + '>');   // close inner-left-open first
+    stack.pop(); out.push(full);
+  }
+  out.push(html.slice(last));
+  while (stack.length) out.push('</' + stack.pop() + '>');               // close anything still open
+  return out.join('');
+}
+
+// Does THIS post store its content in Elementor widgets (_elementor_data)? If so, the
+// safe push is the targeted widget swap; if not (classic post_content, even wrapped in an
+// Elementor theme template), a BALANCED post_content write is safe. Returns { elementor,
+// widgets } from the mu-plugin, or { elementor:false } if it can't tell / mu too old.
+async function elementorContentState(wp, postId) {
+  try {
+    const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/elementor-content`, { method: 'POST', body: { post_id: postId, list: true } });
+    return { elementor: !!(r && r.elementor), widgets: (r && r.widgets) || [] };
+  } catch (e) { return { elementor: false, widgets: [] }; }
+}
 import { limiters, infraStats, withTimeout, HEAVY_MAX_QUEUE, Limiter, TTLCache } from './infra.js';
 import * as jobs from './jobs.js';
 import * as drift from './drift.js';
@@ -2249,9 +2285,9 @@ const routes = {
     if (body.apply && body.html && String(body.html).trim().length > 80) {
       if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then apply the rewrite.' };
       const clean = String(body.html).replace(/^\s*```(?:html)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-      const pageBuilder = await detectPageBuilder(pageUrl);
-      if (pageBuilder && !body.force) return { status: 'manual-builder', builder: pageBuilder, canElementorPush: pageBuilder === 'Elementor', postId: found.id, type: found.type, url: pageUrl, newHtml: clean, reason: `This page is built with ${pageBuilder} — auto-replacing its content overwrites post_content and breaks the layout (${pageBuilder} owns the columns/sidebar). Copy the rewrite into the ${pageBuilder} editor for this page instead.`, reversible: 'If a prior apply broke the layout, use “Restore previous version” below (or WordPress → Revisions).' };
-      const upd = await wp.update(found.type, found.id, { content: clean }, { force: true });
+      const elx = await elementorContentState(wp, found.id);
+      if (elx.elementor && elx.widgets.length && !body.force) return { status: 'manual-builder', builder: 'Elementor', canElementorPush: true, postId: found.id, type: found.type, url: pageUrl, newHtml: clean, reason: 'This page’s content lives in Elementor widgets — writing it to the raw content field would break the layout. Use “Push into Elementor (safe)” (it swaps only the article widget, and saves a backup).', reversible: 'Reversible — a backup is saved (use Restore).' };
+      const upd = await wp.update(found.type, found.id, { content: balanceBlockTags(clean) }, { force: true });   // balance tags so it can't break out of the theme’s content widget
       if (upd && upd.dryRun) return { status: 'dry-run' };
       const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=modified`).catch(() => null);
       const indexed = await submitOneForIndex(body.siteId, pageUrl);
@@ -2282,9 +2318,9 @@ const routes = {
     if (site && site.write_armed === false && !body.force) {
       return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then apply the rewrite.' };
     }
-    const pageBuilder = await detectPageBuilder(pageUrl);
-    if (pageBuilder && !body.force) return { status: 'manual-builder', builder: pageBuilder, canElementorPush: pageBuilder === 'Elementor', postId: found.id, type: found.type, title, brief, newHtml: clean, reason: `This page is built with ${pageBuilder} — auto-replacing its content overwrites post_content and breaks the layout (${pageBuilder} owns the columns/sidebar). Copy the rewrite into the ${pageBuilder} editor for this page instead.`, reversible: 'If a prior apply broke the layout, use “Restore previous version” (or WordPress → Revisions).' };
-    const upd = await wp.update(found.type, found.id, { content: clean }, { force: true });
+    const elx = await elementorContentState(wp, found.id);
+    if (elx.elementor && elx.widgets.length && !body.force) return { status: 'manual-builder', builder: 'Elementor', canElementorPush: true, postId: found.id, type: found.type, title, brief, newHtml: clean, reason: 'This page’s content lives in Elementor widgets — writing it to the raw content field would break the layout. Use “Push into Elementor (safe)” (it swaps only the article widget, and saves a backup).', reversible: 'Reversible — a backup is saved (use Restore).' };
+    const upd = await wp.update(found.type, found.id, { content: balanceBlockTags(clean) }, { force: true });   // balance tags so it can't break out of the theme’s content widget
     if (upd && upd.dryRun) return { status: 'dry-run', newHtml: clean };
     const after = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=modified`).catch(() => null);
     const indexed = await submitOneForIndex(body.siteId, pageUrl);
