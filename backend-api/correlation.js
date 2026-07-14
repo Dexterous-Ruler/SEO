@@ -116,7 +116,15 @@ function correlationMatrix(panel, metrics) {
       if (s.rho != null) pairs.push({ a: metrics[i].label, b: metrics[j].label, aKey: metrics[i].key, bKey: metrics[j].key, rho: s.rho, p: s.p, n: s.n, strength: strengthLabel(s.rho, s.n, s.p) });
     }
   }
-  const n = panel.length;
+  // Honest headline n: rows that actually contributed to at least one pairwise
+  // correlation (>=2 non-null metric values). panel.length overstates usable
+  // observations when GSC dates don't align and many rows are half-empty.
+  let n = 0;
+  for (let r = 0; r < panel.length; r++) {
+    let present = 0;
+    for (let i = 0; i < M; i++) { if (cols[i][r] != null) { present++; if (present >= 2) break; } }
+    if (present >= 2) n++;
+  }
   pairs.sort((a, b) => Math.abs(b.rho) - Math.abs(a.rho));
   return { metrics: metrics.map((m) => m.label), matrix, n, pairs };
 }

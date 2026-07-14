@@ -262,7 +262,6 @@ export const db = {
     const o = await rest(`proposals?site_id=eq.${siteId}&finding_id=eq.${encodeURIComponent(findingId)}&status=eq.proposed&select=id&limit=1`).catch(() => []);
     return o && o[0];
   },
-  async createAudit(row) { return rest('audits', { method: 'POST', body: JSON.stringify(row) }); },
   async logActivity(row) {
     // activity.owner is NOT NULL. Backend callers pass only {site_id,type,...} with
     // no owner, so resolve it here so the insert never violates the constraint:

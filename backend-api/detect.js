@@ -64,7 +64,15 @@ function versionNear(html, name) {
   return v;
 }
 
-async function restCount(api, type) {
+async function restCount(wp, api, type) {
+  // Prefer the AUTHENTICATED client: REST-gated sites (security plugin or CDN
+  // bot-wall) return 401/403 to anonymous callers, so a bare fetch reports 0
+  // even when the content exists. `raw:true` hands back the response so we can
+  // read x-wp-total (same pattern WordPressClient.list uses).
+  try {
+    const res = await wp.request(`/${type}?per_page=1`, { raw: true });
+    return Number(res.headers.get('x-wp-total') || 0);
+  } catch { /* no creds / blocked / offline — fall back to anonymous below */ }
   try {
     const res = await fetch(`${api}/wp/v2/${type}?per_page=1`, { headers: UA });
     return Number(res.headers.get('x-wp-total') || 0);
@@ -115,9 +123,9 @@ export async function detectStack(wp, baseUrl) {
 
   // 6) Scale via REST (authenticated client gives accurate counts)
   let posts = 0, pages = 0, media = 0, sitemap = 0;
-  try { posts = await restCount(api, 'posts'); } catch {}
-  try { pages = await restCount(api, 'pages'); } catch {}
-  try { media = await restCount(api, 'media'); } catch {}
+  try { posts = await restCount(wp, api, 'posts'); } catch {}
+  try { pages = await restCount(wp, api, 'pages'); } catch {}
+  try { media = await restCount(wp, api, 'media'); } catch {}
   // Sitemap index lists child sitemaps; sum their URL counts for the real total.
   try {
     const sm = await fetch(base + '/sitemap_index.xml', { headers: UA });

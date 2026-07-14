@@ -16,9 +16,14 @@ const RULES = {
   // CLS: reserve space for media so layout doesn't jump.
   'layout-shift-elements': () => ({
     note: 'Reserve intrinsic space for media to stop layout shift (CLS).',
+    // Browsers map the width/height HTML attributes to aspect-ratio when height
+    // is auto (Chrome 79+, Firefox 71+, Safari 14+) — cross-browser, no attr()
+    // needed. (aspect-ratio: attr(width)/attr(height) is a no-op outside very
+    // recent Chromium.) Scope height:auto to elements that carry BOTH attributes
+    // so fixed-size video/iframe embeds aren't collapsed.
     css: `/* CLS: keep media from reflowing once loaded */
-img, video, iframe { max-width: 100%; height: auto; }
-img[width][height] { height: auto; aspect-ratio: attr(width) / attr(height); }`,
+img, video, iframe { max-width: 100%; }
+img[width][height], video[width][height], iframe[width][height] { height: auto; }`,
   }),
   'non-composited-animations': () => ({
     note: 'Promote animations to compositor-friendly properties.',

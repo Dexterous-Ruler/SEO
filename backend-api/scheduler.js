@@ -314,22 +314,35 @@ const JOBS = [
   { name: 'ux-prune',  every: DAY,  run: jobUxPrune },    // inert until RUM_ENABLED
 ];
 
+let TICKING = false;   // in-flight guard: never let two sweeps overlap in one process
+
 async function tick() {
   // Only the leader sweeps — prevents double-runs across instances.
   if (!IS_LEADER) return;
-  let sites = [];
-  try { sites = await db.listSites(); } catch (e) { return; }
-  const connected = (sites || []).filter((s) => !s.status || s.status === 'connected');
-  let ran = 0;
-  for (const site of connected) {
-    for (const job of JOBS) {
-      if (!(await isDue(site.id, job.name, job.every))) continue;
-      await mark(site.id, job.name);   // claim BEFORE running so a co-leader blip can't double-run
-      ran++;
-      try { await job.run(site); } catch (e) { console.error('[scheduler]', job.name, site.id, e && e.message); }
+  // Re-entrancy guard: a sweep runs every connected site × every job SERIALLY and
+  // can exceed the hourly interval when heavy weekly jobs (engine-refresh, ux-crawl,
+  // image-optimize) coincide. Two overlapping sweeps could both pass isDue() for the
+  // same (site,job) before either mark()s it (check-then-act TOCTOU) and double-run
+  // an expensive job. Skip the new tick while the previous one is still running.
+  if (TICKING) { console.log('[scheduler] previous sweep still running — skipping this tick'); return; }
+  TICKING = true;
+  try {
+    let sites = [];
+    try { sites = await db.listSites(); } catch (e) { return; }
+    const connected = (sites || []).filter((s) => !s.status || s.status === 'connected');
+    let ran = 0;
+    for (const site of connected) {
+      for (const job of JOBS) {
+        if (!(await isDue(site.id, job.name, job.every))) continue;
+        await mark(site.id, job.name);   // claim BEFORE running so a co-leader blip can't double-run
+        ran++;
+        try { await job.run(site); } catch (e) { console.error('[scheduler]', job.name, site.id, e && e.message); }
+      }
     }
+    console.log(`[scheduler] sweep (leader ${INSTANCE}): ${connected.length} site(s), ${ran} job(s) run`);
+  } finally {
+    TICKING = false;
   }
-  console.log(`[scheduler] sweep (leader ${INSTANCE}): ${connected.length} site(s), ${ran} job(s) run`);
 }
 
 // Heartbeat: continuously (re)acquire the lock. Whoever holds it is the leader;

@@ -253,7 +253,7 @@ Object.assign(window, {
       negative_keywords: r.negative_keywords || [],
       brand_constraints: r.brand_constraints || [],
       semrush_db: r.semrush_db || "uk",
-      openFindings: (r.scale && r.open_findings) || 0,
+      openFindings: r.open_findings || 0,
       pendingProposals: 0,
     };
   }
@@ -288,7 +288,9 @@ Object.assign(window, {
 
   async function hydrate() {
     const reachable = await API.ping().catch(() => false);
-    window.SENTINEL_LIVE = { engine: reachable };
+    // Only mark the app "live" when the engine actually answered — otherwise leave it
+    // falsy so screens fall back to design-preview instead of firing live calls that fail.
+    window.SENTINEL_LIVE = reachable ? { engine: true } : null;
     let sites = [];
     try { sites = await API.listSites(); } catch (e) { /* not signed in / empty */ }
 

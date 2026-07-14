@@ -169,11 +169,19 @@ function mergeInto(base, extra) {
 
 function dedupeMerge(opps) {
   const byKey = new Map();
+  let anon = 0;
   for (const o of opps) {
-    if (!o || !o.dedupeKey) continue;
-    const cur = byKey.get(o.dedupeKey);
+    if (!o) continue;
+    // dedupeKey can reduce to '' for all-stopword/short titles ("What is it?").
+    // Don't drop those — fall back to a stable signature (normalized full title,
+    // then primaryKeyword, then a unique id) so they still surface downstream.
+    const key = o.dedupeKey
+      || cleanTitle(o.title || '').toLowerCase()
+      || String(o.primaryKeyword || '').toLowerCase().trim()
+      || `__anon_${anon++}`;
+    const cur = byKey.get(key);
     if (cur) mergeInto(cur, o);
-    else byKey.set(o.dedupeKey, o);
+    else byKey.set(key, o);
   }
   return [...byKey.values()];
 }

@@ -150,6 +150,21 @@ function buildHowTo(url, data) {
   });
 }
 
+// ItemList — a non-procedural set of items (e.g. "documents you need", "visa
+// types"). Emitted for bulleted lists that are NOT step-by-step instructions,
+// so the content still gets correct structured data without a HowTo falsely
+// asserting a procedure. data: { name, items:[string] }
+function buildItemList(url, data) {
+  const items = (data && Array.isArray(data.items) ? data.items : []).filter(Boolean).slice(0, 30);
+  if (!items.length) return null;
+  return clean({
+    '@type': 'ItemList',
+    '@id': idFor(url, 'itemlist'),
+    name: data.name ? String(data.name).slice(0, 300) : undefined,
+    itemListElement: items.map((text, i) => ({ '@type': 'ListItem', position: i + 1, name: String(text).slice(0, 300) })),
+  });
+}
+
 // Speakable — marks selectors/xpaths a voice assistant can read aloud.
 // data: { cssSelectors:[], xpaths:[] }. Attaches to the page WebPage @id.
 function buildSpeakable(url, data) {
@@ -325,16 +340,27 @@ function schemaForAnswerBlock(url, block, { org, baseUrl, siteName, lang, market
     }
   }
 
-  // HowTo — list-format blocks (or html carrying <ol>/<li>) become step-by-step.
-  const htmlHasSteps = typeof b.html === 'string' && /<ol\b|<li\b/i.test(b.html);
-  if (b.format === 'list' || htmlHasSteps) {
-    const items = parseListItems(b.html);
-    const howto = buildHowTo(url, {
-      name: b.heading,
-      description: b.answer,
-      steps: items.map((text) => ({ text })),
-    });
-    if (howto) graph.push(howto);
+  // List-format block → structured data, but HowTo ONLY for genuine procedures.
+  // Many 'list' answers are non-procedural (e.g. "documents you need", "types of
+  // visas") — a set of items, not sequential steps. HowTo asserts a step-by-step
+  // procedure, so gate it: emit HowTo only when the block is actually procedural
+  // (an ordered <ol>, or a how-to/steps signal in the heading); otherwise emit a
+  // plain ItemList so the bullets still get correct (non-procedural) markup.
+  const html = typeof b.html === 'string' ? b.html : '';
+  const hasOrdered = /<ol\b/i.test(html);
+  const hasList = hasOrdered || /<ul\b|<li\b/i.test(html) || b.format === 'list';
+  if (hasList) {
+    const items = parseListItems(html);
+    if (items.length) {
+      const proceduralHeading = /\bhow[\s-]?to\b|\bstep[\s-]?by[\s-]?step\b|\bsteps?\b|\bprocess\b|\binstructions?\b/i.test(String(b.heading || ''));
+      if (hasOrdered || proceduralHeading) {
+        const howto = buildHowTo(url, { name: b.heading, description: b.answer, steps: items.map((text) => ({ text })) });
+        if (howto) graph.push(howto);
+      } else {
+        const list = buildItemList(url, { name: b.heading, items });
+        if (list) graph.push(list);
+      }
+    }
   }
 
   const graphDoc = { '@context': 'https://schema.org', '@graph': graph.map(clean) };

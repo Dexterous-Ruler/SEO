@@ -32,6 +32,11 @@ async function rest(path, opts = {}) {
 }
 
 // Register a handler: type -> async (payload, job) => result.
+// NOTE: the registry is intentionally extensible — enqueue()/'POST /jobs/run'
+// accept ANY registered type. Today only `content.intel` is wired (registered in
+// server.js); the other long tasks named in the header (outreach/backlink/audit/
+// image-opt) are candidates to move onto this durable path, not a missing feature.
+// enqueue() throws 'Unknown job type' for anything not registered here — by design.
 export function register(type, fn) { HANDLERS.set(type, fn); }
 export function registered() { return [...HANDLERS.keys()]; }
 

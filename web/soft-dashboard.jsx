@@ -928,7 +928,7 @@ function Dashboard({ ctx }) {
           <div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:8 }}>
             <span style={{ fontSize:12.5, fontWeight:700, color:"var(--t-700)", background:"var(--t-50)", padding:"4px 11px", borderRadius:99, display:"inline-flex", alignItems:"center", gap:6 }}><Icon name="clock" size={13} />{dateStr}</span>
           </div>
-          <h1 style={{ margin:0, fontSize:34, fontWeight:800, letterSpacing:"-.03em" }}>Welcome back, Mara</h1>
+          <h1 style={{ margin:0, fontSize:34, fontWeight:800, letterSpacing:"-.03em" }}>Welcome back</h1>
           <p style={{ margin:"7px 0 0", fontSize:15, color:"var(--muted)" }}>Here's the health of <b style={{color:"var(--ink-2)"}}>{s.name}</b> and what needs your attention today.</p>
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:4, padding:"8px 8px", background:"var(--surface)", borderRadius:20, boxShadow:"var(--neo-sm)", border:"1px solid var(--line-soft)", flexWrap:"wrap" }}>
@@ -5936,8 +5936,9 @@ function App() {
         var w=window.open("","_blank");
         if(w){ w.document.write("<pre style='font:13px monospace;padding:24px;white-space:pre-wrap'>"+
           "=== llms.txt (publish at "+site.url+"/llms.txt) ===\n\n"+(r.llmsTxt||"").replace(/</g,"&lt;")+
-          "\n\n\n=== robots.txt AI-bot rules (merge into robots.txt) ===\n\n"+(r.aiRobots||"").replace(/</g,"&lt;")+"</pre>"); w.document.close(); }
-        toast("GEO artifacts generated — review in the new tab","teal");
+          "\n\n\n=== robots.txt AI-bot rules (merge into robots.txt) ===\n\n"+(r.aiRobots||"").replace(/</g,"&lt;")+"</pre>"); w.document.close();
+          toast("GEO artifacts generated — review in the new tab","teal"); }
+        else { toast("GEO artifacts ready, but your browser blocked the preview tab — allow pop-ups for this site and click Preview again.","gold"); }
       }).catch(e=>toast("Failed: "+e.message,"clay"));
     },
     runContentIntel:()=>{

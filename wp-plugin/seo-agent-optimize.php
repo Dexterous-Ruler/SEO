@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.16.1
+ * Version:     1.16.2
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.16.1';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.16.2';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -180,7 +180,7 @@ class SEO_Agent_Optimize {
         $bareBase = preg_replace('#^https?:#', '', $baseurl);
         $pattern  = '#(?:https?:)?' . preg_quote($bareBase, '#') . '[^"\'\s)]+?\.(?:jpe?g|png)#i';
         static $exists = [];
-        return preg_replace_callback($pattern, function ($m) use ($basedir, $bareBase, $bareMap, &$exists) {
+        $out = preg_replace_callback($pattern, function ($m) use ($basedir, $bareBase, $bareMap, &$exists) {
             $url  = $m[0];
             $bare = preg_replace('#^https?:#', '', $url);
             if (isset($bareMap[$bare])) return esc_url($bareMap[$bare]); // 1) explicit map (escaped: can't break out of the src attribute)
@@ -189,6 +189,9 @@ class SEO_Agent_Optimize {
             if (!isset($exists[$path])) $exists[$path] = @file_exists($path);
             return $exists[$path] ? $webpUrl : $url;
         }, $html);
+        // preg_replace_callback returns null on a PCRE limit (backtrack/recursion) — on a
+        // huge page that would blank the ENTIRE output. Fall back to the untouched HTML.
+        return $out === null ? $html : $out;
     }
 
     /* ── Per-page JSON-LD schema ─────────────────────────────────────────────
@@ -320,19 +323,25 @@ class SEO_Agent_Optimize {
         if ($raw === '' || $raw === false) return;                          // banner off → no blocking
         $cfg = json_decode((string) $raw, true);
         if (!is_array($cfg) || ($cfg['enabled'] ?? null) !== true) return;
-        $cookie = isset($cfg['cookie']) ? (string) $cfg['cookie'] : 'seoagent_consent';
+        // Sanitize IDENTICALLY to output_consent_banner (line ~264) so the name we check
+        // here matches the name the banner actually sets — otherwise a cookie name with
+        // any special char would never match and trackers would stay blocked post-consent.
+        $cookie = isset($cfg['cookie']) ? preg_replace('/[^A-Za-z0-9_-]/', '', (string) $cfg['cookie']) : 'seoagent_consent';
+        if ($cookie === '') { $cookie = 'seoagent_consent'; }
         if (isset($_COOKIE[$cookie]) && $_COOKIE[$cookie] === 'statistics') return;   // consent granted → allow
         ob_start([$this, 'block_trackers']);
     }
     public function block_trackers($html) {
         if (!is_string($html) || $html === '') return $html;
         $pat = '(static\.hotjar\.com|hotjar|googletagmanager\.com|google-analytics\.com|connect\.facebook\.net|clarity\.ms)';
-        return preg_replace_callback('#<script\b([^>]*)>(.*?)</script>#is', function ($m) use ($pat) {
+        $out = preg_replace_callback('#<script\b([^>]*)>(.*?)</script>#is', function ($m) use ($pat) {
             if (stripos($m[1], 'data-seoagent') !== false) return $m[0];    // never touch our own scripts
             if (!preg_match('#' . $pat . '#i', $m[0])) return $m[0];
             $attrs = preg_replace('#\stype\s*=\s*("[^"]*"|\'[^\']*\'|\S+)#i', '', $m[1]);
             return '<script' . $attrs . ' type="text/plain" data-seoagent-blocked="1">' . $m[2] . '</script>';
         }, $html);
+        // Null on a PCRE limit would blank the whole page — fall back to untouched HTML.
+        return $out === null ? $html : $out;
     }
 
     /* Mark 404 responses so the beacon (and crawlers) can detect soft/hard 404s. */

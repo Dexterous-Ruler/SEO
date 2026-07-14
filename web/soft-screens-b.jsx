@@ -221,8 +221,7 @@ function SettingRow({ icon, tone="teal", title, desc, children }) {
 function SettingsScreen({ ctx }) {
   const s = ctx.site;
   const [caps,setCaps] = useState(s.caps);
-  const [staging,setStaging] = useState(!!s.staging);
-  useEffect(()=>{ setCaps(s.caps); setStaging(!!s.staging); },[s.id]);
+  useEffect(()=>{ setCaps(s.caps); },[s.id]);
   return (
     <div className="rise">
       <PageHead title="Settings" sub="Capabilities, safety switches, and credentials." />
@@ -260,8 +259,8 @@ function SettingsScreen({ ctx }) {
             <SettingRow icon="eye" title="DRY_RUN (kill switch)" desc="Simulate every write across all sites — approvals apply as dry-runs; nothing touches the live site.">
               <Toggle on={ctx.killSwitch} onChange={()=>ctx.toggleKill()} />
             </SettingRow>
-            <SettingRow icon="layers" tone="plum" title="Staging-first" desc={s.staging?`Writes target ${s.staging}`:"No staging URL configured"}>
-              <Toggle on={staging} onChange={setStaging} disabled={!s.staging} />
+            <SettingRow icon="layers" tone="plum" title="Staging-first" desc={s.staging?`Writes target ${s.staging}`:"No staging URL configured — writes go to production"}>
+              <Toggle on={!!s.staging} disabled />
             </SettingRow>
             <div style={{ marginBottom:-15 }}>
               <SettingRow icon="power" tone="teal" title="Write mode" desc={s.writeArmed?"Armed — approved changes can apply":"Read-only — approvals only"}>

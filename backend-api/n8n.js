@@ -232,9 +232,28 @@ function reconcilePlan(workflows) {
 
 async function listWorkflows(baseUrl, apiKey) {
   try {
-    const { ok, status, data } = await api('GET', baseUrl, apiKey, '/workflows?limit=200');
-    if (!ok) return apiError(status, data, apiKey);
-    const workflows = (Array.isArray(data.data) ? data.data : [])
+    // n8n's public API paginates: each page returns { data:[...], nextCursor }.
+    // Follow the cursor so instances with >200 workflows list fully — a fixed
+    // limit=200 silently hid the surplus (they couldn't be selected/edited/run).
+    // Bounded by CAP (rows) and a page guard so a bad/looping cursor can't spin.
+    const CAP = 1000;
+    const PAGE = 250;
+    const raw = [];
+    let cursor = null;
+    for (let page = 0; page < 20 && raw.length < CAP; page++) {
+      const q = `/workflows?limit=${PAGE}` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+      const { ok, status, data } = await api('GET', baseUrl, apiKey, q);
+      if (!ok) {
+        // Fail only if we have nothing yet; otherwise return the pages we did get.
+        if (!raw.length) return apiError(status, data, apiKey);
+        break;
+      }
+      const rows = Array.isArray(data && data.data) ? data.data : [];
+      for (const w of rows) raw.push(w);
+      cursor = (data && data.nextCursor) || null;   // robust if the API omits a cursor
+      if (!cursor || !rows.length) break;
+    }
+    const workflows = raw
       .map((w) => { const c = classify(w.name); return { id: w.id, name: w.name, active: !!w.active, site: c.site, type: c.type, isWriter: c.isWriter }; })
       .sort((a, b) => String(a.name).localeCompare(String(b.name)));
     const writerCount = workflows.filter((w) => w.isWriter).length;

@@ -12,7 +12,7 @@ import { createHmac, createHash, timingSafeEqual } from 'node:crypto';
 import { URL } from 'node:url';
 import { readFile, stat } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
-import { join, normalize, extname, dirname } from 'node:path';
+import { join, normalize, extname, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WordPressClient } from '../src/wp/client.js';
 import { getHead, parseHead } from '../src/wp/rankmath.js';
@@ -62,22 +62,6 @@ async function n8nCreds(body) {
   const baseUrl = (cfg && cfg.baseUrl) || (body && body.baseUrl) || '';
   const apiKey = (cfg && cfg.apiKey) || (body && body.apiKey) || '';
   return { baseUrl, apiKey };
-}
-
-// Is THIS page rendered by a page-builder (Elementor/Divi/Bricks/WPBakery)? Overwriting
-// post_content on a builder page can break its layout (the builder owns the columns/
-// sidebar), so content-rewrite refuses to auto-apply there and hands the rewrite back to
-// paste in the builder. Best-effort: fetch the live page and match builder fingerprints.
-const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
-async function detectPageBuilder(pageUrl) {
-  try {
-    const html = await (await fetch(pageUrl, { headers: { 'User-Agent': BROWSER_UA } })).text();
-    if (/data-elementor-type|class="[^"]*\belementor-page\b/i.test(html)) return 'Elementor';
-    if (/id="et-boc"|class="[^"]*\bet_pb_/i.test(html)) return 'Divi';
-    if (/class="[^"]*\bbrxe-|id="bricks-/i.test(html)) return 'Bricks';
-    if (/data-vc-|class="[^"]*\bwpb_|js_composer/i.test(html)) return 'WPBakery';
-    return null;
-  } catch (e) { return null; }
 }
 
 // Balance block-level tags so injected content can't break OUT of its container — an
@@ -188,7 +172,9 @@ async function serveStatic(req, res, pathname) {
   let p = decodeURIComponent(pathname);
   if (p === '/' || p === '') p = '/index.html';
   const file = normalize(join(WEB_DIR, p));
-  if (!file.startsWith(WEB_DIR)) { res.writeHead(403); return res.end('Forbidden'); }
+  // Anchor the containment check on a path-separator boundary so a sibling dir whose name
+  // merely extends WEB_DIR (e.g. `<web>-x`) can't pass a bare startsWith() prefix check.
+  if (file !== WEB_DIR && !file.startsWith(WEB_DIR + sep)) { res.writeHead(403); return res.end('Forbidden'); }
   try {
     const st = await stat(file);
     if (!st.isFile()) throw new Error('not a file');
@@ -1328,9 +1314,13 @@ const routes = {
 
   // Disconnect: the connection is global (one Google account), so disconnecting
   // clears the credential + selected property for ALL sites.
-  'POST /gsc-disconnect': async () => {
+  'POST /gsc-disconnect': async (body) => {
+    // Honor siteId: disconnect GSC for THAT site only. Without a siteId, fall back to
+    // clearing all (the old always-global behaviour) — the UI now always sends one, so
+    // "Disconnect" no longer wipes Google for every site at once.
+    if (body && body.siteId) { await db.setGscSa(body.siteId, '').catch(() => {}); return { ok: true, siteId: body.siteId }; }
     await db.clearAllGscSa().catch(() => {});
-    return { ok: true };
+    return { ok: true, all: true };
   },
 
   // Pull a GSC snapshot (totals, top queries/pages, daily series, striking).
@@ -2391,7 +2381,10 @@ const routes = {
   'POST /content-rewrite-status': async (body) => {
     if (!body.siteId || !body.postId) return { error: 'siteId + postId required' };
     const j = REWRITES.get(`${body.siteId}:${body.postId}`);
-    if (!j) return { status: 'idle' };
+    // No record for a job we were asked to poll: the in-memory REWRITES map is gone (process
+    // restart / redeploy) or the job never started. Report a DISTINCT status so the UI can
+    // surface a real "re-run" message instead of an indefinite spinner or a false idle.
+    if (!j) return { status: 'unknown', reason: 'job not found — it may have completed or been lost to a restart; re-run' };
     if (j.status === 'done') return { status: 'done', ...(j.result || {}) };
     if (j.status === 'error') return { status: 'error', error: j.error || 'generation failed' };
     return { status: 'running', at: j.at };
@@ -3040,13 +3033,18 @@ const routes = {
     if (!query) return { error: 'A target query is required.' };
     let title = body.title || '', currentContent = body.currentContent || '';
     // If no content was passed but we have a URL, fetch + strip the page (same as /ai-seo-facts).
+    // Bound the fetch with a 15s timeout so a slow/hung origin can't burn the whole request
+    // budget and 504 at the edge — on abort we just fall through to the query-only path.
     if (!currentContent && url) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 15000);
       try {
-        const res = await fetch(url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } });
+        const res = await fetch(url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' }, signal: ctrl.signal });
         const html = await res.text();
         title = title || (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || '';
         currentContent = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
       } catch (e) { /* fall through — answerBlock can work query-only */ }
+      finally { clearTimeout(t); }
     }
     try {
       const block = await claude.answerBlock({ url, title, query, currentContent, format: body.format, market: market.country, siteId: body.siteId });

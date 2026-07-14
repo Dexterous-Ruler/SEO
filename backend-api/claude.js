@@ -437,8 +437,10 @@ export async function clusterKeywords({ keywords, siteName, niche, siteId }) {
 // surfacing immigration/jobs keywords for an ILA-only site). Fail-open: on any error,
 // or if it would nuke everything, returns the input unchanged.
 export async function filterKeywordsByNiche({ keywords, niche, siteName, siteId }) {
-  const list = (keywords || []).slice(0, 200);
-  if (!list.length || !niche) return keywords || [];
+  const all = keywords || [];
+  const list = all.slice(0, 200);      // only these are ever shown to the model
+  const remainder = all.slice(200);    // never evaluated — pass through unfiltered (don't drop)
+  if (!list.length || !niche) return all;
   const txt = await complete({
     system: [{ type: 'text', text: `You filter a keyword list down to terms genuinely relevant to a specific website's niche and services. KEEP a keyword only if a searcher using it could plausibly want what THIS site offers. DROP: other companies' brand names, jobs/careers/salary terms, unrelated industries/topics, and anything outside the stated niche. Return ONLY a JSON array of the kept keywords (exact strings copied from the input). No prose.` }],
     model: 'claude-haiku-4-5-20251001',   // fast — a filtering task; keeps the gap route under the edge timeout
@@ -449,9 +451,12 @@ export async function filterKeywordsByNiche({ keywords, niche, siteName, siteId 
   try {
     const arr = JSON.parse(txt.slice(txt.indexOf('['), txt.lastIndexOf(']') + 1));
     const keep = new Set(arr.map((x) => String(x).toLowerCase().trim()));
-    const filtered = (keywords || []).filter((k) => keep.has(String(k).toLowerCase().trim()));
-    return filtered.length ? filtered : (keywords || []);
-  } catch (e) { return keywords || []; }
+    // Filter ONLY the slice the model actually saw; keywords past index 200 were
+    // never shown, so append them unchanged rather than silently dropping them.
+    const filtered = list.filter((k) => keep.has(String(k).toLowerCase().trim()));
+    if (!filtered.length) return all;   // model nuked the shown slice → fail open
+    return filtered.concat(remainder);
+  } catch (e) { return all; }
 }
 
 // Synthesize a writer-ready content brief from web RESEARCH (Tavily sources +

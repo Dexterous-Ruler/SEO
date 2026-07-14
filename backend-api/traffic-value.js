@@ -65,7 +65,14 @@ function calibrateCurve(gscRows, { minImpr = 50 } = {}) {
   for (let p = 2; p <= 20; p++) {
     if (curve[p] > curve[p - 1]) curve[p] = curve[p - 1];
   }
-  return { curve, calibratedPositions, source: calibratedPositions >= 4 ? 'site-calibrated' : 'default' };
+  // Provenance must match the curve actually returned. With 1–3 calibrated
+  // buckets the curve is a HYBRID (site overrides on top of the default base),
+  // not pure default — reporting 'default' there misstated what the valuation
+  // used. Report: >=4 = 'site-calibrated', 1–3 = 'partial', 0 = 'default'.
+  const source = calibratedPositions >= 4 ? 'site-calibrated'
+    : calibratedPositions > 0 ? 'partial'
+    : 'default';
+  return { curve, calibratedPositions, source };
 }
 
 // Value a list of keywords. Each kw: {keyword, volume, position, cpc, url}.
