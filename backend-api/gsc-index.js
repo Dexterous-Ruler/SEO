@@ -12,7 +12,7 @@
 // SA added as an OWNER of the property + the "Indexing API" enabled in the GCP
 // project; URL Inspection uses the standard Search Console API. Zero deps.
 // ===========================================================================
-import { getAccessToken, snapshot } from './gsc.js';
+import { getAccessToken, snapshot, daysAgo } from './gsc.js';
 
 const INDEXING_SCOPE = 'https://www.googleapis.com/auth/indexing';
 
@@ -94,7 +94,14 @@ export async function indexHealth(sa, property, { limit = 40 } = {}) {
 export async function rankingDrops(sa, property, { windowDays = 28, minImpr = 20, minDrop = 1.5 } = {}) {
   // Two trailing windows of query+page rows, compared on average position.
   const recent = await snapshot(sa, property, { days: windowDays });
-  const prior = await snapshot(sa, property, { days: windowDays * 2 });
+  // PRIOR = the window immediately BEFORE `recent`, non-overlapping. `recent`
+  // spans [daysAgo(windowDays+2) … daysAgo(2)]; prior ends the day before that
+  // start (the +1 keeps them from sharing a day). Previously prior used
+  // { days: windowDays*2 }, which fully CONTAINED recent and ~halved every slip.
+  const prior = await snapshot(sa, property, {
+    startDate: daysAgo(2 + windowDays * 2 + 1),
+    endDate: daysAgo(2 + windowDays + 1),
+  });
   // Build prior-window maps keyed by query and by page (prior = older half).
   const recentQ = new Map((recent.topQueries || []).map((q) => [q.query, q]));
   const priorQ = new Map((prior.topQueries || []).map((q) => [q.query, q]));

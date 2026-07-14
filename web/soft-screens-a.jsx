@@ -248,8 +248,15 @@ function RunAuditModal({ ctx }) {
   const [phase,setPhase] = useState(-1);
   const PHASES = ["Crawling & sampling pages","Running Lighthouse / PSI","Pulling Core Web Vitals field data","Scanning SEO & structured data","Checking accessibility (WCAG)","Prioritizing by traffic × gap"];
   const [prog,setProg] = useState(0);
-  useEffect(()=>{ if(phase<0||phase>=99) return; const t=setTimeout(()=>{ phase<PHASES.length-1?setPhase(phase+1):setPhase(99); },650); return ()=>clearTimeout(t); },[phase]);
-  useEffect(()=>{ if(phase<0){setProg(0);return;} if(phase>=99){setProg(100);return;} setProg(Math.round(((phase+1)/PHASES.length)*100)); },[phase]);
+  const sawRunning = useRef(false);
+  // Kick off the REAL audit (shared handler on ctx) and enter the progress view.
+  const start = ()=>{ sawRunning.current=false; setPhase(0); ctx.runAudit(); };
+  // Walk the step checklist while the audit runs — but HOLD on the final step until
+  // the real audit clears ctx.auditing (completion is driven by real state, not a timer).
+  useEffect(()=>{ if(phase<0||phase>=99||phase>=PHASES.length-1) return; const t=setTimeout(()=>setPhase(phase+1),650); return ()=>clearTimeout(t); },[phase]);
+  // Real completion: once the audit has been observed running, its finish marks done.
+  useEffect(()=>{ if(phase<0||phase>=99) return; if(ctx.auditing){ sawRunning.current=true; return; } if(sawRunning.current) setPhase(99); },[ctx.auditing,phase]);
+  useEffect(()=>{ if(phase<0){setProg(0);return;} if(phase>=99){setProg(100);return;} setProg(Math.min(92,Math.round(((phase+1)/PHASES.length)*100))); },[phase]);
   const scopes=[{v:"single",t:"Single page",d:"Audit one URL — fastest"},{v:"key",t:"Key pages",d:"Home, top templates & money pages"},{v:"full",t:"Full-site (sampled)",d:"Crawl & sample up to 500 URLs"}];
   return (
     <SoftModal open onClose={phase<0||phase>=99?ctx.closeRunAudit:undefined} w={560}>
@@ -289,14 +296,14 @@ function RunAuditModal({ ctx }) {
             {phase>=99 && (
               <div style={{ marginTop:18, padding:"14px 16px", background:"var(--t-50)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-xs)", display:"flex", alignItems:"center", gap:12 }}>
                 <div style={{ width:38, height:38, borderRadius:99, background:"var(--t-600)", color:"#F3EFE4", display:"grid", placeItems:"center" }}><Icon name="check" size={20} sw={2.4} /></div>
-                <div><div style={{ fontSize:14, fontWeight:700 }}>8 findings · 6 fix proposals generated</div><div style={{ fontSize:12.5, color:"var(--muted)" }}>Prioritized by traffic × score gap.</div></div>
+                <div><div style={{ fontSize:14, fontWeight:700 }}>{(ctx.findings||[]).length} finding{(ctx.findings||[]).length===1?"":"s"} · {(ctx.proposals||[]).length} fix proposal{(ctx.proposals||[]).length===1?"":"s"} in review queue</div><div style={{ fontSize:12.5, color:"var(--muted)" }}>Prioritized by traffic × score gap.</div></div>
               </div>
             )}
           </div>
         )}
       </div>
       <div style={{ display:"flex", justifyContent:"flex-end", gap:10, padding:"16px 22px", borderTop:"1px solid var(--line-soft)", background:"var(--canvas)" }}>
-        {phase<0 && <><NeoButton kind="soft" onClick={ctx.closeRunAudit}>Cancel</NeoButton><NeoButton icon="radar" onClick={()=>setPhase(0)}>Start audit</NeoButton></>}
+        {phase<0 && <><NeoButton kind="soft" onClick={ctx.closeRunAudit}>Cancel</NeoButton><NeoButton icon="radar" onClick={start}>Start audit</NeoButton></>}
         {phase>=0 && phase<99 && <NeoButton kind="soft" onClick={ctx.closeRunAudit}>Run in background</NeoButton>}
         {phase>=99 && <><NeoButton kind="soft" onClick={ctx.closeRunAudit}>Close</NeoButton><NeoButton icon="list" onClick={()=>{ctx.closeRunAudit();ctx.goto("review");}}>Review proposals</NeoButton></>}
       </div>

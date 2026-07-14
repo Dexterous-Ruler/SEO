@@ -6095,21 +6095,26 @@ function App() {
       if(isLive()){
         const approved=proposals.filter(p=>p.status==="approved");
         (async()=>{
+          let applied=0,failed=0,manual=0,blocked=0;
           for(const p of approved){
-            if(p.channel==="rest-write" && p._postId){
+            if(p.channel==="rest-write"){
               try{
-                // Secure apply: server decrypts the stored secret by siteId.
-                const r=await API.applyMeta(siteId,{proposalId:p.id,objectType:p._objectType||"posts",postId:p._postId,field:p.field,value:p.after},killSwitch);
-                const st=(r&&r.status==="verified")?"verified":(r&&r.status==="dry-run")?"approved":(r&&r.status==="blocked")?"approved":"failed";
+                // Secure apply: the server resolves the post from the page URL and
+                // decrypts the stored secret by siteId. killSwitch → dry-run only.
+                const r=await API.applyMeta(siteId,{proposalId:p.id,objectType:p._objectType,postId:p._postId,url:p.page,field:p.field,value:p.after},killSwitch);
+                const st=(r&&r.status==="verified")?"verified":(r&&(r.status==="dry-run"||r.status==="blocked"))?"approved":"failed";
+                if(r&&r.status==="verified")applied++; else if(r&&r.status==="blocked")blocked++; else if(r&&r.status==="dry-run"){} else failed++;
                 setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:st}:x));
-              }catch(e){ setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); }
+              }catch(e){ failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); }
             } else {
-              // non-REST (theme/css/manual) → manual track, mark verified.
-              setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"verified"}:x));
-              if(isLive())API.updateProposal(p.id,{status:"verified"}).catch(()=>{});
+              // theme/CSS/manual — there is no meta REST write for these; leave the
+              // proposal queued and tell the user it needs manual action (don't fake "verified").
+              manual++;
             }
           }
-          setApplyOpen(false); toast(killSwitch?"Kill switch on — simulated only":"Applied & verified · rollback armed","teal");
+          setApplyOpen(false);
+          if(killSwitch){ toast("Kill switch on — "+approved.length+" simulated, nothing written","gold"); }
+          else { const bits=[]; if(applied)bits.push(applied+" applied & verified"); if(blocked)bits.push(blocked+" blocked (read-only)"); if(manual)bits.push(manual+" need manual action"); if(failed)bits.push(failed+" failed"); toast(bits.length?bits.join(" · "):"Nothing to apply", failed?"clay":(applied?"teal":"gold")); }
         })();
         return;
       }
@@ -6118,12 +6123,16 @@ function App() {
     },
     rollback:(id)=>{
       const p=proposals.find(x=>x.id===id);
-      if(isLive() && p && p._postId){
-        API.rollbackMeta(siteId,{proposalId:id,objectType:p._objectType||"posts",postId:p._postId,field:p.field,oldValue:p._oldValue||p.before}).then(()=>{
+      if(isLive() && p){
+        API.rollbackMeta(siteId,{proposalId:id,objectType:p._objectType,postId:p._postId,url:p.page,field:p.field,oldValue:p._oldValue||p.before}).then((r)=>{
+          if(r&&r.error){ toast("Rollback failed: "+r.error,"clay"); return; }
           API.updateProposal(id,{status:"rolled-back"}).catch(()=>{});
           API.logActivity({site_id:siteId,owner:site.owner,type:"rolled-back",actor:"You",icon:"undo",text:"Rolled back "+p.title,meta:"restored old value"}).catch(()=>{});
+          setProposals(ps=>ps.map(x=>x.id===id?{...x,status:"rolled-back"}:x)); toast("Change rolled back — value restored","gold");
         }).catch(e=>toast("Rollback failed: "+e.message,"clay"));
+        return;
       }
+      // MOCK fallback
       setProposals(ps=>ps.map(x=>x.id===id?{...x,status:"rolled-back"}:x)); toast("Change rolled back — value restored","gold"); },
     toggleWriteArm:()=>{
       const next=!site.writeArmed;

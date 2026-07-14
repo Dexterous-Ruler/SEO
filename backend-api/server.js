@@ -901,9 +901,27 @@ const routes = {
       // Consent gate: the beacon stays inert until this cookie=value is present. Defaults to
       // Complianz's per-category statistics cookie (cmplz_statistics=allow), overridable per-arm
       // via body.consent. Fail-safe: if the cookie is never set, the beacon never collects.
-      const consentCookie = (body.consent && body.consent.cookie) ? String(body.consent.cookie) : 'cmplz_statistics';
-      const consentValue = (body.consent && body.consent.value != null) ? String(body.consent.value) : 'allow';
-      const cfg = { armed: !!body.on, key: rumKey || '', endpoint, sample: Number(body.sample) || Number(process.env.RUM_SAMPLE) || 0.05, consent: { mode: 'required', cookie: consentCookie, value: consentValue } };
+      // Pass the caller's FULL consent gate through — some CMPs match a SUBSTRING
+      // (`contains`, e.g. CookieYes cookieyes-consent=…analytics:yes; Cookiebot;
+      // Borlabs; Moove) rather than an exact value; the beacon's consentPresent()
+      // honours contains / value / any. Previously this rebuilt the gate from cookie+
+      // value only, DROPPING `contains` and forcing value='allow' → those CMPs' gate
+      // could never be satisfied and the beacon collected nothing. Falls back to
+      // Complianz's cmplz_statistics=allow. Fail-safe: no cookie → never collects.
+      let consent;
+      if (body.consent && body.consent.cookie) {
+        consent = { mode: 'required', cookie: String(body.consent.cookie) };
+        if (body.consent.contains != null) consent.contains = String(body.consent.contains);
+        else if (body.consent.value != null) consent.value = String(body.consent.value);
+        // else: any non-empty value of that cookie counts as consent
+      } else {
+        consent = { mode: 'required', cookie: 'cmplz_statistics', value: 'allow' };
+      }
+      // Sample rate must be a 0–1 fraction (the beacon does Math.random() < sample).
+      // Accept a percentage defensively (e.g. 5 → 0.05) so a UI that sends "5" for 5%
+      // doesn't arm 100% sampling.
+      let sample = Number(body.sample); if (!(sample > 0)) sample = Number(process.env.RUM_SAMPLE) || 0.05; if (sample > 1) sample = sample / 100;
+      const cfg = { armed: !!body.on, key: rumKey || '', endpoint, sample, consent };
       await wp.request(`${creds.baseUrl}/wp-json/seoagent/v1/set-ux-beacon`, { method: 'POST', body: { config: cfg } });
     } catch (e) { return { ok: true, armed: !!body.on, warn: 'site flag set, but the mu-plugin loader was not updated (needs v1.9.0): ' + e.message }; }
     return { ok: true, armed: !!body.on };
@@ -2952,12 +2970,23 @@ const routes = {
       return { status: 'blocked', reason: 'site is read-only (write not armed)' };
     }
     const wp = clientFrom(creds);
-    if (body.dryRun) {
-      return { status: 'dry-run', wouldWrite: { id: body.postId, field: body.field, value: body.value } };
+    // Resolve the target post: prefer an explicit postId, else look it up from the
+    // page URL (audit proposals carry `page`, not a post_id, until first applied).
+    let objectType = body.objectType || 'posts';
+    let postId = body.postId;
+    if (!postId) {
+      let pageUrl = body.url || (body.page && (body.page.url || body.page)) || '';
+      try { pageUrl = new URL(pageUrl, creds.baseUrl).href; } catch (e) {}
+      const found = pageUrl ? await wp.resolvePostByUrl(pageUrl).catch(() => null) : null;
+      if (found) { postId = found.id; objectType = found.type; }
     }
-    const r = await wp.updateMetaVerified(body.objectType || 'posts', body.postId, body.field, body.value, { force: true });
+    if (!postId) return { status: 'failed', reason: 'Could not resolve which page to update from the URL — check the page exists.' };
+    if (body.dryRun) {
+      return { status: 'dry-run', wouldWrite: { id: postId, field: body.field, value: body.value } };
+    }
+    const r = await wp.updateMetaVerified(objectType, postId, body.field, body.value, { force: true });
     if (body.proposalId) {
-      await db.updateProposal(body.proposalId, { status: r.status === 'verified' ? 'verified' : 'failed', old_value: r.old, post_id: body.postId, object_type: body.objectType || 'posts', applied_at: new Date().toISOString() }).catch(() => {});
+      await db.updateProposal(body.proposalId, { status: r.status === 'verified' ? 'verified' : 'failed', old_value: r.old, post_id: postId, object_type: objectType, applied_at: new Date().toISOString() }).catch(() => {});
     }
     if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: 'Verified write — ' + body.field, meta: 'read-back OK' }).catch(() => {});
     return r;
@@ -2967,7 +2996,16 @@ const routes = {
   'POST /rollback-meta': async (body) => {
     const { creds, site } = await resolveCreds(body);
     const wp = clientFrom(creds);
-    const r = await wp.updateMetaVerified(body.objectType || 'posts', body.postId, body.field, body.oldValue, { force: true });
+    let objectType = body.objectType || 'posts';
+    let postId = body.postId;
+    if (!postId) {
+      let pageUrl = body.url || (body.page && (body.page.url || body.page)) || '';
+      try { pageUrl = new URL(pageUrl, creds.baseUrl).href; } catch (e) {}
+      const found = pageUrl ? await wp.resolvePostByUrl(pageUrl).catch(() => null) : null;
+      if (found) { postId = found.id; objectType = found.type; }
+    }
+    if (!postId) return { error: 'Could not resolve which page to roll back from the URL.' };
+    const r = await wp.updateMetaVerified(objectType, postId, body.field, body.oldValue, { force: true });
     if (body.proposalId) await db.updateProposal(body.proposalId, { status: 'rolled-back' }).catch(() => {});
     if (site) await db.logActivity({ site_id: site.id, type: 'rolled-back', actor: 'You', icon: 'undo', text: 'Rolled back — ' + body.field, meta: 'value restored' }).catch(() => {});
     return { ...r, rolledBack: true };

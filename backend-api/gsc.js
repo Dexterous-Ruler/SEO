@@ -152,16 +152,19 @@ export async function query(sa, property, { startDate, endDate, dimensions = ['q
 }
 
 // Date helper: YYYY-MM-DD N days ago (UTC).
-function daysAgo(n) {
+export function daysAgo(n) {
   const d = new Date(Date.now() - n * 86400000);
   return d.toISOString().slice(0, 10);
 }
 
 // Pull a standard snapshot: top queries + top pages + a daily time-series, for
 // a trailing window. Returns normalized rows ready to upsert into gsc_daily.
-export async function snapshot(sa, property, { days = 28 } = {}) {
-  const startDate = daysAgo(days + 2); // GSC data lags ~2 days
-  const endDate = daysAgo(2);
+export async function snapshot(sa, property, { days = 28, startDate, endDate } = {}) {
+  // Explicit startDate/endDate override the default trailing window (used by
+  // rankingDrops to request a non-overlapping PRIOR window). Callers that omit
+  // them get the original ~2-day-lagged trailing window, unchanged.
+  startDate = startDate || daysAgo(days + 2); // GSC data lags ~2 days
+  endDate = endDate || daysAgo(2);
   const [queries, pages, byDate] = await Promise.all([
     query(sa, property, { startDate, endDate, dimensions: ['query'], rowLimit: 250 }),
     query(sa, property, { startDate, endDate, dimensions: ['page'], rowLimit: 250 }),

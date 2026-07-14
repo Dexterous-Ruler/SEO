@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.15.0
+ * Version:     1.16.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.15.0';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.16.0';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -183,7 +183,7 @@ class SEO_Agent_Optimize {
         return preg_replace_callback($pattern, function ($m) use ($basedir, $bareBase, $bareMap, &$exists) {
             $url  = $m[0];
             $bare = preg_replace('#^https?:#', '', $url);
-            if (isset($bareMap[$bare])) return $bareMap[$bare];          // 1) explicit map
+            if (isset($bareMap[$bare])) return esc_url($bareMap[$bare]); // 1) explicit map (escaped: can't break out of the src attribute)
             $webpUrl = preg_replace('/\.(jpe?g|png)$/i', '.webp', $url);  // 2) same-folder sibling
             $path = str_replace($bareBase, $basedir, preg_replace('#^https?:#', '', $webpUrl));
             if (!isset($exists[$path])) $exists[$path] = @file_exists($path);
@@ -198,15 +198,25 @@ class SEO_Agent_Optimize {
         if (!is_singular()) return;
         $json = get_post_meta(get_the_ID(), '_seoagent_jsonld', true);
         if ($json) {
+            // Prevent a literal </script> inside the JSON-LD from closing the block
+            // (stored XSS). Inside a JSON string "<\/script" is an equivalent escape,
+            // so structured-data parsers read the identical content.
+            $json = str_ireplace('</script', '<\/script', (string) $json);
             echo "\n<script type=\"application/ld+json\" data-seoagent=\"1\">" . $json . "</script>\n";
         }
     }
 
     /* ── Site-wide custom CSS ───────────────────────────────────────────────── */
     public function output_css() {
-        $css = get_option('seoagent_custom_css', '');
-        if ($css) {
-            echo "\n<style id=\"seoagent-css\">" . wp_strip_all_tags($css) . "</style>\n";
+        $css = (string) get_option('seoagent_custom_css', '');
+        if ($css !== '') {
+            // <style> is a raw-text element: the ONLY sequence that can break out of it
+            // is a literal "</style". Neutralise just that (it never appears in valid CSS;
+            // inside a CSS string "<\/style" is an equivalent escape, so nothing legit is
+            // lost). wp_strip_all_tags() was WRONG here — it mangles legitimate '<'/'>' in
+            // SVG data-URIs, content:"<", and child-combinator selectors.
+            $css = str_ireplace('</style', '<\\/style', $css);
+            echo "\n<style id=\"seoagent-css\">" . $css . "</style>\n";
         }
     }
 
@@ -342,6 +352,10 @@ class SEO_Agent_Optimize {
     /* ── REST: let the agent store schema / CSS ─────────────────────────────── */
     public function routes() {
         $perm = function () { return current_user_can('edit_posts'); };
+        // Site-wide-effect endpoints (global <script>/<style>, site options, bulk
+        // rewrites) require full admin — the SAME bar as /self-update. A Contributor
+        // or Author holding only 'edit_posts' must never inject site-wide JS/CSS.
+        $permAdmin = function () { return current_user_can('manage_options'); };
 
         register_rest_route('seoagent/v1', '/schema', [
             'methods'  => 'POST',
@@ -350,6 +364,7 @@ class SEO_Agent_Optimize {
                 $p = $req->get_json_params();
                 $id = (int) ($p['post_id'] ?? 0);
                 if (!$id) return new WP_Error('no_id', 'post_id required', ['status' => 400]);
+                if (!current_user_can('edit_post', $id)) return new WP_Error('forbidden', 'not allowed to edit this post', ['status' => 403]);
                 $jsonld = $p['jsonld'] ?? '';
                 if ($jsonld === '' || $jsonld === null) {
                     delete_post_meta($id, '_seoagent_jsonld');
@@ -364,7 +379,7 @@ class SEO_Agent_Optimize {
 
         register_rest_route('seoagent/v1', '/css', [
             'methods'  => 'POST',
-            'permission_callback' => $perm,
+            'permission_callback' => $permAdmin,
             'callback' => function ($req) {
                 $p = $req->get_json_params();
                 update_option('seoagent_custom_css', (string) ($p['css'] ?? ''));
@@ -377,7 +392,7 @@ class SEO_Agent_Optimize {
         // consent-gated loader (output_ux_beacon). Default absent = INERT.
         register_rest_route('seoagent/v1', '/set-ux-beacon', [
             'methods'  => 'POST',
-            'permission_callback' => $perm,
+            'permission_callback' => $permAdmin,
             'callback' => function ($req) {
                 $cfg = $req->get_json_params()['config'] ?? null;
                 if ($cfg === null) return new WP_Error('bad', 'config required', ['status' => 400]);
@@ -390,7 +405,7 @@ class SEO_Agent_Optimize {
         // First-party consent banner config (output_consent_banner). Absent = INERT.
         register_rest_route('seoagent/v1', '/set-consent-banner', [
             'methods'  => 'POST',
-            'permission_callback' => $perm,
+            'permission_callback' => $permAdmin,
             'callback' => function ($req) {
                 $cfg = $req->get_json_params()['config'] ?? null;
                 if ($cfg === null) return new WP_Error('bad', 'config required', ['status' => 400]);
@@ -429,6 +444,7 @@ class SEO_Agent_Optimize {
                 $anchor = trim((string) ($p['anchor'] ?? ''));
                 $href = trim((string) ($p['target_url'] ?? ''));
                 if (!$id || $anchor === '' || $href === '') return new WP_Error('bad', 'post_id, anchor, target_url required', ['status' => 400]);
+                if (!current_user_can('edit_post', $id)) return new WP_Error('forbidden', 'not allowed to edit this post', ['status' => 403]);
 
                 // CRITICAL: an Elementor page RENDERS from _elementor_data, not
                 // post_content (which is just a hidden fallback copy). So if the page
@@ -476,6 +492,7 @@ class SEO_Agent_Optimize {
                 $p = $req->get_json_params();
                 $id = (int) ($p['post_id'] ?? 0);
                 if (!$id) return new WP_Error('bad', 'post_id required', ['status' => 400]);
+                if (!current_user_can('edit_post', $id)) return new WP_Error('forbidden', 'not allowed to edit this post', ['status' => 403]);
                 $data = get_post_meta($id, '_elementor_data', true);
                 if (empty($data)) return ['ok' => true, 'elementor' => false, 'reason' => 'This page is not built with Elementor.'];
                 $arr = is_string($data) ? json_decode($data, true) : $data;
@@ -507,6 +524,7 @@ class SEO_Agent_Optimize {
                 $p = $req->get_json_params();
                 $id = (int) ($p['post_id'] ?? 0);
                 if (!$id) return new WP_Error('bad', 'post_id required', ['status' => 400]);
+                if (!current_user_can('edit_post', $id)) return new WP_Error('forbidden', 'not allowed to edit this post', ['status' => 403]);
                 $bak = get_post_meta($id, '_seoagent_content_backup', true);
                 if (empty($bak)) return ['ok' => false, 'reason' => 'No Elementor backup to restore for this page.'];
                 update_post_meta($id, '_elementor_data', wp_slash(is_string($bak) ? $bak : wp_json_encode($bak)));
@@ -530,6 +548,7 @@ class SEO_Agent_Optimize {
                 $p = $req->get_json_params();
                 $id = (int) ($p['post_id'] ?? 0);
                 if (!$id) return new WP_Error('bad', 'post_id required', ['status' => 400]);
+                if (!current_user_can('edit_post', $id)) return new WP_Error('forbidden', 'not allowed to edit this post', ['status' => 403]);
                 $open = (string) ($p['open'] ?? '<!--seoagent-refresh-->');
                 $close = (string) ($p['close'] ?? '<!--/seoagent-refresh-->');
                 $remove = !empty($p['remove']);
@@ -573,7 +592,7 @@ class SEO_Agent_Optimize {
         // and strips them. Touches ONLY pages that actually have a block.
         register_rest_route('seoagent/v1', '/refresh-blocks-purge', [
             'methods'  => 'POST',
-            'permission_callback' => $perm,
+            'permission_callback' => $permAdmin,
             'callback' => function () {
                 global $wpdb;
                 $removed = 0;
@@ -610,6 +629,7 @@ class SEO_Agent_Optimize {
             'callback' => function ($req) {
                 $id = (int) $req->get_param('post_id');
                 if (!$id) return new WP_Error('no_id', 'post_id required', ['status' => 400]);
+                if (!current_user_can('edit_post', $id)) return new WP_Error('forbidden', 'not allowed to edit this post', ['status' => 403]);
                 // "units" = the individual linkable text segments at the SAME granularity
                 // the inserter works (per field, per non-anchor text run). The agent must
                 // validate an anchor against a SINGLE unit, so a suggestion shown can
@@ -627,7 +647,7 @@ class SEO_Agent_Optimize {
 
         // GEO: publish llms.txt content (served at /llms.txt by serve_llms_txt).
         register_rest_route('seoagent/v1', '/publish-llms-txt', [
-            'methods' => 'POST', 'permission_callback' => $perm,
+            'methods' => 'POST', 'permission_callback' => $permAdmin,
             'callback' => function ($req) {
                 $content = (string) ($req->get_json_params()['content'] ?? '');
                 update_option('seoagent_llms_txt', $content);
@@ -638,7 +658,7 @@ class SEO_Agent_Optimize {
 
         // GEO: publish AI-bot robots directives (merged into robots.txt by append_ai_robots).
         register_rest_route('seoagent/v1', '/publish-ai-robots', [
-            'methods' => 'POST', 'permission_callback' => $perm,
+            'methods' => 'POST', 'permission_callback' => $permAdmin,
             'callback' => function ($req) {
                 $content = (string) ($req->get_json_params()['content'] ?? '');
                 update_option('seoagent_ai_robots', $content);
