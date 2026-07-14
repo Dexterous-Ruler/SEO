@@ -38,10 +38,23 @@ async function fetchImages(wp, maxPages = 15) {
     if (!Array.isArray(items) || !items.length) break;
     for (const m of items) {
       if (!/image\/(jpe?g|png)/i.test(m.mime_type || '')) continue;
+      const md = m.media_details || {};
+      const filesize = Number(md.filesize || 0);
+      const w = md.width, h = md.height;
+      // WordPress frequently omits media_details.filesize for the full-size original
+      // (depends on WP version / whether image metadata was regenerated). Without a
+      // fallback the item gets sizeKB=0 and is silently dropped by the minKB filter,
+      // so genuinely heavy images are missed. Estimate size from dimensions instead
+      // (~0.5 bytes/pixel is a conservative floor for typical web JPEG/PNG) and flag
+      // it as estimated. Actual conversion later uses the real downloaded bytes, so
+      // a rough estimate only affects whether the image is CONSIDERED, never savings.
+      const estimated = !filesize && !!(w && h);
+      const bytes = filesize || (estimated ? Math.round(w * h * 0.5) : 0);
       out.push({
         id: m.id, url: m.source_url, mime: m.mime_type,
-        sizeKB: kb(m.media_details?.filesize || 0),
-        w: m.media_details?.width, h: m.media_details?.height,
+        sizeKB: kb(bytes),
+        sizeEstimated: estimated || undefined,
+        w, h,
         title: (m.title?.rendered || '').replace(/<[^>]+>/g, ''),
       });
     }

@@ -139,7 +139,7 @@ export async function organicKeywords(domain, { db = 'uk', limit = 50, units } =
     order_by: ['keyword_data.keyword_info.search_volume,desc'],
     filters: [['ranked_serp_element.serp_item.type', '=', 'organic']],
   });
-  return items.map((it) => {
+  const rows = items.map((it) => {
     const kd = it.keyword_data || {}, ki = kd.keyword_info || {};
     const se = (it.ranked_serp_element || {}).serp_item || {};
     return {
@@ -147,10 +147,17 @@ export async function organicKeywords(domain, { db = 'uk', limit = 50, units } =
       position: Number(se.rank_group || se.rank_absolute || 0),
       volume: Number(ki.search_volume || 0),
       cpc: Number(ki.cpc || 0),
-      trafficPct: Number(se.etv || 0),   // estimated traffic value for this keyword
+      etv: Number(se.etv || 0),          // estimated MONTHLY CLICKS (absolute), not a percent
       url: se.url || '',
     };
   });
+  // `trafficPct` is rendered by the UI's "Top Keywords" table as `{trafficPct}%`.
+  // etv is an ABSOLUTE click estimate (e.g. ~316 for a #1 keyword), so storing it
+  // raw showed nonsensical values like "316.0%". Express it as a genuine 0–100
+  // share: this keyword's estimated clicks as a percentage of the total estimated
+  // organic traffic across the returned set (guard divide-by-zero).
+  const totalEtv = rows.reduce((s, r) => s + r.etv, 0);
+  return rows.map(({ etv, ...r }) => ({ ...r, trafficPct: totalEtv > 0 ? (etv / totalEtv) * 100 : 0 }));
 }
 
 // Organic competitors (domains overlapping on keywords).

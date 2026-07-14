@@ -480,7 +480,7 @@ const routes = {
       // guards — nothing writes without an explicit approve→apply.
       write_armed: body.writeArmed === false ? false : true,
       mu_plugin: !!det.muPlugin, selftest: det.selftest || 'missing',
-      stack: det.stack || null, scale: det.scale || null, caps: det.caps || null,
+      stack: det.stack || null, scale: det.scale || null, caps: body.caps || det.caps || null,
     };
     let site;
     if (body.siteId) site = await db.updateSite(body.siteId, row);
@@ -695,6 +695,19 @@ const routes = {
       prompts: body.prompts || [],
       competitors: body.competitors || [],
     });
+    // Distinguish "genuinely 0 citations" from "the scan could not run". When web
+    // search is unavailable (bad model/account, or a transient outage) EVERY prompt
+    // errors, so runCitationTracking returns shareOfVoice:0 over an all-error results
+    // array — indistinguishable from a real "not cited anywhere" result. Persisting
+    // that writes a real-looking 0 into geo_runs (trend history + exec scorecard), so
+    // if NO prompt actually completed we skip the write and surface the failure instead.
+    const rows = Array.isArray(out && out.results) ? out.results : [];
+    const errored = rows.filter((r) => r && r.error);
+    const answered = rows.length - errored.length;
+    out.promptsErrored = errored.length;
+    if (rows.length && answered === 0) {
+      return { error: 'AI-citation scan could not run — web search was unavailable for every prompt, so no scan was saved. Retry shortly.', scanFailed: true, promptsErrored: errored.length, promptsTotal: rows.length, sample: (errored[0] && errored[0].error) || null };
+    }
     // Persist the run + the prompt set.
     if (body.siteId) {
       // Up/down vs the PREVIOUS scan — fetch the last run BEFORE inserting this one.
@@ -2765,7 +2778,9 @@ const routes = {
       catch (e) { /* schema:write may be missing; fall back to provided name */ table = tableName || defaultName(kind); }
       const pushed = await airtable.createRecords(pat, baseId, table, rows);
       out[kind] = { pushed, table };
-      await db.logAirtableSync({ site_id: siteId, kind, records_pushed: pushed, status: 'ok' });
+      // Best-effort audit log — a missing airtable_sync_log table must not 500 a sync
+      // whose rows already landed in Airtable (matches the guard on the other callers).
+      await db.logAirtableSync({ site_id: siteId, kind, records_pushed: pushed, status: 'ok' }).catch(() => {});
     }
     function defaultName(k) { return { gaps: 'SEO Keyword Gaps', content: 'Content Suggestions', geo: 'AI Citation Results', geo_competitors: 'AI Competitor Share', geo_opportunities: 'AI Visibility Opportunities', opportunities: 'Content Opportunities' }[k]; }
 
@@ -2822,7 +2837,8 @@ const routes = {
       }
       if (toCreate.length) created = await airtable.createRecords(pat, baseId, aw.tableId, toCreate);
       out[kind] = { pushed: created, updated, skipped, table: aw.tableName };
-      await db.logAirtableSync({ site_id: siteId, kind, records_pushed: created + updated, status: 'ok' });
+      // Best-effort audit log — must not 500 a sync whose rows already landed in Airtable.
+      await db.logAirtableSync({ site_id: siteId, kind, records_pushed: created + updated, status: 'ok' }).catch(() => {});
       return true;
     }
 
@@ -3371,20 +3387,48 @@ const routes = {
 // ── Server lifecycle + load state ───────────────────────────────────────────
 let INFLIGHT = 0;
 let SHUTTING_DOWN = false;
-const REQ_TIMEOUT_MS = Number(process.env.REQ_TIMEOUT_MS) || 280000; // safety net (<proxy cap)
+// Response deadline for a single request. Set just UNDER the ~100s edge/gateway
+// response cap this file is built around (see server.js:120, 2350, 3251) so the
+// server returns a clean JSON 504 naming the route — and releases the heavy-limiter
+// slot — a few seconds BEFORE the edge severs the socket with its own generic 504.
+// The old 280s default was ~3x the edge cap, so it could never fire first and gave
+// no protection. NOTE: withTimeout (infra.js) is a Promise.race — it only bounds the
+// RESPONSE we send the client; it CANNOT cancel the underlying handler, so the
+// Claude/DataForSEO/GSC/crawl work keeps running to completion in the background (it
+// simply no longer holds a heavy slot once we've 504'd). Routes that legitimately run
+// longer than this don't block on it: they kick off background work and return fast to
+// be polled (e.g. /content-rewrite {start:true} → /content-rewrite-status, /engine-run
+// → /engine-run-status, /jobs/run → /jobs/get), so this ceiling never truncates them.
+const REQ_TIMEOUT_MS = Number(process.env.REQ_TIMEOUT_MS) || 95000; // < ~100s edge cap
 // Heavy = calls an external model/API or does CPU work; routed through the heavy
 // concurrency limiter + backpressure. Unknown keys simply skip it (harmless).
+// Membership is kept in sync with the real route keys above — every entry must be a
+// live 'METHOD /path'. (Phantom keys are harmless but hide drift; missing heavy keys
+// silently lose their throttle + backpressure. Reconciled 2026-07: dropped 7 phantoms
+// — /project-plan, /narrate, /scorecard, /weekly-briefing, /research, /auditPage,
+// /generate-opportunities — and added the genuinely slow routes below.)
 const HEAVY_ROUTES = new Set([
   'POST /content-intel', 'POST /generate-content', 'POST /generate-schema', 'POST /generate-css',
   'POST /ai-seo-facts', 'POST /internal-links', 'POST /external-links', 'POST /apply-link',
-  'POST /content-decay', 'POST /content-decay-brief', 'POST /content-refresh', 'POST /content-rewrite', 'POST /content-restore', 'POST /content-apply-elementor', 'POST /content-brief', 'POST /project-plan',
-  'POST /narrate', 'POST /scorecard', 'POST /weekly-briefing', 'POST /research', 'POST /auditPage',
+  'POST /content-decay', 'POST /content-decay-brief', 'POST /content-refresh', 'POST /content-rewrite', 'POST /content-restore', 'POST /content-apply-elementor', 'POST /content-brief',
   'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
-  'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /content-refresh', 'POST /airtable-sync', 'POST /generate-opportunities',
+  'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /airtable-sync',
   'POST /aeo-answer-block', 'POST /aeo-snippet-format', 'POST /aeo-apply-block-schema',
   'POST /apply-local-schema', 'POST /engine-autodraft', 'POST /engine-sync-published',
   'POST /n8n-run',
   'POST /ux-crawl',
+  // Added: renamed/omitted routes that genuinely call Claude / DataForSEO / GSC / PSI / crawl.
+  'POST /content-opportunities',            // renamed from the phantom /generate-opportunities (DataForSEO + clustering + Claude)
+  'POST /audit-full',                       // full page crawl + PSI + on-page SEO read
+  'POST /psi', 'POST /psi-median', 'POST /psi-detail',   // PageSpeed Insights API (external, multi-URL / N-run)
+  'POST /correlation',                      // GSC snapshot join over audit history
+  'POST /gsc-snippet-steal',                // 3 parallel GSC API pulls
+  'POST /trending-intel',                   // Tavily/Perplexity + Claude research
+  'POST /exec-narrative',                   // Claude weekly-briefing narration
+  'POST /people-also-ask',                  // DataForSEO SERP-advanced PAA
+  'POST /prompt-test',                      // live Claude/Perplexity prompt preview
+  'POST /airtable-push-keywords',           // findOpportunities (DataForSEO + Claude) + WP fetches
+  'POST /geo-track', 'POST /geo-prompts', 'POST /geo-enable',  // Claude web-search citation pass + prompt gen + llms.txt
 ]);
 
 // ── Experience Monitor — UX beacon ingest (the high-volume hot path) ─────────

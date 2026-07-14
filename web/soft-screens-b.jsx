@@ -59,12 +59,26 @@ function ProposalCard({ p, ctx, open, onToggle }) {
 function ApplyModal({ ctx }) {
   const approved = ctx.proposals.filter(p=>p.status==="approved");
   const [phase,setPhase] = useState(-1);
+  const [result,setResult] = useState(null);
   const STEPS = ["Snapshotting current values (rollback point)","Applying via REST / theme channel","Reading back every write to confirm","Purging caching-plugin cache","Re-scoring affected pages"];
   const prodCount = approved.filter(p=>p.target==="production").length;
-  useEffect(()=>{ if(phase<0||phase>=99) return; const t=setTimeout(()=>{ phase<STEPS.length-1?setPhase(phase+1):setPhase(99); },680); return ()=>clearTimeout(t); },[phase]);
+  // Advance the step checklist while applying, but HOLD on the last step until the
+  // REAL commitApplied resolves — completion (phase 99) is driven by the actual writes,
+  // not a timer, so the "verified" card can never appear before anything was written.
+  useEffect(()=>{ if(phase<0||phase>=99||phase>=STEPS.length-1) return; const t=setTimeout(()=>setPhase(phase+1),680); return ()=>clearTimeout(t); },[phase]);
+  const startApply = ()=>{ setPhase(0); Promise.resolve(ctx.commitApplied()).then(r=>{ setResult(r||{}); setPhase(99); }).catch(()=>{ setResult({failed:approved.length,total:approved.length}); setPhase(99); }); };
+  const R = result||{};
+  const applyBits = [];
+  if(R.applied) applyBits.push(R.applied+" applied & verified");
+  if(R.blocked) applyBits.push(R.blocked+" blocked (read-only)");
+  if(R.manual) applyBits.push(R.manual+" need manual action");
+  if(R.failed) applyBits.push(R.failed+" failed");
+  const applyTitle = R.killSwitch ? ("Simulated — "+(R.total||0)+" not written") : (applyBits.join(" · ")||"Nothing applied");
+  const applySub = R.killSwitch ? "Kill switch is on — turn it off to apply for real." : (R.failed?"Some writes failed — check the review queue.":(R.applied?"Read-back verified · rollback armed.":"Nothing was written."));
+  const applyOk = !R.killSwitch && R.applied>0 && !R.failed;
   return (
     <SoftModal open onClose={phase<0||phase>=99?ctx.closeApply:undefined} w={560}>
-      <SoftModalHead icon={phase>=99?"check":"upload"} title={phase>=99?"Changes applied & verified":"Apply approved changes"} sub={`${approved.length} change${approved.length!==1?"s":""} · ${ctx.site.name}`} onClose={phase<0||phase>=99?ctx.closeApply:undefined} />
+      <SoftModalHead icon={phase>=99?(applyOk?"check":"info"):"upload"} title={phase>=99?applyTitle:"Apply approved changes"} sub={`${approved.length} change${approved.length!==1?"s":""} · ${ctx.site.name}`} onClose={phase<0||phase>=99?ctx.closeApply:undefined} />
       <div className="scroll" style={{ padding:"20px 22px", maxHeight:"60vh" }}>
         {phase<0 && (
           <div className="rise">
@@ -93,13 +107,13 @@ function ApplyModal({ ctx }) {
                 <span style={{ fontSize:13.5, color:ok?"var(--ink)":cur?"var(--ink-2)":"var(--faint)", fontWeight:ok||cur?600:500 }}>{stp}</span>
               </div>
             ); })}
-            {phase>=99 && <div style={{ marginTop:8, padding:"14px 16px", background:"var(--t-50)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-xs)", display:"flex", gap:12, alignItems:"center" }}><div style={{ width:38, height:38, borderRadius:99, background:"var(--t-600)", color:"#F3EFE4", display:"grid", placeItems:"center" }}><Icon name="check" size={20} sw={2.4} /></div><div><div style={{ fontSize:14, fontWeight:700 }}>All writes verified ✓</div><div style={{ fontSize:12.5, color:"var(--muted)" }}>Read-back matched · rollback armed.</div></div></div>}
+            {phase>=99 && <div style={{ marginTop:8, padding:"14px 16px", background:applyOk?"var(--t-50)":"var(--gold-bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-xs)", display:"flex", gap:12, alignItems:"center" }}><div style={{ width:38, height:38, borderRadius:99, background:applyOk?"var(--t-600)":"var(--gold)", color:"#F3EFE4", display:"grid", placeItems:"center" }}><Icon name={applyOk?"check":"info"} size={20} sw={2.4} /></div><div><div style={{ fontSize:14, fontWeight:700 }}>{applyTitle}</div><div style={{ fontSize:12.5, color:"var(--muted)" }}>{applySub}</div></div></div>}
           </div>
         )}
       </div>
       <div style={{ display:"flex", justifyContent:"flex-end", gap:10, padding:"16px 22px", borderTop:"1px solid var(--line-soft)", background:"var(--canvas)" }}>
-        {phase<0 && <><NeoButton kind="soft" onClick={ctx.closeApply}>Cancel</NeoButton><NeoButton icon="upload" disabled={approved.length===0} onClick={()=>setPhase(0)}>Apply {approved.length} change{approved.length!==1?"s":""}</NeoButton></>}
-        {phase>=99 && <><NeoButton kind="soft" onClick={()=>{ctx.commitApplied();ctx.goto("activity");}}>View in log</NeoButton><NeoButton icon="check" onClick={ctx.commitApplied}>Done</NeoButton></>}
+        {phase<0 && <><NeoButton kind="soft" onClick={ctx.closeApply}>Cancel</NeoButton><NeoButton icon="upload" disabled={approved.length===0} onClick={startApply}>Apply {approved.length} change{approved.length!==1?"s":""}</NeoButton></>}
+        {phase>=99 && <><NeoButton kind="soft" onClick={()=>{ctx.closeApply();ctx.goto("activity");}}>View in log</NeoButton><NeoButton icon="check" onClick={ctx.closeApply}>Done</NeoButton></>}
       </div>
     </SoftModal>
   );
@@ -158,7 +172,10 @@ function ActivityScreen({ ctx }) {
   const tone = { verified:"teal", approved:"teal", applied:"plum", "rolled-back":"gold", audit:"plum", connection:"gray", failed:"clay" };
   const [filter,setFilter] = useState("all");
   const TYPES=[{v:"all",l:"All"},{v:"writes",l:"Writes"},{v:"approved",l:"Approvals"},{v:"rolled-back",l:"Rollbacks"},{v:"failed",l:"Failures"}];
-  const rows = (window.ACTIVITY||ACTIVITY).filter(a=> filter==="all" || a.type===filter || (filter==="writes"&&(a.type==="applied"||a.type==="verified")));
+  // LIVE: only ever show the real hydrated trail (empty → honest empty state).
+  // The demo ACTIVITY seed is for design-preview (non-live) mode only.
+  const src = window.SENTINEL_LIVE ? (window.ACTIVITY||[]) : (window.ACTIVITY||ACTIVITY);
+  const rows = src.filter(a=> filter==="all" || a.type===filter || (filter==="writes"&&(a.type==="applied"||a.type==="verified")));
   return (
     <div className="rise">
       <PageHead title="Activity" sub="A complete, exportable audit trail.">
@@ -184,6 +201,7 @@ function ActivityScreen({ ctx }) {
             </div>
           );
         })}
+        {rows.length===0 && <div style={{ padding:"48px 20px", textAlign:"center", color:"var(--muted)" }}><div style={{ fontSize:14, fontWeight:600 }}>No activity yet</div><div style={{ fontSize:12.5, marginTop:4 }}>Audits, approvals, and applied changes will show up here as you use the platform.</div></div>}
       </SoftCard>
     </div>
   );
@@ -204,8 +222,7 @@ function SettingsScreen({ ctx }) {
   const s = ctx.site;
   const [caps,setCaps] = useState(s.caps);
   const [staging,setStaging] = useState(!!s.staging);
-  const [dryRun,setDryRun] = useState(!s.writeArmed);
-  useEffect(()=>{ setCaps(s.caps); setStaging(!!s.staging); setDryRun(!s.writeArmed); },[s.id]);
+  useEffect(()=>{ setCaps(s.caps); setStaging(!!s.staging); },[s.id]);
   return (
     <div className="rise">
       <PageHead title="Settings" sub="Capabilities, safety switches, and credentials." />
@@ -240,8 +257,8 @@ function SettingsScreen({ ctx }) {
         <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
           <SoftCard hover={false}>
             <SectionHead sub="Per-site write behaviour">Safety</SectionHead>
-            <SettingRow icon="eye" title="DRY_RUN default" desc="Simulate writes; never touch the live site.">
-              <Toggle on={dryRun} onChange={v=>{setDryRun(v); ctx.toast(v?"DRY_RUN on — writes simulated":"DRY_RUN off","gold");}} />
+            <SettingRow icon="eye" title="DRY_RUN (kill switch)" desc="Simulate every write across all sites — approvals apply as dry-runs; nothing touches the live site.">
+              <Toggle on={ctx.killSwitch} onChange={()=>ctx.toggleKill()} />
             </SettingRow>
             <SettingRow icon="layers" tone="plum" title="Staging-first" desc={s.staging?`Writes target ${s.staging}`:"No staging URL configured"}>
               <Toggle on={staging} onChange={setStaging} disabled={!s.staging} />

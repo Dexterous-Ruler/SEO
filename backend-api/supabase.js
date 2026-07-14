@@ -11,7 +11,46 @@ config({ override: true });
 
 const SB = process.env.SUPABASE_URL;
 const SERVICE = process.env.SUPABASE_SERVICE_ROLE;
-const ENC_KEY = process.env.SITE_SECRET_KEY || 'sentinel-dev-key';
+
+// Encryption passphrase for EVERY credential stored at rest (WordPress app
+// passwords, Airtable PAT, n8n API key, GSC creds — all passed as p_key to the
+// pgcrypto RPCs). SITE_SECRET_KEY MUST be set in any real deployment. If it is
+// unset we fall back to a well-known, repo-committed dev key so local dev still
+// boots — but that key is PUBLIC, so the fallback is (a) shouted about loudly at
+// startup and (b) refused for real encrypt/decrypt in production (see encKey()).
+const DEV_ENC_KEY = 'sentinel-dev-key';
+const SITE_SECRET = process.env.SITE_SECRET_KEY;
+const IS_PROD = process.env.NODE_ENV === 'production';
+const ENC_KEY = SITE_SECRET || DEV_ENC_KEY;
+if (!SITE_SECRET) {
+  const msg = '[supabase] SECURITY: SITE_SECRET_KEY is not set — stored credentials '
+    + '(WordPress app passwords, Airtable PAT, n8n API key, GSC creds) would be encrypted '
+    + 'with a PUBLIC, repo-committed dev key. Set SITE_SECRET_KEY to a strong random secret.';
+  if (IS_PROD) console.error(msg + ' Refusing to encrypt/decrypt in production until it is set.');
+  else console.warn(msg + ' (insecure dev fallback in use — do NOT ship this)');
+}
+
+// Return the encryption key, or throw in production when only the insecure dev key
+// is available — so a missing SITE_SECRET_KEY fails LOUD (per credential op) instead
+// of silently storing secrets under a publicly-known passphrase. Dev keeps working.
+function encKey() {
+  if (!SITE_SECRET && IS_PROD) {
+    throw new Error('SITE_SECRET_KEY is not set — refusing to use the insecure default '
+      + 'encryption key in production. Set SITE_SECRET_KEY and restart.');
+  }
+  return ENC_KEY;
+}
+
+// Warn once per RPC name when a credential RPC is missing/errors, so a fresh DB
+// lacking the GSC/Airtable functions degrades to null with a single visible line
+// instead of throwing an unhandled error.
+const _rpcWarned = new Set();
+function warnRpcMissing(fn, e) {
+  if (_rpcWarned.has(fn)) return;
+  _rpcWarned.add(fn);
+  console.warn(`[supabase] RPC ${fn} unavailable — degrading to null `
+    + `(${(e && e.message) || e}). Ensure the migration defining ${fn} has been applied.`);
+}
 
 // Short-lived cache of the "any site" GSC credential (global-connection fallback),
 // so the many per-request getGscSa calls don't re-scan every site each time.
@@ -68,10 +107,10 @@ export const db = {
   // ---- encrypted credentials (pgcrypto via SQL RPC) ----
   // Store the app password encrypted; only the server (service role) can decrypt.
   async setSecret(siteId, appPassword) {
-    return rpc('set_site_secret_srv', { p_site: siteId, p_secret: appPassword, p_key: ENC_KEY });
+    return rpc('set_site_secret_srv', { p_site: siteId, p_secret: appPassword, p_key: encKey() });
   },
   async getSecret(siteId) {
-    return rpc('get_site_secret_srv', { p_site: siteId, p_key: ENC_KEY });
+    return rpc('get_site_secret_srv', { p_site: siteId, p_key: encKey() });
   },
 
   // Airtable PAT (encrypted, isolated table — zero browser access).
@@ -79,11 +118,14 @@ export const db = {
   // any stored token — connect once, then each site just picks its own base.
   async setAirtablePat(siteId, pat) {
     _anyAt = { v: null, exp: 0 };
-    return rpc('set_airtable_pat', { p_site: siteId, p_pat: pat, p_key: ENC_KEY });
+    try { return await rpc('set_airtable_pat', { p_site: siteId, p_pat: pat, p_key: encKey() }); }
+    catch (e) { warnRpcMissing('set_airtable_pat', e); return null; }
   },
   async getAirtablePat(siteId) {
     if (siteId) {
-      const own = await rpc('get_airtable_pat', { p_site: siteId, p_key: ENC_KEY }).catch(() => null);
+      let own = null;
+      try { own = await rpc('get_airtable_pat', { p_site: siteId, p_key: encKey() }); }
+      catch (e) { warnRpcMissing('get_airtable_pat', e); }
       if (own) return own;
     }
     const now = Date.now();
@@ -91,10 +133,10 @@ export const db = {
     try {
       const sites = await this.listSites();
       for (const s of (sites || [])) {
-        const c = await rpc('get_airtable_pat', { p_site: s.id, p_key: ENC_KEY }).catch(() => null);
+        const c = await rpc('get_airtable_pat', { p_site: s.id, p_key: encKey() }).catch((e) => { warnRpcMissing('get_airtable_pat', e); return null; });
         if (c) { _anyAt = { v: c, exp: now + 60000 }; return c; }
       }
-    } catch (e) {}
+    } catch (e) { warnRpcMissing('get_airtable_pat', e); }
     return null;
   },
 
@@ -105,23 +147,23 @@ export const db = {
   // server-side. getN8nConfig().apiKey MUST NEVER be returned to a browser route.
   async setN8nConfig(baseUrl, apiKey) {
     _n8n = { v: null, exp: 0 };
-    if (baseUrl != null) await rpc('set_app_secret', { p_name: 'n8n_base_url', p_val: String(baseUrl), p_key: ENC_KEY });
-    if (apiKey != null) await rpc('set_app_secret', { p_name: 'n8n_api_key', p_val: String(apiKey), p_key: ENC_KEY });
+    if (baseUrl != null) await rpc('set_app_secret', { p_name: 'n8n_base_url', p_val: String(baseUrl), p_key: encKey() });
+    if (apiKey != null) await rpc('set_app_secret', { p_name: 'n8n_api_key', p_val: String(apiKey), p_key: encKey() });
     return { ok: true };
   },
   async getN8nConfig() {
     const now = Date.now();
     if (_n8n.v && _n8n.exp > now) return _n8n.v;
-    const baseUrl = await rpc('get_app_secret', { p_name: 'n8n_base_url', p_key: ENC_KEY }).catch(() => null);
-    const apiKey = await rpc('get_app_secret', { p_name: 'n8n_api_key', p_key: ENC_KEY }).catch(() => null);
+    const baseUrl = await rpc('get_app_secret', { p_name: 'n8n_base_url', p_key: encKey() }).catch(() => null);
+    const apiKey = await rpc('get_app_secret', { p_name: 'n8n_api_key', p_key: encKey() }).catch(() => null);
     const v = { baseUrl: baseUrl || null, apiKey: apiKey || null };
     _n8n = { v, exp: now + 60000 };
     return v;
   },
   async clearN8nConfig() {
     _n8n = { v: null, exp: 0 };
-    await rpc('set_app_secret', { p_name: 'n8n_api_key', p_val: '', p_key: ENC_KEY }).catch(() => {});
-    await rpc('set_app_secret', { p_name: 'n8n_base_url', p_val: '', p_key: ENC_KEY }).catch(() => {});
+    await rpc('set_app_secret', { p_name: 'n8n_api_key', p_val: '', p_key: encKey() }).catch(() => {});
+    await rpc('set_app_secret', { p_name: 'n8n_base_url', p_val: '', p_key: encKey() }).catch(() => {});
     return { ok: true };
   },
 
@@ -131,10 +173,16 @@ export const db = {
   // getGscSa returns the site's own credential if present, otherwise falls back
   // to any stored credential (briefly cached) — so connecting once connects the
   // whole dashboard. The per-site *property* (sites.gsc_property) is what differs.
-  async setGscSa(siteId, saJson) { _anyGsc = { v: null, exp: 0 }; return rpc('set_gsc_sa', { p_site: siteId, p_sa: saJson, p_key: ENC_KEY }); },
+  async setGscSa(siteId, saJson) {
+    _anyGsc = { v: null, exp: 0 };
+    try { return await rpc('set_gsc_sa', { p_site: siteId, p_sa: saJson, p_key: encKey() }); }
+    catch (e) { warnRpcMissing('set_gsc_sa', e); return null; }
+  },
   async getGscSa(siteId) {
     if (siteId) {
-      const own = await rpc('get_gsc_sa', { p_site: siteId, p_key: ENC_KEY }).catch(() => null);
+      let own = null;
+      try { own = await rpc('get_gsc_sa', { p_site: siteId, p_key: encKey() }); }
+      catch (e) { warnRpcMissing('get_gsc_sa', e); }
       if (own) return own;
     }
     const now = Date.now();
@@ -142,10 +190,10 @@ export const db = {
     try {
       const sites = await this.listSites();
       for (const s of (sites || [])) {
-        const c = await rpc('get_gsc_sa', { p_site: s.id, p_key: ENC_KEY }).catch(() => null);
+        const c = await rpc('get_gsc_sa', { p_site: s.id, p_key: encKey() }).catch((e) => { warnRpcMissing('get_gsc_sa', e); return null; });
         if (c) { _anyGsc = { v: c, exp: now + 60000 }; return c; }
       }
-    } catch (e) {}
+    } catch (e) { warnRpcMissing('get_gsc_sa', e); }
     return null;
   },
   // Clear the GSC credential for EVERY site (global disconnect).
@@ -153,7 +201,7 @@ export const db = {
     _anyGsc = { v: null, exp: 0 };
     const sites = await this.listSites().catch(() => []);
     for (const s of (sites || [])) {
-      await rpc('set_gsc_sa', { p_site: s.id, p_sa: '', p_key: ENC_KEY }).catch(() => {});
+      await rpc('set_gsc_sa', { p_site: s.id, p_sa: '', p_key: encKey() }).catch(() => {});
       await this.updateSite(s.id, { gsc_property: null }).catch(() => {});
     }
   },
@@ -215,7 +263,17 @@ export const db = {
     return o && o[0];
   },
   async createAudit(row) { return rest('audits', { method: 'POST', body: JSON.stringify(row) }); },
-  async logActivity(row) { return rest('activity', { method: 'POST', body: JSON.stringify(row) }); },
+  async logActivity(row) {
+    // activity.owner is NOT NULL. Backend callers pass only {site_id,type,...} with
+    // no owner, so resolve it here so the insert never violates the constraint:
+    // caller-supplied owner → the site's owner → a safe fallback.
+    let owner = row && row.owner;
+    if (!owner && row && row.site_id) {
+      try { const s = await this.getSite(row.site_id); owner = s && s.owner; } catch (e) {}
+    }
+    if (!owner) owner = process.env.DEFAULT_ACTIVITY_OWNER || 'system';
+    return rest('activity', { method: 'POST', body: JSON.stringify({ ...row, owner }) });
+  },
 };
 
 // Resolve a site id → full WordPress credentials (decrypted server-side).

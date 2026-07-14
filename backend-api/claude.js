@@ -35,12 +35,22 @@ function key() {
 function anthropicPost(payload, opts = {}) {
   return limiters.anthropic.run(() => breakers.anthropic.run(() => _anthropicPost(payload, opts)));
 }
-async function _anthropicPost(payload, { timeoutMs = 90000, retries = 2 } = {}) {
+// timeoutMs bounds a single attempt; deadlineMs bounds ALL attempts+backoff
+// together. Both sit under the platform's ~100s edge response cap: a single
+// request can no longer stack retries into a ~270s run (old worst case: 3×90s +
+// backoff) that kept burning an Anthropic slot + budget long after the edge had
+// 504'd and the user retried. 60s/attempt covers virtually every structured-content
+// generation while still leaving room for one shorter retry inside the 95s deadline.
+async function _anthropicPost(payload, { timeoutMs = 60000, retries = 2, deadlineMs = 95000 } = {}) {
   const TRANSIENT = new Set([429, 500, 502, 503, 529]);
+  const startedAt = Date.now();
+  const budgetLeft = () => deadlineMs - (Date.now() - startedAt);
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0 && budgetLeft() < 6000) break;   // not enough edge budget left for a real retry
+    const attemptMs = Math.max(4000, Math.min(timeoutMs, budgetLeft()));
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const timer = setTimeout(() => ctrl.abort(), attemptMs);
     try {
       const res = await fetch(API, {
         method: 'POST',
@@ -49,16 +59,24 @@ async function _anthropicPost(payload, { timeoutMs = 90000, retries = 2 } = {}) 
         signal: ctrl.signal,
       });
       clearTimeout(timer);
-      if (TRANSIENT.has(res.status) && attempt < retries) {
-        await new Promise((r) => setTimeout(r, 700 * Math.pow(2, attempt)));
-        continue;
+      if (TRANSIENT.has(res.status)) {
+        if (attempt < retries && budgetLeft() > 6000) {
+          await new Promise((r) => setTimeout(r, 700 * Math.pow(2, attempt)));
+          continue;
+        }
+        // Retries/budget exhausted on an overloaded/rate-limit status: THROW (don't
+        // return the Response) so breakers.anthropic records the failure and can open
+        // ("fail fast when Anthropic is down"). Returning a resolved value reset the breaker.
+        const data = await res.json().catch(() => ({}));
+        throw Object.assign(new Error(`Claude ${res.status}: ${data.error?.message || 'overloaded / rate-limited'}`), { status: res.status, transient: true });
       }
       return res;
     } catch (e) {
       clearTimeout(timer);
       lastErr = e;
-      if (attempt < retries) { await new Promise((r) => setTimeout(r, 700 * Math.pow(2, attempt))); continue; }
-      throw new Error(e.name === 'AbortError' ? `Claude request timed out after ${Math.round(timeoutMs / 1000)}s — please retry` : e.message);
+      if (e && TRANSIENT.has(e.status)) throw e;   // final transient error from above — propagate to the breaker
+      if (attempt < retries && budgetLeft() > 6000) { await new Promise((r) => setTimeout(r, 700 * Math.pow(2, attempt))); continue; }
+      throw new Error(e.name === 'AbortError' ? `Claude request timed out after ${Math.round(attemptMs / 1000)}s — please retry` : e.message);
     }
   }
   throw lastErr || new Error('Claude request failed');

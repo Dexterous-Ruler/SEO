@@ -302,7 +302,9 @@ Object.assign(window, {
       } catch (e) {}
       try {
         const acts = await API.listActivity(null);
-        if (acts && acts.length) window.ACTIVITY = acts.map(mapActivity);
+        // Always set (even to []) in live mode so the Activity screen shows a real
+        // empty state instead of falling back to the design-preview demo seed.
+        window.ACTIVITY = (acts || []).map(mapActivity);
       } catch (e) {}
       try {
         const audits = await API.listAudits(first.id);

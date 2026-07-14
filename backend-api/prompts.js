@@ -76,9 +76,33 @@ export function list(siteId) {
 // ---- Supabase I/O ----------------------------------------------------------
 function headers(extra) { return Object.assign({ apikey: SRV, Authorization: 'Bearer ' + SRV, 'Content-Type': 'application/json' }, extra || {}); }
 
+// The `temperature` column is optional — a DB provisioned before it was added
+// won't have it. We assume it exists, but on the first "column missing" error we
+// flip this off and operate WITHOUT temperature so prompt overrides keep working.
+let HAS_TEMP = true;
+const stripTemp = (r) => { const { temperature, ...rest } = r; return rest; };
+// PostgREST reports a missing column as HTTP 400: 42703 / "does not exist" on
+// reads, PGRST204 / "could not find … in the schema cache" on writes.
+const isMissingTempCol = (status, text) =>
+  status === 400 && /temperature/i.test(text || '')
+  && /(does not exist|42703|schema cache|could not find|PGRST204)/i.test(text || '');
+
 async function loadOverrides() {
-  const res = await fetch(`${SB}/rest/v1/prompts?select=key,content,model,temperature`, { headers: headers() });
-  if (!res.ok) throw new Error(`prompts table read ${res.status}`);
+  const cols = HAS_TEMP ? 'key,content,model,temperature' : 'key,content,model';
+  let res = await fetch(`${SB}/rest/v1/prompts?select=${cols}`, { headers: headers() });
+  if (!res.ok) {
+    const text = await res.text();
+    // Fresh/older DB without the temperature column → retry without it (don't let
+    // a missing optional column kill every override + the niche/geo injection).
+    if (HAS_TEMP && isMissingTempCol(res.status, text)) {
+      HAS_TEMP = false;
+      console.warn('[prompts] `temperature` column missing — operating without it (prompt overrides still active).');
+      res = await fetch(`${SB}/rest/v1/prompts?select=key,content,model`, { headers: headers() });
+      if (!res.ok) throw new Error(`prompts table read ${res.status}`);
+    } else {
+      throw new Error(`prompts table read ${res.status}`);
+    }
+  }
   const rows = await res.json();
   OVERRIDE.clear(); CFG.clear();
   for (const r of rows) {
@@ -114,11 +138,23 @@ async function loadGeo() {
 
 // Upsert rows into Supabase (on conflict by key → merge).
 async function upsert(rows) {
-  const res = await fetch(`${SB}/rest/v1/prompts?on_conflict=key`, {
+  const post = (payload) => fetch(`${SB}/rest/v1/prompts?on_conflict=key`, {
     method: 'POST', headers: headers({ Prefer: 'resolution=merge-duplicates,return=minimal' }),
-    body: JSON.stringify(rows),
+    body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(`prompts upsert ${res.status}: ${(await res.text()).slice(0, 160)}`);
+  let res = await post(HAS_TEMP ? rows : rows.map(stripTemp));
+  if (!res.ok) {
+    const text = await res.text();
+    // DB without the temperature column → drop it and retry so the override still saves.
+    if (HAS_TEMP && isMissingTempCol(res.status, text)) {
+      HAS_TEMP = false;
+      console.warn('[prompts] `temperature` column missing on write — retrying without it.');
+      res = await post(rows.map(stripTemp));
+      if (!res.ok) throw new Error(`prompts upsert ${res.status}: ${(await res.text()).slice(0, 160)}`);
+    } else {
+      throw new Error(`prompts upsert ${res.status}: ${text.slice(0, 160)}`);
+    }
+  }
 }
 
 // Seed Supabase with every registered prompt that isn't there yet, so the panel

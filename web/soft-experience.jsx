@@ -798,7 +798,7 @@ function UxActivationScreen({ ctx }) {
     if (!site.signedOff) { toast("Sign off compliance for this site first — use the Sign off button.", "gold"); return; }
     if (!site.consent) { toast("No consent cookie detected — install a CMP or enable the first-party banner first.", "gold"); return; }
     setBusyFor(site.siteId, "arm");
-    Promise.resolve(API.armBeacon(site.siteId, true, 5, site.consent))
+    Promise.resolve(API.armBeacon(site.siteId, true, 0.05, site.consent))
       .then((r) => {
         if (r && r.error) { toast(r.error, "clay"); return; }
         toast("Armed " + (site.name || "site") + " at 5% — gated on " + site.consent.cookie, "teal");

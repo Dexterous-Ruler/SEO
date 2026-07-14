@@ -82,16 +82,30 @@ export async function createRecord(pat, baseId, table, fields) {
   return { id: r.id, createdTime: r.createdTime || null, fields: r.fields || {} };
 }
 
+// Airtable table IDs look like `tbl` + 14 alphanumerics (e.g. tblVTpv8JG5lZRiF2).
+// Config columns (e.g. table_gaps) store an ID, not a display name.
+const TABLE_ID_RE = /^tbl[A-Za-z0-9]{14}$/;
+
 // Ensure a table exists with the given fields; create it if missing. Returns table.
 // Requires the PAT to have schema.bases:write scope. If it lacks that scope, the
 // caller should pre-create tables and pass their names.
+// `tableName` may be a display NAME or a table ID: the sync 'gaps' fallback passes
+// cfg.table_gaps (an ID). Match on id OR name so a configured ID resolves to the
+// intended table instead of missing and creating a junk table named after the ID.
 export async function ensureTable(pat, baseId, tableName, fields) {
+  const key = String(tableName == null ? '' : tableName).trim();
   const tables = await listTables(pat, baseId).catch(() => []);
-  const found = tables.find((t) => t.name.toLowerCase() === tableName.toLowerCase());
+  const found = tables.find((t) => t.id === key || t.name.toLowerCase() === key.toLowerCase());
   if (found) return found;
+  // We were handed a table ID that no longer resolves to any table in the base
+  // (stale/deleted config). Do NOT create a junk table literally named after the
+  // ID — surface the stale config so rows don't silently land in the wrong place.
+  if (TABLE_ID_RE.test(key)) {
+    throw new Error(`Airtable: configured table "${key}" no longer exists in this base`);
+  }
   const data = await at(pat, `${META}/bases/${baseId}/tables`, {
     method: 'POST',
-    body: { name: tableName, fields },
+    body: { name: key, fields },
   });
   return { id: data.id, name: data.name };
 }

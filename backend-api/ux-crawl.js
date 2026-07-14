@@ -133,7 +133,16 @@ export async function crawlSite(topPages, { limit = 12, maxPerPage = 40 } = {}) 
     let html = '';
     try {
       const r = await fetchWithTimeout(p.page, { method: 'GET' }, PAGE_TIMEOUT);
-      if (!r.ok) { defects.push({ type: 'dest_404', page: p.page, url: p.page, status: r.status, clicks: p.clicks || 0, detail: `the ranking page itself returns HTTP ${r.status}` }); continue; }
+      if (!r.ok) {
+        // Only file a page-self defect for a genuinely dead page (404/410), matching
+        // isBadStatus and the link-checking rule. 403/429/5xx are almost always
+        // bot-protection or transient rate-limiting (these sites sit behind a CDN
+        // bot-wall that 403s crawlers) — NOT a real defect. Flagging them would flood
+        // the review queue with phantom "your ranking page is broken" proposals, so
+        // skip the page instead.
+        if (isBadStatus(r.status)) { defects.push({ type: 'dest_404', page: p.page, url: p.page, status: r.status, clicks: p.clicks || 0, detail: `the ranking page itself returns HTTP ${r.status}` }); }
+        continue;
+      }
       html = await r.text();
     } catch { continue; }
 

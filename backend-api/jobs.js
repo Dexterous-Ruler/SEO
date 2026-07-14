@@ -38,7 +38,18 @@ export function registered() { return [...HANDLERS.keys()]; }
 async function tableExists() {
   if (TABLE_OK !== null) return TABLE_OK;
   try { await rest('jobs?select=id&limit=1'); TABLE_OK = true; }
-  catch (e) { TABLE_OK = false; if (e.status && e.status !== 404 && e.status !== 400) console.error('[jobs] table probe:', e.message); }
+  catch (e) {
+    // Only LATCH false for a DEFINITIVE "table does not exist" (migration not run):
+    // PostgREST answers a missing relation with 404/400 (+ code 42P01). A TRANSIENT
+    // failure (network blip, timeout, Supabase 5xx, cold start — typically status 0
+    // or 5xx) must NOT permanently disable the durable queue: leave TABLE_OK=null so
+    // the next call re-probes (self-heals once Supabase recovers), and just degrade
+    // to inline execution for THIS call by returning false without caching it.
+    const definitelyMissing = e.status === 404 || e.status === 400
+      || /42P01|does not exist|Could not find the table/i.test(e.message || '');
+    if (definitelyMissing) { TABLE_OK = false; }
+    else { console.error('[jobs] table probe (transient — will re-check):', e.message); return false; }
+  }
   return TABLE_OK;
 }
 

@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.16.0
+ * Version:     1.16.1
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.16.0';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.16.1';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -705,12 +705,18 @@ class SEO_Agent_Optimize {
                 $current = @file_get_contents($file);
                 if ($current === false) return new WP_Error('read', 'could not read current plugin', ['status' => 500]);
                 if (@file_put_contents($file, $code) === false) return new WP_Error('write', 'write failed', ['status' => 500]);
+                // Invalidate any cached OPcache bytecode for this file so the loopback below
+                // actually loads the NEW code. Without this, an OPcache host serves the STALE
+                // cached version to the health-check — a broken update would PASS, then brick
+                // the site when OPcache later revalidates. This makes the anti-brick real.
+                if (function_exists('opcache_invalidate')) { @opcache_invalidate($file, true); }
                 // Loopback: a FRESH request loads the NEW code. THIS request still runs the
                 // OLD code in memory, so if the new file fatals we restore the backup here.
                 $resp = wp_remote_get(add_query_arg('seoagent_uphc', (string) time(), home_url('/')), ['timeout' => 15, 'redirection' => 1, 'sslverify' => false, 'headers' => ['Cache-Control' => 'no-cache']]);
                 $rc = is_wp_error($resp) ? 0 : (int) wp_remote_retrieve_response_code($resp);
                 if ($rc <= 0 || $rc >= 500) {
                     @file_put_contents($file, $current);   // ROLLBACK — new version unhealthy
+                    if (function_exists('opcache_invalidate')) { @opcache_invalidate($file, true); }   // drop the bad bytecode too
                     return new WP_Error('health', 'new version failed health-check (HTTP ' . $rc . ') — rolled back to ' . self::VERSION, ['status' => 500]);
                 }
                 return ['ok' => true, 'updated_to' => $ver, 'health' => $rc];

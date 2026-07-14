@@ -173,7 +173,16 @@ export async function snapshot(sa, property, { days = 28, startDate, endDate } =
   const totals = byDate.reduce((a, r) => ({
     clicks: a.clicks + r.clicks, impressions: a.impressions + r.impressions,
   }), { clicks: 0, impressions: 0 });
-  const avgPos = queries.length ? queries.reduce((a, r) => a + r.position, 0) / queries.length : 0;
+  // Impression-WEIGHTED average position to match Google Search Console's headline
+  // figure: sum(position*impressions)/sum(impressions). A simple mean over the
+  // top-250-by-clicks rows skews optimistically (that set is dominated by
+  // high-ranking queries and weights each equally regardless of impressions).
+  // Fall back to a plain mean only if impressions are all zero (divide-by-zero guard).
+  const posImpr = queries.reduce((a, r) => a + r.position * (r.impressions || 0), 0);
+  const imprSum = queries.reduce((a, r) => a + (r.impressions || 0), 0);
+  const avgPos = imprSum
+    ? posImpr / imprSum
+    : (queries.length ? queries.reduce((a, r) => a + r.position, 0) / queries.length : 0);
   const avgCtr = totals.impressions ? totals.clicks / totals.impressions : 0;
 
   return {

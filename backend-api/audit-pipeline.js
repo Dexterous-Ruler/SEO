@@ -157,6 +157,46 @@ export async function auditPage(url, { creds, withContent = false, siteId = null
     });
   }
 
+  // From SEO read → proposal-LESS findings. auditHtml computes several metadata
+  // issues that carry NO auto-fix proposal (noindex, over-/under-length meta
+  // description, multiple <h1>, incomplete Open Graph, missing Twitter card).
+  // Without this loop they were silently discarded — the audit under-reported
+  // real SEO problems. A finding is already surfaced iff auditHtml emitted a
+  // proposal for the SAME field (proposal + finding fire in the same branch), so
+  // we skip those and add only the finding-only issues, de-duped by findingKey.
+  const SEV_IMPACT = { high: 'high', med: 'medium', low: 'low' };
+  const proposalFields = new Set(seoProposals.map((p) => p.field));
+  const fieldForIssue = (issue) => {
+    const s = String(issue || '').toLowerCase();
+    if (s.includes('<title>') || s.startsWith('title length')) return 'title';
+    if (s.includes('meta description') || s.startsWith('description length')) return 'meta_description';
+    if (s.includes('canonical')) return 'canonical';
+    if (s.includes('h1')) return 'h1';
+    if (s.includes('alt text')) return 'img_alt';
+    if (s.includes('json-ld') || s.includes('structured data') || s.includes('schema')) return 'schema';
+    return null;   // noindex / Open Graph / Twitter card → never carry a proposal
+  };
+  const seenSeoKeys = new Set(findings.map((f) => f.key));
+  for (const sf of seoFindings) {
+    const field = fieldForIssue(sf.issue);
+    if (field && proposalFields.has(field)) continue;   // already surfaced via its proposal
+    const key = findingKey({ title: sf.issue, page: path });
+    if (seenSeoKeys.has(key)) continue;
+    seenSeoKeys.add(key);
+    findings.push({
+      id: `f${++fi}`,
+      key,
+      disc: 'seo',
+      title: sf.issue,
+      page: path,
+      impact: SEV_IMPACT[sf.severity] || 'low',
+      traffic: '—',
+      gapPts: sf.severity === 'high' ? 8 : (sf.severity === 'low' ? 2 : 4),
+      channel: 'manual',
+      detail: sf.value ? `${sf.issue} — ${sf.value}` : sf.issue,
+    });
+  }
+
   // Known fix recipes live at module scope (RECIPES) so /propose-fix can reuse them.
   const FIX_RECIPES = RECIPES;
 

@@ -71,9 +71,28 @@ async function sb(path) {
   return res.json().catch(() => []);
 }
 
+// Bounded page fetch. Node's undici fetch has NO total-request timeout (its
+// header/body idle timeouts default to ~300s), so a slow/hanging origin on a
+// model-supplied URL would otherwise hang the whole chat turn (and blow the edge
+// cap). AbortController caps wall-clock (matching the Anthropic path's pattern);
+// html is capped so a huge body can't balloon memory before the regex strip.
+async function fetchHtmlBounded(url, { timeoutMs = 15000, maxChars = 1_500_000 } = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { headers: { 'User-Agent': 'wp-seo-agent/2.0 (assistant)' }, redirect: 'follow', signal: ctrl.signal });
+    let html = await res.text();
+    if (html.length > maxChars) html = html.slice(0, maxChars);
+    return { ok: res.ok, status: res.status, html };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchPageText(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'wp-seo-agent/2.0 (assistant)' }, redirect: 'follow' });
-  const html = await res.text();
+  let html;
+  try { ({ html } = await fetchHtmlBounded(url)); }
+  catch (e) { return { title: '', text: '', url, error: e.name === 'AbortError' ? 'timed out after 15s' : e.message }; }
   const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || '';
   const text = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   return { title: title.trim(), text: text.slice(0, 6000), url };
@@ -131,7 +150,7 @@ const META_FIELD_MAP = { title: 'rank_math_title', meta_description: 'rank_math_
 async function runTool(name, input, siteId) {
   try {
     if (!siteId && name !== 'fetch_url') return 'No site is selected. Ask the user to pick an account first.';
-    if (name === 'fetch_url') { const p = await fetchPageText(input.url); return `Title: ${p.title}\nURL: ${p.url}\n\n${p.text}`; }
+    if (name === 'fetch_url') { const p = await fetchPageText(input.url); if (p.error) return `Could not fetch ${input.url} — ${p.error}. Proceed without it or ask the user to paste the content.`; return `Title: ${p.title}\nURL: ${p.url}\n\n${p.text}`; }
 
     const site = await db.getSite(siteId);
     if (!site) return 'Site not found.';
@@ -237,9 +256,10 @@ async function runTool(name, input, siteId) {
       return JSON.stringify({ analyzed: r.analyzed, count: r.count, suggestions: r.suggestions.slice(0, 20) });
     }
     if (name === 'extract_citable_facts') {
-      const res = await fetch(input.url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } }).catch(() => null);
-      if (!res) return 'Could not fetch that page.';
-      const html = await res.text();
+      let fetched;
+      try { fetched = await fetchHtmlBounded(input.url); }
+      catch (e) { return `Could not fetch that page — ${e.name === 'AbortError' ? 'timed out after 15s' : e.message}.`; }
+      const html = fetched.html;
       const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || '';
       const text = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
       const facts = await claudeMod.extractCitableFacts({ url: input.url, title, text, niche: site.stack?.type, siteId });
@@ -442,7 +462,11 @@ export async function chat({ messages = [], userText, images = [], siteId, siteC
 
   let guard = 0;
   while (guard++ < 8) {
-    const res = await anthropicFetch({ model: MODEL, max_tokens: 3500, system, tools: TOOLS, messages: convo });
+    // max_tokens 8000 (was 3500): the assistant is told to produce full briefs/articles,
+    // which routinely exceed 3500 output tokens and were being truncated mid-sentence.
+    // Kept moderate on the NON-streaming path (no keepalive → the whole reply must land
+    // inside the ~100s edge cap); the streaming path below runs a higher ceiling.
+    const res = await anthropicFetch({ model: MODEL, max_tokens: 8000, system, tools: TOOLS, messages: convo });
     const data = await res.json();
     if (!res.ok) throw new Error(`Claude chat ${res.status}: ${data.error?.message || ''}`);
 
@@ -451,7 +475,12 @@ export async function chat({ messages = [], userText, images = [], siteId, siteC
     convo.push({ role: 'assistant', content: data.content });
 
     if (data.stop_reason !== 'tool_use' || toolUses.length === 0) {
-      return { reply: textOut, messages: convo, toolsUsed: convo.flatMap((m) => Array.isArray(m.content) ? m.content.filter((b) => b.type === 'tool_use').map((b) => b.name) : []) };
+      // stop_reason 'max_tokens' means the answer was cut off — say so instead of
+      // returning a silently truncated reply the UI would present as complete.
+      const reply = data.stop_reason === 'max_tokens'
+        ? textOut + '\n\n_[Reply hit the length limit and was cut off — ask me to continue.]_'
+        : textOut;
+      return { reply, messages: convo, toolsUsed: convo.flatMap((m) => Array.isArray(m.content) ? m.content.filter((b) => b.type === 'tool_use').map((b) => b.name) : []) };
     }
 
     const results = [];
@@ -495,7 +524,11 @@ export async function chatStream({ messages = [], userText, images = [], siteId,
   const toolsUsed = [];
   let guard = 0;
   while (guard++ < 8) {
-    const res = await anthropicFetch({ model: MODEL, max_tokens: 3500, system, tools: TOOLS, messages: convo }, { stream: true });
+    // max_tokens 16000 (was 3500): streaming keeps the socket alive with data, so the
+    // low ceiling had no HTTP-timeout justification — it just truncated long briefs/
+    // articles the assistant is instructed to produce. 16000 gives generous headroom
+    // for realistic deliverables (it's a ceiling; short replies are unaffected).
+    const res = await anthropicFetch({ model: MODEL, max_tokens: 16000, system, tools: TOOLS, messages: convo }, { stream: true });
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(`Claude stream ${res.status}: ${e.error?.message || ''}`); }
 
     // Parse the SSE stream, reconstructing content blocks + emitting text deltas.
@@ -512,6 +545,13 @@ export async function chatStream({ messages = [], userText, images = [], siteId,
         const payload = line.slice(5).trim();
         if (!payload || payload === '[DONE]') continue;
         let ev; try { ev = JSON.parse(payload); } catch { continue; }
+        if (ev.type === 'error') {
+          // Anthropic emits `event: error` (e.g. overloaded_error) AFTER the 200 header
+          // when it fails mid-generation. This frame matched no branch and was silently
+          // dropped, so the turn returned a blank/partial reply. Throw so the route emits
+          // an honest error to the client instead of persisting a silent empty answer.
+          throw new Error('Claude stream error: ' + (ev.error?.message || ev.error?.type || 'unknown'));
+        }
         if (ev.type === 'content_block_start') {
           blocks[ev.index] = ev.content_block.type === 'tool_use'
             ? { type: 'tool_use', id: ev.content_block.id, name: ev.content_block.name, input: {}, _json: '' }
@@ -531,7 +571,17 @@ export async function chatStream({ messages = [], userText, images = [], siteId,
 
     const toolUses = blocks.filter((b) => b && b.type === 'tool_use');
     if (stopReason !== 'tool_use' || toolUses.length === 0) {
-      const reply = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
+      let reply = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
+      if (stopReason === null && toolUses.length === 0) {
+        // Stream ended with NO stop_reason and no tool calls → it was cut/aborted
+        // mid-flight (not a clean finish). Don't present it as a complete answer.
+        if (!reply) throw new Error('Claude stream ended with no content — please retry.');
+        const note = '\n\n_[Response was interrupted before completing — please retry.]_';
+        if (onText) onText(note); reply += note;
+      } else if (stopReason === 'max_tokens') {
+        const note = '\n\n_[Reply hit the length limit and was cut off — ask me to continue.]_';
+        if (onText) onText(note); reply += note;
+      }
       return { reply, messages: convo, toolsUsed };
     }
     // run tools

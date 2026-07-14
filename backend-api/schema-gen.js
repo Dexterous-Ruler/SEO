@@ -291,13 +291,22 @@ function parseListItems(html) {
 function schemaForAnswerBlock(url, block, { org, baseUrl, siteName, lang, market } = {}) {
   const b = block || {};
   const graph = [];
+  const base = baseUrl || '';
+
+  // buildWebPage always emits `breadcrumb` (and `isPartOf` when org.name is set) as
+  // @id references. Emit the referenced nodes here so those refs resolve within this
+  // graph — otherwise the JSON-LD points at undefined nodes (dangling @id) and Google
+  // reports the breadcrumb/entity linkage as incomplete. Mirrors generatePageSchema.
+  const orgNode = buildOrganization(org, base);
+  if (orgNode) graph.push(orgNode);
+  graph.push(buildBreadcrumb(url, siteName, base));
 
   // Page node — reuse buildWebPage style (title/description from the block heading).
   // inLanguage derives from explicit lang or the site's market (not the en-GB default).
   graph.push(buildWebPage(
     { url, title: b.heading, description: b.answer, lang: langForMarket(lang, market) },
     org || {},
-    baseUrl || ''
+    base
   ));
 
   // Speakable — attach to the WebPage @id when there's an answer to read aloud.
@@ -614,6 +623,10 @@ function buildLocalBusiness(url, nap, { type = 'LegalService', baseUrl, areaServ
 function localSchemaForSite({ url, geoContext, siteName, market, areaServed } = {}) {
   const nap = extractNap(geoContext);
   const graph = [];
+  // buildWebPage always emits a `breadcrumb` @id ref — emit the BreadcrumbList it
+  // points at so the reference resolves (no dangling @id). org is {} here, so no
+  // Organization node / isPartOf ref is produced.
+  graph.push(buildBreadcrumb(url, siteName || nap.businessName, url || ''));
   graph.push(buildWebPage(
     { url, title: siteName || nap.businessName, lang: langForMarket(null, market) },
     {},

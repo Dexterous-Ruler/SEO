@@ -1701,6 +1701,7 @@ function ContentEngineScreen({ ctx }) {
   const [notProv,setNotProv] = useState(false);
   const [busyId,setBusyId] = useState("");   // id being dismissed / status-changed
   const [drafting,setDrafting] = useState(false);   // auto-draft top-5 → Article Writer in flight
+  const [draftingAns,setDraftingAns] = useState(false);   // draft top-5 answer blocks in place
   const [syncing,setSyncing] = useState(false);   // sync published → monitor in flight
   const [openDraft,setOpenDraft] = useState("");   // in_review row id whose answer-block draft is expanded
 
@@ -1754,6 +1755,20 @@ function ContentEngineScreen({ ctx }) {
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setDrafting(false));
   };
 
+  // Draft the top scored ANSWER-BLOCK opportunities in place (Claude → payload.draft,
+  // moved to in_review) so the "View draft" preview actually has something to show.
+  const draftAnswers = ()=>{
+    if(!live) return;
+    setDraftingAns(true);
+    API.engineAutodraft(s.id, { topN:5, actionType:"answer_block" }).then(r=>{
+      if(r && r.notProvisioned){ setNotProv(true); return; }
+      if(r && r.error){ ctx.toast("Draft answers: "+r.error,"clay"); return; }
+      const n=(r&&r.drafted!=null)?r.drafted:0;
+      ctx.toast(n>0?("Drafted "+n+" answer block"+(n===1?"":"s")+" — open “View draft” below to preview"):"No scored answer-block opportunities to draft yet","teal");
+      load();
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setDraftingAns(false));
+  };
+
   // Inverse of auto-draft: read the n8n-completed rows back out of the Article Writer, advance the
   // matching queued/in_review opportunities → published, and start drift monitoring on each URL.
   const syncPublished = ()=>{
@@ -1803,6 +1818,9 @@ function ContentEngineScreen({ ctx }) {
         </NeoButton>
         <NeoButton kind="soft" icon={drafting?undefined:"edit"} disabled={drafting||running||!live||notProv} onClick={autodraft} title={!live?"Connect a live WordPress site":"Push the top 5 scored opportunities into your Article Writer"}>
           {drafting&&<Icon name="cog" size={16} className="audit-spin" />}{drafting?"Queuing…":"Auto-draft top 5 → Article Writer"}
+        </NeoButton>
+        <NeoButton kind="soft" icon={draftingAns?undefined:"sparkles"} disabled={draftingAns||running||!live||notProv} onClick={draftAnswers} title={!live?"Connect a live WordPress site":"Generate featured-snippet answer blocks for the top scored answer-block opportunities (preview under View draft)"}>
+          {draftingAns&&<Icon name="cog" size={16} className="audit-spin" />}{draftingAns?"Drafting…":"Draft top 5 answer blocks"}
         </NeoButton>
         <NeoButton kind="primary" icon={running?undefined:"layers"} disabled={running||!live} onClick={runEngine} title={!live?"Connect a live WordPress site":undefined}>
           {running&&<Icon name="cog" size={16} className="audit-spin" />}{running?"Running engine…":"Run engine"}
@@ -6063,7 +6081,7 @@ function App() {
         toast("Connecting & detecting stack…","teal");
         (async()=>{
           try{
-            await API.siteConnect(creds,{ name, staging:formData.staging||null,
+            await API.siteConnect(creds,{ name, staging:formData.staging||null, caps:formData.caps||undefined,
               siteId:(editing&&editing.id&&String(editing.id).length>10)?editing.id:undefined });
             await window.SentinelHydrate();
             toast((editing?name+" reconnected ✓":"Site connected & stack detected ✓"),"teal");
@@ -6092,9 +6110,12 @@ function App() {
     closeApply:()=>setApplyOpen(false),
     commitApplied:()=>{
       // LIVE: apply each approved REST-write proposal with verify-after-write.
+      // Returns a promise resolving to the REAL counts so the Apply modal can show an
+      // honest result (and only mark "verified" what actually verified). Does not close
+      // the modal itself — the modal drives its own completion from the resolved counts.
       if(isLive()){
         const approved=proposals.filter(p=>p.status==="approved");
-        (async()=>{
+        return (async()=>{
           let applied=0,failed=0,manual=0,blocked=0;
           for(const p of approved){
             if(p.channel==="rest-write"){
@@ -6112,14 +6133,15 @@ function App() {
               manual++;
             }
           }
-          setApplyOpen(false);
           if(killSwitch){ toast("Kill switch on — "+approved.length+" simulated, nothing written","gold"); }
           else { const bits=[]; if(applied)bits.push(applied+" applied & verified"); if(blocked)bits.push(blocked+" blocked (read-only)"); if(manual)bits.push(manual+" need manual action"); if(failed)bits.push(failed+" failed"); toast(bits.length?bits.join(" · "):"Nothing to apply", failed?"clay":(applied?"teal":"gold")); }
+          return {applied,failed,manual,blocked,total:approved.length,killSwitch:!!killSwitch};
         })();
-        return;
       }
-      // MOCK fallback
-      setProposals(p=>p.map(x=>x.status==="approved"?{...x,status:"verified"}:x)); setApplyOpen(false); toast("Applied & verified · rollback armed","teal");
+      // MOCK fallback (design preview)
+      const n=proposals.filter(x=>x.status==="approved").length;
+      setProposals(p=>p.map(x=>x.status==="approved"?{...x,status:"verified"}:x)); toast("Applied & verified · rollback armed","teal");
+      return Promise.resolve({applied:n,failed:0,manual:0,blocked:0,total:n,killSwitch:false});
     },
     rollback:(id)=>{
       const p=proposals.find(x=>x.id===id);

@@ -312,6 +312,11 @@ async function updatePrompts(baseUrl, apiKey, id, edits) {
 // ===========================================================================
 async function runWorkflow(baseUrl, apiKey, id, payload) {
   let webhookPath = null;
+  // n8n Webhook nodes carry their HTTP method in parameters.httpMethod (default
+  // 'GET' in modern n8n; can be GET/POST/PUT/PATCH/DELETE, or an array). We MUST
+  // call the webhook with its configured method — a GET-trigger 404s on a POST
+  // ('is not registered for POST requests'). Fall back to POST when unset.
+  let webhookMethod = 'POST';
   try {
     const got = await api('GET', baseUrl, apiKey, `/workflows/${encodeURIComponent(id)}`);
     if (!got.ok) return { ranVia: 'none', ...apiError(got.status, got.data, apiKey) };
@@ -320,6 +325,9 @@ async function runWorkflow(baseUrl, apiKey, id, payload) {
     if (trigger) {
       const pp = (trigger.parameters && trigger.parameters.path) || trigger.webhookId;
       if (pp) webhookPath = String(pp).replace(/^\/+/, '');
+      const hm = trigger.parameters && trigger.parameters.httpMethod;
+      const m = Array.isArray(hm) ? hm[0] : hm;
+      if (m) webhookMethod = String(m).toUpperCase();
     }
   } catch (e) {
     return { ranVia: 'none', ...apiError(0, null, apiKey, e) };
@@ -335,19 +343,34 @@ async function runWorkflow(baseUrl, apiKey, id, payload) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
+    // Only methods that permit a request body should carry the JSON payload.
+    const sendBody = webhookMethod !== 'GET' && webhookMethod !== 'HEAD';
     const res = await fetch(`${normBase(baseUrl)}/webhook/${webhookPath}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload || {}),
+      method: webhookMethod,
+      headers: sendBody ? { 'Content-Type': 'application/json' } : {},
+      body: sendBody ? JSON.stringify(payload || {}) : undefined,
       signal: ctrl.signal,
     });
     const text = await res.text();
     let response;
     try { response = text ? JSON.parse(text) : null; } catch { response = text; }
-    return { ranVia: 'webhook', status: res.status, response };
+    // A production webhook returns HTTP 404 when its workflow is inactive or the
+    // method doesn't match, and can 500 on a workflow error. Without checking
+    // res.ok the UI would report a green "triggered ✓" for a run that never
+    // executed — surface a real failure with the status + a hint so the caller
+    // (and its toast) shows the run actually failed.
+    if (!res.ok) {
+      let msg = `webhook returned HTTP ${res.status} (${webhookMethod})`;
+      if (res.status === 404) msg += ' — workflow may be inactive, or the webhook is not registered for ' + webhookMethod;
+      const detail = (response && typeof response === 'object' && (response.message || response.error)) ||
+        (typeof response === 'string' ? response : '');
+      if (detail) msg += ': ' + truncate(detail, 200);
+      return { ranVia: 'webhook', status: res.status, method: webhookMethod, error: scrub(msg, apiKey), response };
+    }
+    return { ranVia: 'webhook', status: res.status, method: webhookMethod, response };
   } catch (e) {
     const m = e.name === 'AbortError' ? `timeout after ${TIMEOUT_MS / 1000}s` : (e.message || String(e));
-    return { ranVia: 'webhook', status: 0, error: scrub('webhook call failed: ' + m, apiKey) };
+    return { ranVia: 'webhook', status: 0, method: webhookMethod, error: scrub('webhook call failed: ' + m, apiKey) };
   } finally {
     clearTimeout(timer);
   }

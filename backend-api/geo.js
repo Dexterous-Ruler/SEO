@@ -9,6 +9,7 @@
 //   llms.txt, AI-bot robots.txt allowlist, Organization (sameAs/knowsAbout) schema.
 // ===========================================================================
 import { config as dotenvConfig } from 'dotenv';
+import { nicheContext } from './prompts.js';
 dotenvConfig({ override: true });
 
 const API = 'https://api.anthropic.com/v1/messages';
@@ -154,20 +155,28 @@ export async function runCitationTracking({ siteId, targetDomain, prompts, compe
   });
 
   // Aggregate after the parallel pass (order preserved by mapLimit).
+  // Only prompts that returned a usable answer count toward Share-of-AI-Voice.
+  // Errored/timed-out prompts (askWithSearch abort, web_search failure) are
+  // EXCLUDED from the denominator — counting them as an implicit "not cited"
+  // deflated the headline SoV number on every transient failure.
   let cited = 0;
+  let answered = 0;
   const compCites = {};
   for (const row of results) {
     if (!row || row.error) continue;
+    answered++;
     if (row.targetCited) cited++;
     for (const cd of row.citedDomains || []) {
       if (compDomains.includes(cd)) compCites[cd] = (compCites[cd] || 0) + 1;
     }
   }
 
-  const total = list.length;
+  const attempted = list.length;
+  const errored = attempted - answered;
+  const total = answered; // SoV denominator = prompts that actually returned a result
   const shareOfVoice = total ? Math.round((cited / total) * 100) : 0;
   const competitorScores = compDomains.map((d) => ({ domain: d, cited: compCites[d] || 0, share: total ? Math.round(((compCites[d] || 0) / total) * 100) : 0 }));
-  const result = { targetDomain: target, shareOfVoice, promptsTotal: total, promptsCited: cited, competitors: competitorScores, results };
+  const result = { targetDomain: target, shareOfVoice, promptsTotal: total, promptsCited: cited, promptsAttempted: attempted, promptsErrored: errored, competitors: competitorScores, results };
 
   // Best-effort time-series snapshot. A snapshot failure (missing table, network)
   // must NEVER break the live tracking result the caller is awaiting.
@@ -191,8 +200,14 @@ export async function suggestPrompts({ siteName, niche, sampleTitles = [], exclu
     : '';
   // Operator-provided per-site context — authoritative steer on what the site is about,
   // who it serves, and what to focus on. Weighted heavily over brand-name inference.
-  const contextBlock = (context && String(context).trim())
-    ? `\n\nOPERATOR CONTEXT (authoritative — what this site is about, who it serves, what to focus on). Weight this HEAVILY when choosing topics + intent:\n${String(context).trim().slice(0, 1200)}`
+  // The raw geo_context leads with a long platform/compliance preamble that drowns the
+  // actual niche, so a blind slice(0,1200) fed Claude mostly boilerplate → off-niche
+  // prompts. nicheContext() keeps only the niche-DEFINING sections (falling back to the
+  // full text, sliced, when it's short/unsectioned) so the subject-matter leads. Robust
+  // to empty/missing context (returns '').
+  const nicheCtx = context ? nicheContext(String(context)) : '';
+  const contextBlock = (nicheCtx && nicheCtx.trim())
+    ? `\n\nOPERATOR CONTEXT (authoritative — what this site is about, who it serves, what to focus on). Weight this HEAVILY when choosing topics + intent:\n${nicheCtx.trim()}`
     : '';
   const res = await fetch(API, {
     method: 'POST',

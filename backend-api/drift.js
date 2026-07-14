@@ -304,11 +304,21 @@ export async function getBaseline(siteId, url) {
   }
 }
 
+// A snapshot is unusable as a BASELINE when the fetch threw (.error, so no
+// title/canonical/status captured) or the page did not return real content
+// (no status, or HTTP >= 400 — e.g. a transient 403 bot-wall or 5xx). Storing
+// such a capture as the baseline makes the next good check diff real fields
+// against empty ones and fire phantom CRITICAL drift.
+function snapshotUnusable(s) {
+  return !s || !!s.error || !s.status || s.status >= 400;
+}
+
 // ---- 4) checkDrift ---------------------------------------------------------
 // Snapshot the page; if there is no baseline yet, store one and report it set.
 // Otherwise diff against the baseline and (optionally) refresh it.
 export async function checkDrift(siteId, url, { updateBaseline = false } = {}) {
   const snapshot = await snapshotPage(url);
+  const unusable = snapshotUnusable(snapshot);
 
   const got = await getBaseline(siteId, url);
   if (got && got.notProvisioned) return { ...NOT_PROVISIONED, snapshot };
@@ -316,6 +326,10 @@ export async function checkDrift(siteId, url, { updateBaseline = false } = {}) {
 
   const existing = got && got.baseline;
   if (!existing) {
+    // Never seed the baseline from a failed/empty capture — a transient
+    // timeout/403/5xx would otherwise poison every future check with phantom
+    // drift. Report the capture failure instead of a false "baseline captured".
+    if (unusable) return { error: snapshot.error || `could not capture page (HTTP ${snapshot.status || 'no response'})`, captureFailed: true, snapshot };
     const saved = await saveBaseline(siteId, url, snapshot);
     if (saved && saved.notProvisioned) return { ...NOT_PROVISIONED, snapshot };
     return { baselineSet: true, snapshot, saved: !!(saved && saved.saved) };
@@ -324,7 +338,10 @@ export async function checkDrift(siteId, url, { updateBaseline = false } = {}) {
   const drift = diffSnapshots(existing.snapshot, snapshot);
 
   let rebaselined = false;
-  if (updateBaseline) {
+  // Only refresh the baseline from a GOOD capture — a failed/empty snapshot must
+  // never overwrite a healthy baseline (the diff above still surfaces the failure
+  // via diffSnapshots' fetch-failed rule).
+  if (updateBaseline && !unusable) {
     const saved = await saveBaseline(siteId, url, snapshot);
     rebaselined = !!(saved && saved.saved);
   }

@@ -535,6 +535,20 @@ export async function run(siteId, opts = {}) {
 
   const saved = await persist(siteId, opps);
   const out = { count: opps.length, byAction, bySource, sources: ing.sources || {} };
+
+  // Distinguish a clean run that genuinely found nothing new from a run where
+  // every producer errored (no DataForSEO key, GSC down, no competitors, Claude
+  // error, …). If nothing was ingested AND every source that ran reported an
+  // error, this is a broken/misconfigured run, not an empty one — surface it as
+  // an error so the operator gets a real diagnostic instead of a reassuring
+  // green "no opportunities" toast.
+  const srcEntries = Object.entries(ing.sources || {});
+  const failedSrc = srcEntries.filter(([, s]) => s && s.error);
+  if (opps.length === 0 && srcEntries.length > 0 && failedSrc.length === srcEntries.length) {
+    out.allSourcesFailed = true;
+    out.error = 'All content sources failed — ' + failedSrc.map(([k, s]) => `${k}: ${s.error}`).join('; ');
+  }
+
   if (saved && saved.notProvisioned) out.notProvisioned = true;
   else if (saved && saved.error) out.persistError = saved.error;
   else out.saved = saved.saved;
@@ -560,7 +574,7 @@ export function startRun(siteId, opts = {}) {
   if (prev && prev.status === 'running') return { started: false, alreadyRunning: true, status: 'running', startedAt: prev.startedAt };
   RUNS.set(siteId, { status: 'running', startedAt: Date.now() });
   run(siteId, opts)
-    .then((r) => RUNS.set(siteId, { status: 'done', startedAt: (RUNS.get(siteId) || {}).startedAt, finishedAt: Date.now(), count: r.count, byAction: r.byAction, bySource: r.bySource, saved: r.saved, notProvisioned: r.notProvisioned, airtable: r.airtable, error: r.error }))
+    .then((r) => RUNS.set(siteId, { status: r.error ? 'error' : 'done', startedAt: (RUNS.get(siteId) || {}).startedAt, finishedAt: Date.now(), count: r.count, byAction: r.byAction, bySource: r.bySource, saved: r.saved, notProvisioned: r.notProvisioned, airtable: r.airtable, sources: r.sources, allSourcesFailed: r.allSourcesFailed, error: r.error }))
     .catch((e) => RUNS.set(siteId, { status: 'error', finishedAt: Date.now(), error: String(e.message || e) }));
   return { started: true, status: 'running' };
 }

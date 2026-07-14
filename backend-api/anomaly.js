@@ -89,16 +89,29 @@ function detectGscDaily(daily, { window = 14, threshold = 3.5 } = {}) {
 function detectAuditHistory(history, { window = 10, threshold = 3.5, minHistory = 4 } = {}) {
   const rows = (history || []).slice().sort((a, b) => (a.ts < b.ts ? -1 : 1));
   const cats = ['performance', 'accessibility', 'bestPractices', 'seo'];
-  const comp = (s) => Math.round(cats.reduce((t, c) => t + (s[c] || 0), 0) / 4);
-  const dates = rows.map((r) => r.ts);
-  // Composite series (back-compat: same { points, anomalies } shape).
-  const res = detectSeries(rows.map((r) => comp(r.scores || {})), { dates, window, threshold, direction: 'drop', minHistory });
+  // Composite = average of the categories that ACTUALLY have a score. A missing/
+  // null category (PSI can return null for a category) must NOT be coerced to 0,
+  // or the composite craters ~20+pts for that run and the detector cries wolf.
+  // Returns null only when every category is absent (a fully-failed audit run).
+  const comp = (s) => {
+    const vals = cats.map((c) => s[c]).filter((v) => v != null);
+    return vals.length ? Math.round(vals.reduce((t, v) => t + v, 0) / vals.length) : null;
+  };
+  // Composite series (back-compat: same { points, anomalies } shape). Drop runs
+  // whose composite is null (all categories failed) WITH their aligned dates, so
+  // a failed run isn't scored as a huge 0-drop.
+  const compRows = rows.map((r) => ({ ts: r.ts, v: comp(r.scores || {}) })).filter((x) => x.v != null);
+  const res = detectSeries(compRows.map((x) => x.v), { dates: compRows.map((x) => x.ts), window, threshold, direction: 'drop', minHistory });
   // Per-category regression events.
   const events = [];
   for (const c of cats) {
-    const series = rows.map((r) => (r.scores || {})[c]);
-    if (series.some((v) => v == null)) continue;
-    const d = detectSeries(series, { dates, window, threshold, direction: 'drop', minHistory });
+    // Drop only the null points (a run where THIS category had no score), keeping
+    // their aligned dates — instead of skipping the entire category, which would
+    // silently blind us to real regressions across the rest of the history.
+    const compact = [];
+    for (const r of rows) { const v = (r.scores || {})[c]; if (v != null) compact.push({ ts: r.ts, v }); }
+    if (!compact.length) continue;
+    const d = detectSeries(compact.map((x) => x.v), { dates: compact.map((x) => x.ts), window, threshold, direction: 'drop', minHistory });
     for (const p of d.anomalies) {
       events.push({ date: p.date, category: c, value: p.value, expected: p.expected, z: p.z, severity: Math.abs(p.z) >= 5 ? 'high' : 'medium', note: `${c} score dropped to ${p.value} vs ~${p.expected} (z ${p.z})` });
     }
