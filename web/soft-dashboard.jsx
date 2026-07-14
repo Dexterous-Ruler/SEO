@@ -4582,9 +4582,16 @@ function SemrushScreen({ ctx }) {
   };
   const saveCompetitors = (comps,negs)=>{
     setCompetitors(comps); setNegatives(negs);
-    if(live) API.saveSiteCompetitors(s.id, comps, negs).catch(()=>{});
-    // reflect in local SITES so it persists across screen switches
+    // reflect on BOTH ctx.site and window.SITES so it survives screen switches / remounts
+    s.competitors=comps; s.negative_keywords=negs;
     var site=window.SITES.find(x=>x.id===s.id); if(site){ site.competitors=comps; site.negative_keywords=negs; }
+    if(!live) return;
+    API.saveSiteCompetitors(s.id, comps, negs).then(r=>{
+      if(r&&r.error){ ctx.toast("Couldn't save competitors: "+r.error,"clay"); return; }
+      // reconcile with the server's persisted truth (so nothing silently drops)
+      if(r&&Array.isArray(r.competitors)){ setCompetitors(r.competitors); s.competitors=r.competitors; if(site) site.competitors=r.competitors; }
+      if(r&&Array.isArray(r.negativeKeywords)){ setNegatives(r.negativeKeywords); s.negative_keywords=r.negativeKeywords; if(site) site.negative_keywords=r.negativeKeywords; }
+    }).catch(e=>ctx.toast("Save failed — "+e.message+" (try again)","clay"));
   };
 
   useEffect(()=>{ if(live) API.semrushUnits().then(r=>setUnits(r.units)).catch(()=>{}); },[s.id]);
@@ -4789,6 +4796,24 @@ function SemrushScreen({ ctx }) {
                 <div style={{ padding:"11px 14px", borderRadius:"var(--r-md)", background:"var(--t-50,#eef6f4)", boxShadow:"var(--neo-in)", marginBottom:4, fontSize:12.5, color:"var(--ink-2)", lineHeight:1.5 }}>
                   <b>What is this?</b> These are websites that rank on Google for the <b>same keywords as {domain}</b> — auto-discovered from your shared search results. They're <i>suggestions</i>, not yet tracked. Click <b>Track as competitor</b> on the real rivals and they move to your watch list (Gap tab), where their keywords feed your gap analysis.{hidden>0 && <> <span style={{ color:"var(--muted)" }}>{hidden} generic site(s) like Google/YouTube/Gov.uk hidden — they rank for everything and aren't useful rivals.</span></>}
                 </div>
+                {/* Add your OWN competitor right here — saved to this site, used for the gap analysis */}
+                <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center", padding:"11px 14px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", marginBottom:4 }}>
+                  <Icon name="plus" size={15} style={{ color:"var(--t-700)" }} /><span style={{ fontSize:12.5, fontWeight:700, marginRight:4 }}>Add your own competitor</span>
+                  <input value={newComp} onChange={e=>setNewComp(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter"&&newComp.trim()){ const d=newComp.trim().replace(/^https?:\/\//,"").replace(/\/.*$/,""); saveCompetitors([...new Set([...competitors,d])], negatives); ctx.toast("Added "+d+" — saved to this site","teal"); setNewComp(""); } }}
+                    placeholder="e.g. duncanlewis.co.uk" className="search-in" style={{ flex:1, minWidth:170, padding:"8px 12px", borderRadius:"var(--r-pill)", border:"none", background:"var(--surface)", boxShadow:"var(--neo-in)", fontSize:12.5, fontFamily:"var(--mono)", color:"var(--ink)", outline:"none" }} />
+                  <NeoButton kind="soft" size="sm" icon="plus" onClick={()=>{ if(newComp.trim()){ const d=newComp.trim().replace(/^https?:\/\//,"").replace(/\/.*$/,""); saveCompetitors([...new Set([...competitors,d])], negatives); ctx.toast("Added "+d+" — saved to this site","teal"); setNewComp(""); } }}>Add</NeoButton>
+                </div>
+                {competitors.length>0 && (
+                  <div style={{ display:"flex", flexWrap:"wrap", gap:7, alignItems:"center", padding:"0 2px 6px" }}>
+                    <span style={{ fontSize:11.5, color:"var(--muted)", fontWeight:700 }}>Tracked:</span>
+                    {competitors.map((c,i)=>(
+                      <span key={i} style={{ display:"inline-flex", alignItems:"center", gap:6, padding:"5px 11px", borderRadius:99, background:"var(--t-50,#eef6f4)", color:"var(--t-700)", fontSize:12, fontWeight:700, fontFamily:"var(--mono)" }}>
+                        {c}<button onClick={()=>saveCompetitors(competitors.filter(x=>x!==c), negatives)} style={{ display:"grid", placeItems:"center", color:"var(--clay)" }} title="remove"><Icon name="x" size={12} /></button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {real.length>0 && <div style={{ fontSize:11.5, color:"var(--faint)", fontWeight:700, padding:"2px 2px 0" }}>Or track an auto-discovered rival:</div>}
                 {real.map((c,i)=>{
                   const tracked = competitors.includes(c.domain) || competitors.includes(c.domain.replace(/^www\./,""));
                   return (

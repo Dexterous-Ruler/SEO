@@ -1149,12 +1149,10 @@ const routes = {
     let negatives = body.negatives || [];
     let competitors = body.competitors || (body.competitor ? [body.competitor] : []);
     // If a siteId is given, merge the site's saved competitors + negative keywords.
-    if (body.siteId) {
-      const site = await db.getSite(body.siteId).catch(() => null);
-      if (site) {
-        if (!competitors.length && Array.isArray(site.competitors)) competitors = site.competitors;
-        if (Array.isArray(site.negative_keywords)) negatives = [...negatives, ...site.negative_keywords];
-      }
+    const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    if (site) {
+      if (!competitors.length && Array.isArray(site.competitors)) competitors = site.competitors;
+      if (Array.isArray(site.negative_keywords)) negatives = [...negatives, ...site.negative_keywords];
     }
     competitors = competitors.map((c) => (c || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '')).filter(Boolean);
     if (!competitors.length) return { error: 'No competitor set for this site. Add a competitor below first.', gaps: [] };
@@ -1172,8 +1170,21 @@ const routes = {
       } catch (e) { if (e.code === 'NO_UNITS') { unitsErr = true; break; } }
     }
     if (unitsErr && map.size === 0) { const u = await semrush.apiUnits(); return { error: `DataForSEO API units exhausted (${u} left).`, noUnits: true, unitsRemaining: u, gaps: [] }; }
-    const gaps = [...map.values()].sort((a, b) => b.volume - a.volume).slice(0, body.limit || 80);
-    return { target: t, competitors, gapCount: gaps.length, gaps };
+    let gaps = [...map.values()].sort((a, b) => b.volume - a.volume);
+    const rawCount = gaps.length;
+    // Niche filter: drop keywords that don't fit THIS site's niche (uses geo_context),
+    // so a broad competitor's off-topic keywords don't pollute the gap list. Fail-open.
+    let offNicheFiltered = 0;
+    if (site && site.geo_context && gaps.length && body.nicheFilter !== false) {
+      try {
+        const keep = await claude.filterKeywordsByNiche({ keywords: gaps.map((g) => g.keyword), niche: site.geo_context, siteName: site.name, siteId: body.siteId });
+        const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
+        const nf = gaps.filter((g) => keepSet.has(g.keyword.toLowerCase().trim()));
+        if (nf.length) { offNicheFiltered = gaps.length - nf.length; gaps = nf; }
+      } catch (e) { /* fail-open: keep unfiltered */ }
+    }
+    gaps = gaps.slice(0, body.limit || 80);
+    return { target: t, competitors, gapCount: gaps.length, offNicheFiltered, gaps };
   },
 
   // ── Agentic AI assistant ─────────────────────────────────────────────────

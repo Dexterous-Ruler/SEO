@@ -414,6 +414,27 @@ export async function clusterKeywords({ keywords, siteName, niche, siteId }) {
   }
 }
 
+// Filter a keyword-gap list down to terms genuinely relevant to THIS site's niche /
+// services, using its geo_context. Fixes off-niche gaps (e.g. a broad legal rival
+// surfacing immigration/jobs keywords for an ILA-only site). Fail-open: on any error,
+// or if it would nuke everything, returns the input unchanged.
+export async function filterKeywordsByNiche({ keywords, niche, siteName, siteId }) {
+  const list = (keywords || []).slice(0, 200);
+  if (!list.length || !niche) return keywords || [];
+  const txt = await complete({
+    system: [{ type: 'text', text: `You filter a keyword list down to terms genuinely relevant to a specific website's niche and services. KEEP a keyword only if a searcher using it could plausibly want what THIS site offers. DROP: other companies' brand names, jobs/careers/salary terms, unrelated industries/topics, and anything outside the stated niche. Return ONLY a JSON array of the kept keywords (exact strings copied from the input). No prose.` }],
+    maxTokens: 3000,
+    temperature: 0,
+    messages: [{ role: 'user', content: `SITE: ${siteName || ''}\n\nNICHE / CONTEXT (what this site is about + offers):\n${String(niche).slice(0, 1800)}\n\nKEYWORDS:\n${list.join('\n')}\n\nReturn the JSON array of only the relevant keywords.` }],
+  });
+  try {
+    const arr = JSON.parse(txt.slice(txt.indexOf('['), txt.lastIndexOf(']') + 1));
+    const keep = new Set(arr.map((x) => String(x).toLowerCase().trim()));
+    const filtered = (keywords || []).filter((k) => keep.has(String(k).toLowerCase().trim()));
+    return filtered.length ? filtered : (keywords || []);
+  } catch (e) { return keywords || []; }
+}
+
 // Synthesize a writer-ready content brief from web RESEARCH (Tavily sources +
 // Perplexity grounded answer). Claude structures + writes the brief but must use
 // ONLY the supplied research — every fact ties to a provided source, nothing
