@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.17.0
+ * Version:     1.17.1
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.17.0';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.17.1';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -59,6 +59,11 @@ class SEO_Agent_Optimize {
         add_filter('wpseo_title', [$this, 'seo_bridge_title'], 20);
         add_filter('wpseo_metadesc', [$this, 'seo_bridge_desc'], 20);
         add_filter('wpseo_canonical', [$this, 'seo_bridge_canon'], 20);
+        // Yoast OpenGraph + Twitter so the social card matches the approved title/desc.
+        add_filter('wpseo_opengraph_title', [$this, 'seo_bridge_title'], 20);
+        add_filter('wpseo_opengraph_desc', [$this, 'seo_bridge_desc'], 20);
+        add_filter('wpseo_twitter_title', [$this, 'seo_bridge_title'], 20);
+        add_filter('wpseo_twitter_description', [$this, 'seo_bridge_desc'], 20);
         add_filter('seopress_titles_title', [$this, 'seo_bridge_title'], 20);
         add_filter('seopress_titles_desc', [$this, 'seo_bridge_desc'], 20);
         add_filter('seopress_titles_canonical', [$this, 'seo_bridge_canon'], 20);
