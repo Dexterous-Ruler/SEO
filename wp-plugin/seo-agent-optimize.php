@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.17.1
+ * Version:     1.18.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.17.1';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.18.0';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -54,7 +54,7 @@ class SEO_Agent_Optimize {
         add_action('template_redirect', [$this, 'start_consent_blocker'], 2);
         add_action('wp_head', [$this, 'output_404_marker'], 1);
         // Feed approved agent meta into a third-party SEO plugin's OWN output (Yoast /
-        // SEOPress / AIOSEO) so applied title/description/canonical fixes actually render
+        // SEOPress / AIOSEO / Rank Math) so applied title/description/canonical fixes render
         // on sites where that plugin owns <head>. See seo_bridge_* below.
         add_filter('wpseo_title', [$this, 'seo_bridge_title'], 20);
         add_filter('wpseo_metadesc', [$this, 'seo_bridge_desc'], 20);
@@ -70,6 +70,16 @@ class SEO_Agent_Optimize {
         add_filter('aioseo_title', [$this, 'seo_bridge_title'], 20);
         add_filter('aioseo_description', [$this, 'seo_bridge_desc'], 20);
         add_filter('aioseo_canonical_url', [$this, 'seo_bridge_canon'], 20);
+        // Rank Math too, so meta-apply is detection-INDEPENDENT: a correctly-detected
+        // RankMath site writes rank_math_* keys natively (bridge no-ops, _seoagent empty),
+        // but if stack detection misses it the agent's _seoagent_* values still render here.
+        add_filter('rank_math/frontend/title', [$this, 'seo_bridge_title'], 20);
+        add_filter('rank_math/frontend/description', [$this, 'seo_bridge_desc'], 20);
+        add_filter('rank_math/frontend/canonical', [$this, 'seo_bridge_canon'], 20);
+        add_filter('rank_math/opengraph/facebook/og_title', [$this, 'seo_bridge_title'], 20);
+        add_filter('rank_math/opengraph/facebook/og_description', [$this, 'seo_bridge_desc'], 20);
+        add_filter('rank_math/opengraph/twitter/twitter_title', [$this, 'seo_bridge_title'], 20);
+        add_filter('rank_math/opengraph/twitter/twitter_description', [$this, 'seo_bridge_desc'], 20);
     }
 
     /* ── Sentinel-owned SEO meta: register for REST so writes actually stick ───
