@@ -586,7 +586,11 @@ export function startRun(siteId, opts = {}) {
     .catch((e) => RUNS.set(siteId, { status: 'error', finishedAt: Date.now(), error: String(e.message || e) }));
   return { started: true, status: 'running' };
 }
-export function runStatus(siteId) { return RUNS.get(siteId) || { status: 'idle' }; }
+// Not in the map = either never run this process, OR the run was lost to a restart
+// (the map is in-memory). The UI only polls this AFTER a started:true, so a miss during
+// a poll means "lost" — return a distinct 'unknown' so the UI can say "re-run" instead
+// of falling through to a false "no opportunities".
+export function runStatus(siteId) { return RUNS.get(siteId) || { status: 'unknown', reason: 'no active run — it may have completed or been lost to a restart; re-run' }; }
 
 // ---- 11) autoDraft ---------------------------------------------------------
 // One-click "queue for writing": take the top-N SCORED opportunities and hand

@@ -1726,6 +1726,7 @@ function ContentEngineScreen({ ctx }) {
       API.engineRunStatus(s.id).then(st=>{
         if(!st || st.status==="running"){ if(++polls<40){ setTimeout(poll,7000); } else { ctx.toast("Engine still running — check back shortly.","gold"); setRunning(false); } return; }
         if(st.status==="error"){ ctx.toast("Content Engine: "+(st.error||"run failed"),"clay"); setRunning(false); return; }
+        if(st.status==="unknown"){ ctx.toast("Engine run was interrupted (server restart) — please run it again.","gold"); setRunning(false); return; }
         setNotProv(!!st.notProvisioned);
         const n = (st&&st.count!=null)?st.count:0;
         ctx.toast(n>0?("Ingested "+n+" opportunity"+(n===1?"":"s")+" from every source ✓"):"No new opportunities found","teal");
@@ -4736,7 +4737,7 @@ function SemrushScreen({ ctx }) {
                     <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14 }}>
                       <PatternCard icon="trend" tone="teal" value={tval.summary.monthlyValueLabel} title="Est. monthly value" sub={(tval.summary.totalEstClicks||0).toLocaleString()+" est. clicks/mo"} />
                       <PatternCard icon="flag" tone="gold" value={tval.summary.page2AtRiskValue.toLocaleString()+" "+tval.currency} title="Page-2 value at stake" sub={tval.summary.page2Count+" keywords in 11–20"} />
-                      <PatternCard icon="shield" tone="plum" value={tval.curveSource==="site-calibrated"?"Calibrated":"Default"} title="CTR curve" sub={tval.curveSource==="site-calibrated"?"from your GSC data":"industry curve — connect GSC to calibrate"} />
+                      <PatternCard icon="shield" tone="plum" value={tval.curveSource==="site-calibrated"?"Calibrated":tval.curveSource==="partial"?"Partial":"Default"} title="CTR curve" sub={tval.curveSource==="site-calibrated"?"from your GSC data":tval.curveSource==="partial"?"partly from your GSC data":"industry curve — connect GSC to calibrate"} />
                     </div>
                     {(tval.striking||[]).length>0 && (
                       <div>
