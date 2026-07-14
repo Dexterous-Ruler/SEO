@@ -145,6 +145,17 @@ async function resolvePostId(wp, url) {
   return null;
 }
 const META_FIELD_MAP = { title: 'rank_math_title', meta_description: 'rank_math_description', canonical: 'rank_math_canonical_url' };
+// Meta key for a semantic field on THIS site's SEO plugin (mirrors audit-pipeline
+// metaFieldMap): RankMath uses its native keys; Yoast/SEOPress/AIOSEO/none use the
+// Sentinel keys, which the seo-agent-optimize mu-plugin renders — directly on
+// no-plugin sites, or bridged into Yoast/SEOPress/AIOSEO's own <head> output.
+function metaKeyFor(field, seoPlugin) {
+  const rank = /rank.?math/.test(String(seoPlugin || '').toLowerCase());
+  const map = rank
+    ? { title: 'rank_math_title', meta_description: 'rank_math_description', canonical: 'rank_math_canonical_url' }
+    : { title: '_seoagent_meta_title', meta_description: '_seoagent_meta_description', canonical: '_seoagent_canonical' };
+  return map[field];
+}
 
 // Execute a tool call for a given siteId. Returns a string result.
 async function runTool(name, input, siteId) {
@@ -383,10 +394,11 @@ async function runTool(name, input, siteId) {
       });
     }
     if (name === 'apply_page_meta') {
-      const field = META_FIELD_MAP[input.field];
-      if (!field) return 'Invalid field — use title, meta_description, or canonical.';
+      if (!META_FIELD_MAP[input.field]) return 'Invalid field — use title, meta_description, or canonical.';
       if (!input.value) return 'No value supplied to write.';
       const g = await wpForSite(siteId); if (typeof g === 'string') return g;
+      // Pick the meta key for THIS site's SEO plugin so the write verifies AND renders.
+      const field = metaKeyFor(input.field, (g.site && g.site.stack && g.site.stack.seo) || '');
       const found = await resolvePostId(g.wp, input.url);
       if (!found) return 'Could not find a live page matching ' + input.url + ' — check the URL.';
       try {

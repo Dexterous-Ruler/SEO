@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.16.2
+ * Version:     1.17.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.16.2';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.17.0';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -53,6 +53,18 @@ class SEO_Agent_Optimize {
         // known third-party tracker scripts (Hotjar/GA/Meta/Clarity) until consent.
         add_action('template_redirect', [$this, 'start_consent_blocker'], 2);
         add_action('wp_head', [$this, 'output_404_marker'], 1);
+        // Feed approved agent meta into a third-party SEO plugin's OWN output (Yoast /
+        // SEOPress / AIOSEO) so applied title/description/canonical fixes actually render
+        // on sites where that plugin owns <head>. See seo_bridge_* below.
+        add_filter('wpseo_title', [$this, 'seo_bridge_title'], 20);
+        add_filter('wpseo_metadesc', [$this, 'seo_bridge_desc'], 20);
+        add_filter('wpseo_canonical', [$this, 'seo_bridge_canon'], 20);
+        add_filter('seopress_titles_title', [$this, 'seo_bridge_title'], 20);
+        add_filter('seopress_titles_desc', [$this, 'seo_bridge_desc'], 20);
+        add_filter('seopress_titles_canonical', [$this, 'seo_bridge_canon'], 20);
+        add_filter('aioseo_title', [$this, 'seo_bridge_title'], 20);
+        add_filter('aioseo_description', [$this, 'seo_bridge_desc'], 20);
+        add_filter('aioseo_canonical_url', [$this, 'seo_bridge_canon'], 20);
     }
 
     /* ── Sentinel-owned SEO meta: register for REST so writes actually stick ───
@@ -150,6 +162,23 @@ class SEO_Agent_Optimize {
         }
         return $head;
     }
+
+    /* ── Bridge agent meta INTO a third-party SEO plugin's rendered output ────
+       Yoast / SEOPress / AIOSEO own <head>, so we can't inject our own tag without
+       duplicating. Instead we feed the agent's approved values (stored in the
+       Sentinel-owned _seoagent_* meta, which always verify via REST) into that
+       plugin's OWN final output filters, so an applied title/description/canonical
+       fix actually renders. Only overrides a field the agent actually set; an empty
+       value leaves the plugin's own output untouched. (RankMath sites write RankMath's
+       native keys directly — see the backend field map — so they don't need this.) */
+    private function agent_meta($key) {
+        if (!is_singular()) return '';
+        $id = get_queried_object_id();
+        return $id ? trim((string) get_post_meta($id, $key, true)) : '';
+    }
+    public function seo_bridge_title($v) { $t = $this->agent_meta('_seoagent_meta_title');      return $t !== '' ? $t : $v; }
+    public function seo_bridge_desc($v)  { $d = $this->agent_meta('_seoagent_meta_description'); return $d !== '' ? $d : $v; }
+    public function seo_bridge_canon($v) { $c = $this->agent_meta('_seoagent_canonical');        return $c !== '' ? $c : $v; }
 
     /* ── WebP on-the-fly ─────────────────────────────────────────────────────
        Rewrites uploads image URLs (.jpg/.jpeg/.png) to .webp in the final HTML

@@ -86,8 +86,9 @@ function impactFor(score, savingsMs) {
 // never appears in <head> — the silent #5 trap on no-SEO-plugin sites.
 //  • Rank Math → its own keys (registered + rendered by the meta bridge plugin).
 //  • Everything else (Yoast/SEOPress/AIOSEO/none/unknown) → Sentinel-owned keys,
-//    which the seo-agent-optimize mu-plugin renders into <head> ONLY when the tag
-//    isn't already present — so it fills gaps without ever duplicating a tag.
+//    which the seo-agent-optimize mu-plugin renders: injected directly on no-SEO-plugin
+//    sites, or (v1.17.0+) bridged INTO Yoast/SEOPress/AIOSEO's own <head> output via
+//    their filters — so the applied value actually appears without duplicating a tag.
 function metaFieldMap(seoPlugin) {
   const p = String(seoPlugin || '').toLowerCase();
   if (/rank.?math/.test(p)) {
