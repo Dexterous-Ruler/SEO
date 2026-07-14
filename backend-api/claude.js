@@ -423,6 +423,7 @@ export async function filterKeywordsByNiche({ keywords, niche, siteName, siteId 
   if (!list.length || !niche) return keywords || [];
   const txt = await complete({
     system: [{ type: 'text', text: `You filter a keyword list down to terms genuinely relevant to a specific website's niche and services. KEEP a keyword only if a searcher using it could plausibly want what THIS site offers. DROP: other companies' brand names, jobs/careers/salary terms, unrelated industries/topics, and anything outside the stated niche. Return ONLY a JSON array of the kept keywords (exact strings copied from the input). No prose.` }],
+    model: 'claude-haiku-4-5-20251001',   // fast — a filtering task; keeps the gap route under the edge timeout
     maxTokens: 3000,
     temperature: 0,
     messages: [{ role: 'user', content: `SITE: ${siteName || ''}\n\nNICHE / CONTEXT (what this site is about + offers):\n${String(niche).slice(0, 1800)}\n\nKEYWORDS:\n${list.join('\n')}\n\nReturn the JSON array of only the relevant keywords.` }],

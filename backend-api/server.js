@@ -1177,10 +1177,11 @@ const routes = {
     let offNicheFiltered = 0;
     if (site && site.geo_context && gaps.length && body.nicheFilter !== false) {
       try {
-        const keep = await claude.filterKeywordsByNiche({ keywords: gaps.map((g) => g.keyword), niche: site.geo_context, siteName: site.name, siteId: body.siteId });
+        const candidates = gaps.slice(0, 120);   // filter the top-volume slice → keeps the Claude call fast
+        const keep = await claude.filterKeywordsByNiche({ keywords: candidates.map((g) => g.keyword), niche: site.geo_context, siteName: site.name, siteId: body.siteId });
         const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
-        const nf = gaps.filter((g) => keepSet.has(g.keyword.toLowerCase().trim()));
-        if (nf.length) { offNicheFiltered = gaps.length - nf.length; gaps = nf; }
+        const nf = candidates.filter((g) => keepSet.has(g.keyword.toLowerCase().trim()));
+        if (nf.length) { offNicheFiltered = candidates.length - nf.length; gaps = nf; }
       } catch (e) { /* fail-open: keep unfiltered */ }
     }
     gaps = gaps.slice(0, body.limit || 80);
