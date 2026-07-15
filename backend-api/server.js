@@ -2670,6 +2670,23 @@ const routes = {
     catch (e) { return { error: e.message }; }
   },
 
+  // Create a column/field on a table if it doesn't already exist (idempotent).
+  // Needs the PAT to have schema.bases:write. Used e.g. to add a "YT Link" column
+  // to an Article Writer table so an n8n workflow can embed a per-article video.
+  'POST /airtable-ensure-field': async (body) => {
+    const pat = await db.getAirtablePat(body.siteId);
+    if (!pat) return { error: 'Airtable not connected', needsConnect: true };
+    if (!body.baseId || !body.tableId || !body.name) return { error: 'baseId, tableId, name required' };
+    try {
+      const tables = await airtable.listTables(pat, body.baseId).catch(() => []);
+      const tbl = (tables || []).find((t) => t.id === body.tableId || t.name === body.tableId);
+      if (tbl && (tbl.fields || []).some((f) => f.name === body.name)) return { ok: true, existed: true, name: body.name };
+      const created = await airtable.ensureField(pat, body.baseId, body.tableId, body.name, body.type || 'singleLineText');
+      if (!created) return { error: 'could not create field — the PAT may lack schema.bases:write scope' };
+      return { ok: true, created: true, name: created };
+    } catch (e) { return { error: e.message }; }
+  },
+
   // Save the per-site destination: base + the table & keyword column to fill.
   // NOTE: the airtable_config table predates this flow, so we reuse two existing
   // columns — table_gaps = keyword TABLE (id), table_content = keyword FIELD name.
