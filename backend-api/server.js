@@ -1644,6 +1644,27 @@ const routes = {
   },
   'POST /prompts-status': async () => prompts.status(),
   // Admin control-centre status: integrations, balances, server + prompt health.
+  // Observability: recent route errors + per-route health for the Health panel, so a
+  // feature failing in the wild surfaces instead of being found by clicking a dead button.
+  'POST /admin-health': async () => {
+    const routesArr = [...ROUTE_STATS.entries()].map(([key, s]) => ({
+      key, ok: s.ok, err: s.err, lastOk: s.lastOk, lastErr: s.lastErr, lastErrMsg: s.lastErrMsg,
+      errRate: (s.ok + s.err) ? Math.round((s.err / (s.ok + s.err)) * 100) : 0,
+    })).sort((a, b) => (b.err - a.err) || (b.errRate - a.errRate));
+    return {
+      now: Date.now(),
+      uptimeSec: Math.round(process.uptime()),
+      errors: ERR_RING.slice(-40).reverse(),
+      routes: routesArr,
+      summary: {
+        routesTracked: routesArr.length,
+        totalOk: routesArr.reduce((n, r) => n + r.ok, 0),
+        totalErrors: routesArr.reduce((n, r) => n + r.err, 0),
+        failing: routesArr.filter((r) => r.err > 0 && r.errRate >= 25).map((r) => r.key),
+      },
+    };
+  },
+
   'POST /admin-status': async (body) => {
     const r = research.status();
     let dfsBalance = null;
@@ -3517,6 +3538,42 @@ async function uxBeaconIngest(req) {
   await uxLimiter.run(() => fetch(`${process.env.SUPABASE_URL}/rest/v1/ux_events`, { method: 'POST', headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify(rows) }));
 }
 
+// ── Observability: a small in-memory ring of recent route errors + per-route
+// success/error counts, exposed via /admin-health. So a feature breaking in the wild
+// SURFACES (a Health panel) instead of being discovered by clicking a dead button.
+// In-memory → resets on redeploy; a lightweight signal, not a full APM.
+const ERR_RING = [];
+const ROUTE_STATS = new Map();   // key -> { ok, err, lastOk, lastErr, lastErrMsg }
+function recordRoute(key, ok, errMsg) {
+  let s = ROUTE_STATS.get(key);
+  if (!s) { s = { ok: 0, err: 0, lastOk: 0, lastErr: 0, lastErrMsg: '' }; ROUTE_STATS.set(key, s); }
+  const now = TS();
+  if (ok) { s.ok++; s.lastOk = now; }
+  else {
+    s.err++; s.lastErr = now; s.lastErrMsg = String(errMsg || '').slice(0, 240);
+    ERR_RING.push({ key, ts: now, msg: s.lastErrMsg });
+    if (ERR_RING.length > 120) ERR_RING.shift();
+  }
+}
+function TS() { try { return Date.now(); } catch (e) { return 0; } }
+
+// ── Per-IP rate limit (sliding window) on the JSON API. A public backend needs a
+// floor of abuse protection; the limit is generous so real operator use never trips
+// it, and it fails OPEN (any limiter error → allow).
+const RL = new Map();   // ip -> number[] (timestamps)
+const RL_WINDOW_MS = 60000, RL_MAX = Number(process.env.RATE_LIMIT_PER_MIN) || 600;
+function rateLimited(ip) {
+  try {
+    const now = TS();
+    let arr = RL.get(ip); if (!arr) { arr = []; RL.set(ip, arr); }
+    while (arr.length && arr[0] < now - RL_WINDOW_MS) arr.shift();
+    if (arr.length >= RL_MAX) return true;
+    arr.push(now);
+    if (RL.size > 5000) { for (const [k, v] of RL) if (!v.length || v[v.length - 1] < now - RL_WINDOW_MS) RL.delete(k); }
+    return false;
+  } catch (e) { return false; }
+}
+
 const server = createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, {});
   const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -3629,6 +3686,9 @@ setTimeout(function(){try{window.close();}catch(e){} if(!window.closed){location
     if (req.method === 'GET') return serveStatic(req, res, url.pathname);
     return send(res, 404, { error: `No route ${key}` });
   }
+  // Rate limit the JSON API (generous; fails open). Static assets already returned above.
+  const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || 'unknown';
+  if (rateLimited(ip)) { res.setHeader('Retry-After', '10'); return send(res, 429, { error: 'Too many requests — slow down and retry shortly.' }); }
   // Drain mode: reject new work while shutting down so in-flight can finish.
   if (SHUTTING_DOWN) { res.setHeader('Retry-After', '3'); return send(res, 503, { error: 'Server restarting — retry shortly.' }); }
   // Backpressure: shed load when too many heavy ops are already queued.
@@ -3643,7 +3703,9 @@ setTimeout(function(){try{window.close();}catch(e){} if(!window.closed){location
     const exec = () => withTimeout(handler(body, url), REQ_TIMEOUT_MS, 'request ' + key);
     const out = heavy ? await limiters.heavy.run(exec) : await exec();
     send(res, 200, out);
+    recordRoute(key, true);
   } catch (e) {
+    recordRoute(key, false, e && e.message);
     if (e && e.code === 'EBODY') send(res, 413, { error: 'Request body too large.' });
     else if (e && e.code === 'ETIMEOUT') send(res, 504, { error: e.message });
     else if (e && e.code === 'ECIRCUIT') { res.setHeader('Retry-After', '20'); send(res, 503, { error: e.message }); }

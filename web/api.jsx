@@ -140,6 +140,7 @@
     peopleAlsoAskPush(siteId, keyword, depth) { return engine("/people-also-ask", { siteId, keyword, depth, push: true }); },
     researchStatus() { return engine("/research-status", {}); },
     adminStatus(siteId) { return engine("/admin-status", { siteId }); },
+    adminHealth() { return engine("/admin-health", {}); },
     promptsList(siteId) { return engine("/prompts-list", { siteId }); },
     promptSave(key, content, model, temperature, siteId) { return engine("/prompt-save", { key, content, model, temperature, siteId }); },
     promptReset(key, siteId) { return engine("/prompt-reset", { key, siteId }); },

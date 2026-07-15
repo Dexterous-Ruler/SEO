@@ -6,6 +6,11 @@
 // ===========================================================================
 
 const UA = { 'User-Agent': 'wp-seo-agent/2.0 (stack-detect)' };
+// A real browser UA for the rendered-HTML + sitemap fetches: a bot-like UA gets 403'd by
+// CDN/security firewalls (Hostinger hcdn, Wordfence, Cloudflare), which blanks the page
+// so EVERY plugin reads as "none" (that's why a Yoast site was detected as none). The
+// signature scan needs the genuine <head>.
+const BROWSER_UA = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36' };
 
 // Signatures we look for in the rendered HTML / headers.
 const PLUGIN_SIGNATURES = {
@@ -86,7 +91,7 @@ export async function detectStack(wp, baseUrl) {
   // 1) Rendered homepage HTML (richest signal for plugins/theme/builder)
   let html = '', headerStr = '';
   try {
-    const res = await fetch(base + '/', { headers: UA, redirect: 'follow' });
+    const res = await fetch(base + '/', { headers: BROWSER_UA, redirect: 'follow' });
     html = await res.text();
     headerStr = [...res.headers.entries()].map(([k, v]) => `${k}:${v}`).join(' ');
   } catch { /* offline / blocked */ }
@@ -128,7 +133,7 @@ export async function detectStack(wp, baseUrl) {
   try { media = await restCount(wp, api, 'media'); } catch {}
   // Sitemap index lists child sitemaps; sum their URL counts for the real total.
   try {
-    const sm = await fetch(base + '/sitemap_index.xml', { headers: UA });
+    const sm = await fetch(base + '/sitemap_index.xml', { headers: BROWSER_UA });
     if (sm.ok) {
       const xml = await sm.text();
       const childSitemaps = [...xml.matchAll(/<loc>\s*([^<\s]+\.xml[^<\s]*)\s*<\/loc>/gi)].map((m) => m[1]);
@@ -136,7 +141,7 @@ export async function detectStack(wp, baseUrl) {
         // Sum URLs across child sitemaps (cap to stay polite).
         for (const cs of childSitemaps.slice(0, 30)) {
           try {
-            const r = await fetch(cs, { headers: UA });
+            const r = await fetch(cs, { headers: BROWSER_UA });
             if (r.ok) sitemap += ((await r.text()).match(/<loc>/g) || []).length;
           } catch {}
         }

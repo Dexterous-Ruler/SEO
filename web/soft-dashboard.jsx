@@ -1142,9 +1142,10 @@ function AdminScreen({ ctx }) {
   useEffect(()=>{ if(ctx.navTab && ["system","prompts"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
   const [stat,setStat] = useState(null);
   const [statBusy,setStatBusy] = useState(false);
+  const [health,setHealth] = useState(null);
   const load = ()=>{ setBusy(true); setErr(null); API.promptsList(scope==="site"?s.id:undefined).then(r=>{ if(r.error){setErr(r.error);return;} setData(r); setEdits({}); }).catch(e=>setErr(e.message)).finally(()=>setBusy(false)); };
   useEffect(()=>{ if(live && tab==="prompts") load(); },[scope, s.id]);
-  const loadStat = ()=>{ setStatBusy(true); API.adminStatus(s.id).then(setStat).catch(e=>setStat({error:e.message})).finally(()=>setStatBusy(false)); };
+  const loadStat = ()=>{ setStatBusy(true); API.adminStatus(s.id).then(setStat).catch(e=>setStat({error:e.message})).finally(()=>setStatBusy(false)); API.adminHealth().then(setHealth).catch(()=>setHealth(null)); };
   useEffect(()=>{ if(live){ loadStat(); if(!data) load(); } },[s.id]);
 
   const toggleHist = (p)=>{
@@ -1236,6 +1237,25 @@ function AdminScreen({ ctx }) {
                   ))}
                 </div>
               </SoftCard>
+              {health && !health.error && (
+                <SoftCard hover={false}>
+                  <SectionHead sub="Live error signal — recent route failures since the last restart (so breakage surfaces here, not by clicking a dead button)">Health</SectionHead>
+                  {(!health.errors || !health.errors.length) ? (
+                    <div style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 2px", fontSize:13.5, color:"var(--t-700)", fontWeight:600 }}><span style={{ width:10, height:10, borderRadius:99, background:"var(--t-500)", boxShadow:"0 0 0 3px rgba(45,140,120,.15)" }} />All clear — no route errors recorded ({(health.summary&&health.summary.totalOk)||0} successful calls tracked).</div>
+                  ) : (<>
+                    {health.summary && health.summary.failing && health.summary.failing.length>0 && <div style={{ fontSize:12.5, color:"var(--clay)", fontWeight:700, marginBottom:8 }}>⚠ Currently failing: {health.summary.failing.join(", ")}</div>}
+                    <div style={{ display:"flex", flexDirection:"column", gap:6, maxHeight:240, overflow:"auto" }}>
+                      {health.errors.map((e,i)=>(
+                        <div key={i} style={{ display:"flex", gap:10, alignItems:"center", padding:"8px 11px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12 }}>
+                          <span style={{ fontFamily:"var(--mono)", color:"var(--clay)", fontWeight:700, flexShrink:0, minWidth:160 }}>{e.key}</span>
+                          <span style={{ flex:1, minWidth:0, color:"var(--ink-2)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={e.msg}>{e.msg}</span>
+                          <span style={{ color:"var(--faint)", flexShrink:0, fontFamily:"var(--mono)" }}>{window.timeAgo?window.timeAgo(new Date(e.ts).toISOString()):""}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </>)}
+                </SoftCard>
+              )}
               <div style={{ fontSize:11, color:"var(--faint)", lineHeight:1.5 }}>Tip: red dots = a key isn't in <code>.env</code>. DataForSEO shows live balance; top up at app.dataforseo.com when low.</div>
             </>);
           })()}
