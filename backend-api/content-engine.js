@@ -167,7 +167,7 @@ function mergeInto(base, extra) {
   return base;
 }
 
-function dedupeMerge(opps) {
+export function dedupeMerge(opps) {
   const byKey = new Map();
   let anon = 0;
   for (const o of opps) {

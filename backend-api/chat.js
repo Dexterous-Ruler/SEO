@@ -149,7 +149,7 @@ const META_FIELD_MAP = { title: 'rank_math_title', meta_description: 'rank_math_
 // metaFieldMap): RankMath uses its native keys; Yoast/SEOPress/AIOSEO/none use the
 // Sentinel keys, which the seo-agent-optimize mu-plugin renders — directly on
 // no-plugin sites, or bridged into Yoast/SEOPress/AIOSEO's own <head> output.
-function metaKeyFor(field, seoPlugin) {
+export function metaKeyFor(field, seoPlugin) {
   const rank = /rank.?math/.test(String(seoPlugin || '').toLowerCase());
   const map = rank
     ? { title: 'rank_math_title', meta_description: 'rank_math_description', canonical: 'rank_math_canonical_url' }

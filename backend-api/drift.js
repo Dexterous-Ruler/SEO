@@ -309,7 +309,7 @@ export async function getBaseline(siteId, url) {
 // (no status, or HTTP >= 400 — e.g. a transient 403 bot-wall or 5xx). Storing
 // such a capture as the baseline makes the next good check diff real fields
 // against empty ones and fire phantom CRITICAL drift.
-function snapshotUnusable(s) {
+export function snapshotUnusable(s) {
   return !s || !!s.error || !s.status || s.status >= 400;
 }
 

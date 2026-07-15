@@ -89,7 +89,7 @@ function impactFor(score, savingsMs) {
 //    which the seo-agent-optimize mu-plugin renders: injected directly on no-SEO-plugin
 //    sites, or (v1.17.0+) bridged INTO Yoast/SEOPress/AIOSEO's own <head> output via
 //    their filters — so the applied value actually appears without duplicating a tag.
-function metaFieldMap(seoPlugin) {
+export function metaFieldMap(seoPlugin) {
   const p = String(seoPlugin || '').toLowerCase();
   if (/rank.?math/.test(p)) {
     return { title: 'rank_math_title', meta_description: 'rank_math_description', canonical: 'rank_math_canonical_url' };

@@ -48,6 +48,15 @@ jobs:
           done
           [ "$fail" = "0" ] || exit 1
 
+      # Install dev deps (esbuild) so the frontend-build test can run.
+      - name: Install dependencies
+        run: npm ci
+
+      # The real gate: unit + contract + apply-loop + frontend-build tests. A failure
+      # here fails the job BEFORE the redeploy trigger, so a broken build can't deploy.
+      - name: Run test suite
+        run: npm test
+
       - name: Check KOYEB_TOKEN is set
         env:
           KOYEB_TOKEN: ${{ secrets.KOYEB_TOKEN }}
