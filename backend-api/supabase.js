@@ -257,6 +257,10 @@ export const db = {
     return Array.isArray(out) ? out[0] : out;
   },
   async getProposal(id) { const o = await rest(`proposals?id=eq.${id}&select=*`); return o && o[0]; },
+  // Applied (verified) changes for a site — feeds the outcome/impact measurement.
+  async listAppliedProposals(siteId) {
+    return rest(`proposals?site_id=eq.${siteId}&status=eq.verified&applied_at=not.is.null&select=id,page,field,title,after_val,applied_at&order=applied_at.asc`).catch(() => []);
+  },
   // Still-pending proposal for a finding signature — used to de-dupe re-filed defects.
   async findOpenProposal(siteId, findingId) {
     const o = await rest(`proposals?site_id=eq.${siteId}&finding_id=eq.${encodeURIComponent(findingId)}&status=eq.proposed&select=id&limit=1`).catch(() => []);

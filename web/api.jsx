@@ -141,6 +141,7 @@
     researchStatus() { return engine("/research-status", {}); },
     adminStatus(siteId) { return engine("/admin-status", { siteId }); },
     adminHealth() { return engine("/admin-health", {}); },
+    applyImpact(siteId) { return engine("/apply-impact", { siteId }); },
     promptsList(siteId) { return engine("/prompts-list", { siteId }); },
     promptSave(key, content, model, temperature, siteId) { return engine("/prompt-save", { key, content, model, temperature, siteId }); },
     promptReset(key, siteId) { return engine("/prompt-reset", { key, siteId }); },

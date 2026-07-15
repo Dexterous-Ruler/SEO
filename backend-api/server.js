@@ -2993,6 +2993,79 @@ const routes = {
 
   // Apply one approved meta change — verify-after-write. Supports secure siteId
   // (secret decrypted server-side) OR creds-in-body. DRY_RUN honored.
+  // Outcome measurement: did the applied fixes actually move the needle? Compares the
+  // GSC performance of the APPLIED pages in a 28-day window BEFORE the changes began vs
+  // the most recent 28 days. Two page-dimension GSC queries (free) matched to the verified
+  // proposals — no per-page storage needed. Honest about sparse / too-recent data.
+  'POST /apply-impact': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    if (!site) return { error: 'site not found' };
+    const applied = await db.listAppliedProposals(body.siteId).catch(() => []);
+    if (!applied || !applied.length) return { noChanges: true, note: 'No applied changes yet — approve & apply fixes, then check back after ~2 weeks of Google data.' };
+    const saStr = await db.getGscSa(body.siteId).catch(() => null);
+    if (!saStr || !site.gsc_property) return { needsConnect: true, note: 'Connect Google Search Console for this site to measure impact.' };
+    let sa; try { sa = JSON.parse(saStr); } catch (e) { return { error: 'stored GSC credential is unreadable' }; }
+
+    const base = site.url && /^https?:/i.test(site.url) ? site.url : 'https://' + (site.url || '');
+    const pathOf = (u) => { try { return new URL(u, base).pathname.replace(/\/+$/, '') || '/'; } catch (e) { return String(u || '').replace(/\/+$/, '') || '/'; } };
+    const ymd = (d) => new Date(d).toISOString().slice(0, 10);
+    const shift = (d, days) => ymd(new Date(new Date(d).getTime() + days * 86400000));
+    const firstApply = applied[0].applied_at ? new Date(applied[0].applied_at) : null;
+    const lastApply = applied[applied.length - 1].applied_at ? new Date(applied[applied.length - 1].applied_at) : null;
+    const afterStart = gsc.daysAgo(30), afterEnd = gsc.daysAgo(2);
+    const beforeEnd = firstApply ? shift(firstApply, -2) : gsc.daysAgo(60);
+    const beforeStart = firstApply ? shift(firstApply, -30) : gsc.daysAgo(88);
+
+    let before, after;
+    try {
+      [before, after] = await Promise.all([
+        gsc.query(sa, site.gsc_property, { startDate: beforeStart, endDate: beforeEnd, dimensions: ['page'], rowLimit: 5000 }),
+        gsc.query(sa, site.gsc_property, { startDate: afterStart, endDate: afterEnd, dimensions: ['page'], rowLimit: 5000 }),
+      ]);
+    } catch (e) {
+      if (e.code === 'NO_ACCESS') return { error: e.message, needsProperty: true };
+      return { error: 'GSC query failed: ' + e.message };
+    }
+    const byPage = new Map();
+    for (const p of applied) { const path = pathOf(p.page); if (!byPage.has(path)) byPage.set(path, { path, page: p.page, fields: [], appliedAt: p.applied_at }); byPage.get(path).fields.push(p.field); }
+    const idx = (rows) => { const m = new Map(); for (const r of rows || []) { const path = pathOf(r.keys && r.keys[0]); if (byPage.has(path)) m.set(path, r); } return m; };
+    const b = idx(before), a = idx(after);
+    const changes = [];
+    let sBefC = 0, sAftC = 0, sBefI = 0, sAftI = 0, pBefW = 0, pBefI = 0, pAftW = 0, pAftI = 0, improved = 0, measured = 0;
+    for (const pg of byPage.values()) {
+      const bb = b.get(pg.path), aa = a.get(pg.path);
+      if (!bb && !aa) { changes.push({ page: pg.page, fields: [...new Set(pg.fields)], appliedAt: pg.appliedAt, measurable: false, reason: 'no Google data for this page yet' }); continue; }
+      measured++;
+      const bc = bb ? bb.clicks : 0, ac = aa ? aa.clicks : 0, bi = bb ? bb.impressions : 0, ai = aa ? aa.impressions : 0;
+      const bp = bb ? bb.position : null, ap = aa ? aa.position : null;
+      sBefC += bc; sAftC += ac; sBefI += bi; sAftI += ai;
+      if (bp != null) { pBefW += bp * (bi || 1); pBefI += (bi || 1); }
+      if (ap != null) { pAftW += ap * (ai || 1); pAftI += (ai || 1); }
+      const posDelta = (bp != null && ap != null) ? Math.round((bp - ap) * 10) / 10 : null;   // +ve = ranking IMPROVED
+      if (ac > bc || (posDelta != null && posDelta > 0)) improved++;
+      changes.push({ page: pg.page, fields: [...new Set(pg.fields)], appliedAt: pg.appliedAt, measurable: true,
+        clicks: { before: bc, after: ac, delta: ac - bc },
+        impressions: { before: bi, after: ai, delta: ai - bi },
+        position: { before: bp != null ? Math.round(bp * 10) / 10 : null, after: ap != null ? Math.round(ap * 10) / 10 : null, delta: posDelta } });
+    }
+    changes.sort((x, y) => ((y.clicks ? y.clicks.delta : -1e9) - (x.clicks ? x.clicks.delta : -1e9)));
+    const avgPosB = pBefI ? pBefW / pBefI : null, avgPosA = pAftI ? pAftW / pAftI : null;
+    const recentDays = lastApply ? Math.round((Date.now() - lastApply.getTime()) / 86400000) : null;
+    return {
+      window: { before: `${beforeStart} → ${beforeEnd}`, after: `${afterStart} → ${afterEnd}` },
+      pagesApplied: byPage.size, pagesMeasured: measured, pagesImproved: improved,
+      tooRecent: recentDays != null && recentDays < 14,
+      summary: {
+        clicks: { before: sBefC, after: sAftC, delta: sAftC - sBefC },
+        impressions: { before: sBefI, after: sAftI, delta: sAftI - sBefI },
+        avgPosition: { before: avgPosB != null ? Math.round(avgPosB * 10) / 10 : null, after: avgPosA != null ? Math.round(avgPosA * 10) / 10 : null, delta: (avgPosB != null && avgPosA != null) ? Math.round((avgPosB - avgPosA) * 10) / 10 : null },
+      },
+      changes: changes.slice(0, 100),
+      note: recentDays != null && recentDays < 14 ? 'Some changes were applied recently — Google needs ~2-4 weeks to reflect them, so the "after" numbers may understate the eventual impact.' : null,
+    };
+  },
+
   'POST /apply-meta': async (body) => {
     const { creds, site } = await resolveCreds(body);
     // Block writes when the site is not write-armed (unless explicitly forced & not dry).
@@ -3430,7 +3503,7 @@ const HEAVY_ROUTES = new Set([
   'POST /content-intel', 'POST /generate-content', 'POST /generate-schema', 'POST /generate-css',
   'POST /ai-seo-facts', 'POST /internal-links', 'POST /external-links', 'POST /apply-link',
   'POST /content-decay', 'POST /content-decay-brief', 'POST /content-refresh', 'POST /content-rewrite', 'POST /content-restore', 'POST /content-apply-elementor', 'POST /content-brief',
-  'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value',
+  'POST /semrush-snapshot', 'POST /semrush-keyword-gap', 'POST /semrush-striking', 'POST /traffic-value', 'POST /apply-impact',
   'POST /media-scan', 'POST /media-optimize', 'POST /page-optimize-images', 'POST /cleanup-webp-dupes', 'POST /airtable-sync',
   'POST /aeo-answer-block', 'POST /aeo-snippet-format', 'POST /aeo-apply-block-schema',
   'POST /apply-local-schema', 'POST /engine-autodraft', 'POST /engine-sync-published',

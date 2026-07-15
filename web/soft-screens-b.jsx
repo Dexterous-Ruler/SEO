@@ -119,6 +119,51 @@ function ApplyModal({ ctx }) {
   );
 }
 
+// Outcome measurement: did the applied fixes move the needle? Loads on demand (a heavy
+// GSC call). Shows before→after clicks / impressions / avg-position for the optimized pages.
+function ImpactCard({ ctx }) {
+  const [busy,setBusy] = useState(false);
+  const [imp,setImp] = useState(null);
+  const live = window.SentinelAPI && window.SENTINEL_LIVE;
+  const run = ()=>{ if(!live){ ctx.toast("Connect a live site first","gold"); return; } setBusy(true); setImp(null); window.SentinelAPI.applyImpact(ctx.site.id).then(setImp).catch(e=>setImp({error:e.message})).finally(()=>setBusy(false)); };
+  const Delta = ({v})=>{ const s=(v>0?"+":"")+v; return <span style={{ fontWeight:700, color: (v===0||v==null)?"var(--muted)":(v>0?"var(--t-600)":"var(--clay)") }}>{v==null?"—":s}</span>; };
+  return (
+    <SoftCard hover={false} style={{ marginBottom:18 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+        <div style={{ flex:1, minWidth:200 }}>
+          <div style={{ fontSize:14, fontWeight:800 }}>Impact of applied changes</div>
+          <div style={{ fontSize:12.5, color:"var(--muted)" }}>Google Search Console performance of your optimized pages — before the changes vs the last 28 days. No DataForSEO units.</div>
+        </div>
+        <NeoButton kind="soft" size="sm" icon={busy?undefined:"trend"} disabled={busy} onClick={run}>{busy&&<Icon name="cog" size={14} className="audit-spin" />}{busy?"Measuring…":"Measure impact"}</NeoButton>
+      </div>
+      {imp && (imp.error||imp.noChanges||imp.needsConnect) && <div style={{ marginTop:12, fontSize:13, color: imp.error?"var(--clay)":"var(--muted)" }}>{imp.error||imp.note}</div>}
+      {imp && imp.summary && (
+        <div style={{ marginTop:14 }}>
+          {imp.note && <div style={{ fontSize:12, color:"var(--t-800)", background:"var(--gold-bg)", padding:"8px 11px", borderRadius:"var(--r-md)", marginBottom:12 }}>{imp.note}</div>}
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginBottom:14 }}>
+            {[["Clicks", imp.summary.clicks],["Impressions", imp.summary.impressions],["Avg position", imp.summary.avgPosition]].map(([label,m])=>(
+              <div key={label} style={{ padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+                <div style={{ fontSize:11, color:"var(--faint)", textTransform:"uppercase", letterSpacing:".04em", marginBottom:4 }}>{label}</div>
+                <div style={{ fontSize:14.5, fontWeight:800 }}>{m.before==null?"—":m.before} → {m.after==null?"—":m.after} <span style={{ fontSize:12.5, fontWeight:600 }}>(<Delta v={m.delta} />)</span></div>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize:12.5, color:"var(--muted)", marginBottom:8 }}>{imp.pagesMeasured} of {imp.pagesApplied} optimized pages had Google data · {imp.pagesImproved} improved · <span style={{ fontFamily:"var(--mono)", fontSize:11 }}>{imp.window.before} vs {imp.window.after}</span></div>
+          <div style={{ display:"flex", flexDirection:"column", gap:6, maxHeight:260, overflow:"auto" }}>
+            {(imp.changes||[]).filter(c=>c.measurable).slice(0,25).map((c,i)=>(
+              <div key={i} style={{ display:"flex", gap:12, alignItems:"center", padding:"8px 11px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12 }}>
+                <span style={{ flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", fontFamily:"var(--mono)" }} title={c.page}>{c.page}</span>
+                <span style={{ flexShrink:0, color:"var(--muted)" }}>clicks <Delta v={c.clicks.delta} /></span>
+                <span style={{ flexShrink:0, color:"var(--muted)" }}>pos <Delta v={c.position.delta} /></span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </SoftCard>
+  );
+}
+
 function ReviewScreen({ ctx }) {
   const [openId,setOpenId] = useState("p1");
   const proposed = ctx.proposals.filter(p=>p.status==="proposed");
@@ -141,6 +186,8 @@ function ReviewScreen({ ctx }) {
           <NeoButton kind="primary" icon="upload" disabled={approved.length===0||writeBlocked} onClick={ctx.openApply} title={writeBlocked?"Writes disabled":undefined}>Apply{approved.length>0?` (${approved.length})`:""}</NeoButton>
         </div>
       </SoftCard>
+
+      <ImpactCard ctx={ctx} />
 
       {writeBlocked && (
         <div style={{ display:"flex", alignItems:"center", gap:12, padding:"14px 18px", background:"var(--clay-bg)", borderRadius:"var(--r-lg)", boxShadow:"var(--neo-xs)", marginBottom:18 }}>
