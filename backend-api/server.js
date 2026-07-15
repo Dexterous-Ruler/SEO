@@ -3422,7 +3422,7 @@ const routes = {
   // → { drafted, queued, skippedDup, candidates, table } | { skipped, reason } | { notProvisioned }.
   'POST /engine-autodraft': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    return engine.autoDraft(body.siteId, { topN: body.topN, actionType: body.actionType });
+    return engine.autoDraft(body.siteId, { topN: body.topN, actionType: body.actionType, ids: body.ids });
   },
 
   // Close the loop opposite autodraft: read the n8n-watched Article Writer table

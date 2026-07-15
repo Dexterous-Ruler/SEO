@@ -275,16 +275,25 @@ export async function quickWins(sa, property, { days = 28, minImpressions = 30, 
 export async function questionQueries(sa, property, { days = 28, minImpressions = 10 } = {}) {
   const startDate = daysAgo(days + 2); // GSC data lags ~2 days
   const endDate = daysAgo(2);
-  const data = await query(sa, property, { startDate, endDate, dimensions: ['query'], rowLimit: 1000 });
   // Question word as a whole word anywhere in the query (covers "how to ...",
   // "what is ...", "... where to apply", etc.). Word boundaries avoid matching
   // "iso" for "is" or "showld" for "should".
   const QW = /\b(who|what|why|how|when|where|which|can|do|does|is|are|should)\b/i;
+  // Pull query-only rows (CTR/position) AND query+page rows so each query carries its
+  // best-ranking landing page — REQUIRED so the "apply answer-block schema" action has a
+  // real page to attach to (without it /apply-schema fails "a page url is required").
+  const [data, pageData] = await Promise.all([
+    query(sa, property, { startDate, endDate, dimensions: ['query'], rowLimit: 1000 }),
+    query(sa, property, { startDate, endDate, dimensions: ['query', 'page'], rowLimit: 2000 }),
+  ]);
+  const topPage = new Map();
+  for (const r of pageData) { const q = r.keys[0]; const cur = topPage.get(q); if (!cur || r.impressions > cur.impr) topPage.set(q, { page: r.keys[1], impr: r.impressions }); }
   const rows = data
     .filter((r) => r.impressions >= minImpressions && QW.test(r.keys[0]))
     .sort((a, b) => b.impressions - a.impressions)
     .map((r) => ({
-      query: r.keys[0], impressions: r.impressions, clicks: r.clicks,
+      query: r.keys[0], page: (topPage.get(r.keys[0]) || {}).page || null,
+      impressions: r.impressions, clicks: r.clicks,
       ctr: Math.round(r.ctr * 10000) / 10000,
       position: Math.round(r.position * 10) / 10,
     }));
@@ -303,12 +312,16 @@ export async function snippetVisibility(sa, property, { windowDays = 28 } = {}) 
   const priorEnd = daysAgo(2 + windowDays + 1);
   const priorStart = daysAgo(2 + windowDays * 2 + 1);
 
-  const [recent, prior] = await Promise.all([
+  const [recent, prior, recentPages] = await Promise.all([
     query(sa, property, { startDate: recentStart, endDate: end, dimensions: ['query'], rowLimit: 1000 }),
     query(sa, property, { startDate: priorStart, endDate: priorEnd, dimensions: ['query'], rowLimit: 1000 }),
+    query(sa, property, { startDate: recentStart, endDate: end, dimensions: ['query', 'page'], rowLimit: 2000 }),
   ]);
 
   const priorMap = new Map(prior.map((r) => [r.keys[0], r]));
+  // Best-ranking landing page per query — so the apply-schema action has a real target.
+  const topPage = new Map();
+  for (const r of recentPages) { const q = r.keys[0]; const cur = topPage.get(q); if (!cur || r.impressions > cur.impr) topPage.set(q, { page: r.keys[1], impr: r.impressions }); }
   const rows = [];
   for (const r of recent) {
     const q = r.keys[0];
@@ -319,7 +332,7 @@ export async function snippetVisibility(sa, property, { windowDays = 28 } = {}) 
       : (r.clicks > 0 ? Infinity : 0);                 // 0→N clicks = real growth, not a snippet
     if (imprPct >= 0.20 && clickPct <= 0.05) {
       rows.push({
-        query: q,
+        query: q, page: (topPage.get(q) || {}).page || null,
         impressionsNow: r.impressions, impressionsPrev: p.impressions,
         clicksNow: r.clicks, clicksPrev: p.clicks,
         impressionDelta: Math.round((r.impressions - p.impressions)),

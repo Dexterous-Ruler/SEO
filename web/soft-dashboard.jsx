@@ -1813,6 +1813,18 @@ function ContentEngineScreen({ ctx }) {
       setItems(prev=>prev.filter(x=>x.id!==item.id));
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
   };
+  // Push ANY single opportunity to the Article Writer (create content) — not just the top 5.
+  const pushOne = (item)=>{
+    setBusyId(item.id);
+    API.engineAutodraft(s.id, { ids:[item.id] }).then(r=>{
+      if(r && r.notProvisioned){ setNotProv(true); return; }
+      if(r && r.skipped){ ctx.toast(r.reason||"Couldn't push — connect the Airtable Article Writer first","gold"); return; }
+      if(r && r.error){ ctx.toast("Push: "+r.error,"clay"); return; }
+      const n=(r&&r.drafted!=null)?r.drafted:0;
+      ctx.toast(n>0?"Pushed to the Article Writer ✓ — set its Status to “Write Article” to generate":(r.skippedDup?"Already in the Article Writer":"Nothing pushed"), n>0?"teal":"gold");
+      load();
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
+  };
   const setStatus = (item,status)=>{
     setBusyId(item.id);
     API.engineSetStatus(item.id, status).then(r=>{
@@ -1902,6 +1914,8 @@ function ContentEngineScreen({ ctx }) {
                     </div>
                   </div>
                   <div style={{ display:"flex", alignItems:"center", gap:8, flexShrink:0 }}>
+                    {item.action_type!=="answer_block" && item.status!=="queued" && item.status!=="done" && <NeoButton kind="primary" size="sm" icon="upload" disabled={dim} onClick={()=>pushOne(item)} title="Push this opportunity to the Article Writer (create content)">Push to writer</NeoButton>}
+                    {item.status==="queued" && <Chip tone="teal" size="sm" dot>In Article Writer</Chip>}
                     {item.status!=="done" && <NeoButton kind="soft" size="sm" icon="check" disabled={dim} onClick={()=>setStatus(item,"done")} title="Mark done">Done</NeoButton>}
                     {hasDraft && <NeoButton kind="ghost" size="sm" icon={draftOpen?"x":"chevD"} onClick={()=>setOpenDraft(draftOpen?"":item.id)} title="Preview the generated answer-block draft">{draftOpen?"Hide draft":"View draft"}</NeoButton>}
                     <NeoButton kind="ghost" size="sm" icon="x" disabled={dim} onClick={()=>dismiss(item)}>Dismiss</NeoButton>
@@ -3831,6 +3845,17 @@ function GscScreen({ ctx }) {
   const [saEmail,setSaEmail] = useState(null);
   const [advanced,setAdvanced] = useState(false);   // show service-account paste
   const [propMenu,setPropMenu] = useState(false);   // header property switcher
+  const [pushingQw,setPushingQw] = useState("");    // quick-win query being pushed to the Article Writer
+  // Push a quick-win (page-2) query into the Article Writer table to create content for it.
+  const pushQuickWin = (q)=>{
+    const kw=String((q&&q.query)||"").trim(); if(!kw) return;
+    setPushingQw(kw);
+    API.airtablePushKeywords(ctx.site.id, [kw]).then(r=>{
+      if(r&&r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
+      const pushed=(r&&r.pushed!=null)?r.pushed:0;
+      ctx.toast(pushed>0?("Pushed “"+kw.slice(0,38)+"” → Article Writer ✓ — set Status to “Write Article” to generate"):"Already in the Article Writer", pushed>0?"teal":"gold");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushingQw(""));
+  };
   const [propsLoading,setPropsLoading] = useState(false);
   const [decay,setDecay] = useState(null);
   const [decayBusy,setDecayBusy] = useState(false);
@@ -4246,10 +4271,11 @@ function GscScreen({ ctx }) {
               <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
                 <div style={{ fontSize:12.5, color:"var(--muted)", marginBottom:6 }}>Queries ranking positions 11–20 (page 2), by impressions — your highest-opportunity quick wins, from real Google data.</div>
                 {(data.striking||[]).map((q,i)=>(
-                  <div key={i} style={{ display:"flex", alignItems:"center", padding:"9px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13 }}>
+                  <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13 }}>
                     <span style={{ width:46 }}><span style={{ display:"inline-grid", placeItems:"center", minWidth:30, height:22, borderRadius:7, background:"var(--gold-bg)", color:"var(--gold)", fontSize:12, fontWeight:800 }}>{q.position}</span></span>
                     <span style={{ flex:1, fontWeight:600, fontFamily:"var(--mono)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{q.query}</span>
                     <span style={{ width:90, textAlign:"right", color:"var(--muted)" }}>{fmt(q.impressions)} impr.</span>
+                    <NeoButton kind="soft" size="sm" icon={pushingQw===q.query?undefined:"upload"} disabled={pushingQw===q.query} onClick={()=>pushQuickWin(q)} title="Push this quick-win query to the Article Writer (create content)">{pushingQw===q.query&&<Icon name="cog" size={13} className="audit-spin" />}{pushingQw===q.query?"Pushing…":"Create content"}</NeoButton>
                   </div>
                 ))}
                 {(data.striking||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No page-2 queries in this window.</div>}
@@ -6139,7 +6165,7 @@ function App() {
       if(isLive()){
         const approved=proposals.filter(p=>p.status==="approved");
         return (async()=>{
-          let applied=0,failed=0,manual=0,blocked=0;
+          let applied=0,failed=0,manual=0,blocked=0; const cssProps=[];
           for(const p of approved){
             if(p.channel==="rest-write"){
               try{
@@ -6150,11 +6176,32 @@ function App() {
                 if(r&&r.status==="verified")applied++; else if(r&&r.status==="blocked")blocked++; else if(r&&r.status==="dry-run"){} else failed++;
                 setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:st}:x));
               }catch(e){ failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); }
+            } else if(p.channel==="schema"){
+              // Structured-data proposal → write JSON-LD to the live page.
+              if(killSwitch){ /* simulated under kill switch */ }
+              else{ try{ const r=await API.applySchema(siteId,{ url:p.page, jsonld:p.after }); if(r&&r.ok){ applied++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"verified"}:x)); } else if(r&&r.status==="blocked"){ blocked++; } else { failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); } }catch(e){ failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); } }
+            } else if(p.channel==="theme/css"){
+              cssProps.push(p);   // batch — one bundled seo-agent-a11y.css write below
             } else {
-              // theme/CSS/manual — there is no meta REST write for these; leave the
-              // proposal queued and tell the user it needs manual action (don't fake "verified").
+              // genuinely manual (functions.php / JS / content edits) — no auto-write exists.
               manual++;
             }
+          }
+          // ONE bundled CSS write covers ALL approved theme/css (accessibility) proposals —
+          // they live in a single site-wide seo-agent-a11y.css. Generate from the approved
+          // findings, apply once. (color-contrast/target-size → CSS; skip-link/landmark/label/
+          // aria need functions.php/JS and legitimately stay manual.)
+          if(cssProps.length && !killSwitch){
+            try{
+              const findings=cssProps.map(p=>({ auditId:String(p.findingId||"").split("::")[0]||undefined, title:p.title }));
+              const g=await API.generateCss(siteId, findings);
+              if(g && !g.error && g.css){
+                const w=await API.applyCss(siteId, g.css);
+                if(w && w.ok){ cssProps.forEach(p=>{ applied++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"verified"}:x)); }); }
+                else if(w && w.status==="blocked"){ cssProps.forEach(()=>blocked++); }
+                else { cssProps.forEach(p=>{ failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); }); }
+              } else { cssProps.forEach(()=>manual++); }   // nothing CSS-expressible → still manual
+            }catch(e){ cssProps.forEach(()=>failed++); }
           }
           if(killSwitch){ toast("Kill switch on — "+approved.length+" simulated, nothing written","gold"); }
           else { const bits=[]; if(applied)bits.push(applied+" applied & verified"); if(blocked)bits.push(blocked+" blocked (read-only)"); if(manual)bits.push(manual+" need manual action"); if(failed)bits.push(failed+" failed"); toast(bits.length?bits.join(" · "):"Nothing to apply", failed?"clay":(applied?"teal":"gold")); }

@@ -660,23 +660,36 @@ async function draftAnswerBlocks(siteId, n) {
   return { drafted: inReview, inReview, failed, candidates: items.length, kind: 'answer_block' };
 }
 
-export async function autoDraft(siteId, { topN = 5, actionType } = {}) {
+export async function autoDraft(siteId, { topN = 5, actionType, ids } = {}) {
   if (!siteId) return { error: 'No site selected.' };
   const n = Math.min(Math.max(Number(topN) || 5, 1), 50);
+  const idList = Array.isArray(ids) ? ids.filter(Boolean) : (ids ? [ids] : []);
 
-  // Answer-block opportunities are drafted IN PLACE (generate block → in_review),
-  // not pushed to the Article Writer.
-  if (actionType === 'answer_block') return await draftAnswerBlocks(siteId, n);
+  // Answer-block BULK drafting stays in-place; but an explicit per-row id push always
+  // goes to the Article Writer (user clicked "Push" on that specific opportunity).
+  if (actionType === 'answer_block' && !idList.length) return await draftAnswerBlocks(siteId, n);
 
-  // 1) Top-N SCORED opportunities (highest score first). worklist() surfaces
-  //    notProvisioned / errors, which we pass straight through.
-  const wl = await worklist(siteId, { status: 'scored', actionType, limit: n });
-  if (wl && wl.notProvisioned) return { ...NOT_PROVISIONED, drafted: 0 };
-  if (wl && wl.error && !(wl.items && wl.items.length)) return { error: wl.error, drafted: 0 };
-  // Article path only: never push an answer_block/geo item to the Article Writer,
-  // even if actionType was left blank.
-  const items = (wl.items || []).filter((it) => it.action_type !== 'answer_block' && it.action_type !== 'geo').slice(0, n);
-  if (!items.length) return { drafted: 0, skipped: true, reason: 'no scored article opportunities to draft' };
+  let items;
+  if (idList.length) {
+    // Explicit per-row push: pull the full worklist (any status) and pick the chosen ids —
+    // a row the user clicked should always go, regardless of score/status.
+    const wl = await worklist(siteId, { limit: 500 });
+    if (wl && wl.notProvisioned) return { ...NOT_PROVISIONED, drafted: 0 };
+    if (wl && wl.error && !(wl.items && wl.items.length)) return { error: wl.error, drafted: 0 };
+    const idSet = new Set(idList);
+    items = (wl.items || []).filter((it) => idSet.has(it.id)).slice(0, 50);
+    if (!items.length) return { drafted: 0, skipped: true, reason: 'selected opportunity not found' };
+  } else {
+    // 1) Top-N SCORED opportunities (highest score first). worklist() surfaces
+    //    notProvisioned / errors, which we pass straight through.
+    const wl = await worklist(siteId, { status: 'scored', actionType, limit: n });
+    if (wl && wl.notProvisioned) return { ...NOT_PROVISIONED, drafted: 0 };
+    if (wl && wl.error && !(wl.items && wl.items.length)) return { error: wl.error, drafted: 0 };
+    // Article path only: never push an answer_block/geo item to the Article Writer,
+    // even if actionType was left blank.
+    items = (wl.items || []).filter((it) => it.action_type !== 'answer_block' && it.action_type !== 'geo').slice(0, n);
+    if (!items.length) return { drafted: 0, skipped: true, reason: 'no scored article opportunities to draft' };
+  }
 
   // 2) Resolve the Article Writer table — the ONE n8n-watched table (cfg.table_gaps).
   let pat = null, cfg = null;
