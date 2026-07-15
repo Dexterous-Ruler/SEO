@@ -335,6 +335,11 @@ export async function checkDrift(siteId, url, { updateBaseline = false } = {}) {
     return { baselineSet: true, snapshot, saved: !!(saved && saved.saved) };
   }
 
+  // If THIS capture is unusable (transient 403 bot-wall / 5xx / timeout), do NOT diff
+  // a healthy baseline against an empty snapshot — that fires a cascade of phantom
+  // CRITICAL drift (canonical removed, schema lost, content gutted…). Report the
+  // capture failure instead; the stored baseline is left untouched.
+  if (unusable) return { error: snapshot.error || `could not fetch page (HTTP ${snapshot.status || 'no response'})`, captureFailed: true, snapshot, drift: [] };
   const drift = diffSnapshots(existing.snapshot, snapshot);
 
   let rebaselined = false;

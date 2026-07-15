@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.18.0
+ * Version:     1.18.1
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.18.0';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.18.1';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -171,9 +171,10 @@ class SEO_Agent_Optimize {
             // Callback (not a replacement string) so a title containing $1/\1 can't
             // be misread as a regex backreference.
             $safe = esc_html($title);
-            $head = preg_replace_callback('/<title\b([^>]*)>.*?<\/title>/is', function ($m) use ($safe) {
+            $new = preg_replace_callback('/<title\b([^>]*)>.*?<\/title>/is', function ($m) use ($safe) {
                 return '<title' . $m[1] . '>' . $safe . '</title>';
             }, $head, 1);
+            if ($new !== null) { $head = $new; }   // PCRE limit → null; never blank the <head>
         }
         return $head;
     }
@@ -471,7 +472,7 @@ class SEO_Agent_Optimize {
         // Store/merge original-URL → WebP-URL mappings (set by the optimizer).
         register_rest_route('seoagent/v1', '/webp-map', [
             'methods'  => 'POST',
-            'permission_callback' => $perm,
+            'permission_callback' => $permAdmin,   // site-wide effect (swaps every image URL) → admin only, like /css
             'callback' => function ($req) {
                 $p = $req->get_json_params();
                 $incoming = isset($p['map']) && is_array($p['map']) ? $p['map'] : [];

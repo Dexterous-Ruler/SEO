@@ -171,6 +171,13 @@ function ReviewScreen({ ctx }) {
 function ActivityScreen({ ctx }) {
   const tone = { verified:"teal", approved:"teal", applied:"plum", "rolled-back":"gold", audit:"plum", connection:"gray", failed:"clay" };
   const [filter,setFilter] = useState("all");
+  const [,setTick] = useState(0);
+  // Refresh the live trail on mount so "View in log" (and this screen) reflect actions
+  // the user JUST performed — window.ACTIVITY is only hydrated once at boot otherwise.
+  useEffect(()=>{
+    if(!window.SENTINEL_LIVE || !window.SentinelAPI) return;
+    window.SentinelAPI.listActivity(null).then(a=>{ if(Array.isArray(a)){ window.ACTIVITY=a.map(window.mapActivityRow||(x=>x)); setTick(n=>n+1); } }).catch(()=>{});
+  },[]);
   const TYPES=[{v:"all",l:"All"},{v:"writes",l:"Writes"},{v:"approved",l:"Approvals"},{v:"rolled-back",l:"Rollbacks"},{v:"failed",l:"Failures"}];
   // LIVE: only ever show the real hydrated trail (empty → honest empty state).
   // The demo ACTIVITY seed is for design-preview (non-live) mode only.

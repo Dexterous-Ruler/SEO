@@ -104,7 +104,9 @@ export async function scanMedia(siteId, { minKB = 80, limit = 200 } = {}) {
   const heavy = all.filter((i) => i.sizeKB >= minKB).sort((a, b) => b.sizeKB - a.sizeKB)
     .map((i) => { const st = stemOf(i.url); return { ...i, alreadyWebp: ex.byExact.has(st) || ex.byStem.has(st) }; });
   const needing = heavy.filter((i) => !i.alreadyWebp);
-  const totalKB = needing.reduce((s, i) => s + i.sizeKB, 0);
+  // Exclude dimension-ESTIMATED sizes from the headline total/savings figure so it isn't
+  // inflated by rough guesses; estimated images still appear in the actionable list.
+  const totalKB = needing.reduce((s, i) => s + (i.sizeEstimated ? 0 : i.sizeKB), 0);
   return {
     totalImages: all.length,
     heavyCount: needing.length,                 // still needing conversion (actionable)

@@ -1314,11 +1314,11 @@ const routes = {
 
   // Disconnect: the connection is global (one Google account), so disconnecting
   // clears the credential + selected property for ALL sites.
-  'POST /gsc-disconnect': async (body) => {
-    // Honor siteId: disconnect GSC for THAT site only. Without a siteId, fall back to
-    // clearing all (the old always-global behaviour) — the UI now always sends one, so
-    // "Disconnect" no longer wipes Google for every site at once.
-    if (body && body.siteId) { await db.setGscSa(body.siteId, '').catch(() => {}); return { ok: true, siteId: body.siteId }; }
+  'POST /gsc-disconnect': async () => {
+    // GSC is a SHARED credential here ("connect once on any site → covers all"; getGscSa
+    // falls back to any connected site's SA). A per-site disconnect can't hold — clearing
+    // one site's SA just re-resolves via the fallback — so disconnect is GLOBAL and the UI
+    // says so. Clears every site's stored GSC credential.
     await db.clearAllGscSa().catch(() => {});
     return { ok: true, all: true };
   },

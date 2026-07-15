@@ -50,9 +50,14 @@ async function tableExists() {
     // or 5xx) must NOT permanently disable the durable queue: leave TABLE_OK=null so
     // the next call re-probes (self-heals once Supabase recovers), and just degrade
     // to inline execution for THIS call by returning false without caching it.
-    const definitelyMissing = e.status === 404 || e.status === 400
-      || /42P01|does not exist|Could not find the table/i.test(e.message || '');
-    if (definitelyMissing) { TABLE_OK = false; }
+    // Permanent = missing table (migration not run) OR a config/auth failure that won't
+    // self-heal without a redeploy (wrong/absent SUPABASE_URL or service-role key → 401/
+    // 403 / "no supabase"). Latch those false so we don't re-probe + log-spam every ~5s
+    // forever. Truly transient failures (network blip, timeout, 5xx, cold start — status
+    // 0 or 5xx) stay uncached so the queue self-heals once Supabase recovers.
+    const permanent = e.status === 404 || e.status === 400 || e.status === 401 || e.status === 403
+      || /42P01|does not exist|Could not find the table|no supabase|not configured|invalid api key|invalid.*jwt/i.test(e.message || '');
+    if (permanent) { TABLE_OK = false; console.error('[jobs] durable queue disabled (permanent):', e.message); }
     else { console.error('[jobs] table probe (transient — will re-check):', e.message); return false; }
   }
   return TABLE_OK;

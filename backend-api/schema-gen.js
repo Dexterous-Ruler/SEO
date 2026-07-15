@@ -649,16 +649,20 @@ function buildLocalBusiness(url, nap, { type = 'LegalService', baseUrl, areaServ
 function localSchemaForSite({ url, geoContext, siteName, market, areaServed } = {}) {
   const nap = extractNap(geoContext);
   const graph = [];
+  // baseUrl for the builders must be the ORIGIN, not the page URL — passing the page
+  // URL makes buildBreadcrumb point "Home" at the page and doubles the path (malformed
+  // BreadcrumbList). Fall back to the raw url only if it isn't a parseable absolute URL.
+  const base = (() => { try { return new URL(url).origin; } catch (e) { return url || ''; } })();
   // buildWebPage always emits a `breadcrumb` @id ref — emit the BreadcrumbList it
   // points at so the reference resolves (no dangling @id). org is {} here, so no
   // Organization node / isPartOf ref is produced.
-  graph.push(buildBreadcrumb(url, siteName || nap.businessName, url || ''));
+  graph.push(buildBreadcrumb(url, siteName || nap.businessName, base));
   graph.push(buildWebPage(
     { url, title: siteName || nap.businessName, lang: langForMarket(null, market) },
     {},
-    url || ''
+    base
   ));
-  const lb = buildLocalBusiness(url, nap, { areaServed, baseUrl: url });
+  const lb = buildLocalBusiness(url, nap, { areaServed, baseUrl: base });
   if (lb) graph.push(lb);
   const graphDoc = { '@context': 'https://schema.org', '@graph': graph.map(clean) };
   return { graph: graphDoc, validation: validateSchema(graphDoc), nap };

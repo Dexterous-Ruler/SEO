@@ -3919,6 +3919,7 @@ function GscScreen({ ctx }) {
       const poll=()=>{
         API.contentRewriteStatus(s.id, postId).then(st=>{
           if(st && st.status==="running"){ if(++tries>75){ setRewriteFor({ page:d.page, error:"Rewrite timed out — try again." }); return; } setTimeout(poll,4000); return; }
+          if(st && st.status==="unknown"){ setRewriteFor({ page:d.page, error: st.reason||"Rewrite job was lost (server restart) — run it again." }); return; }
           handle(st);
         }).catch(e=>{ if(++tries>75){ setRewriteFor({ page:d.page, error:e.message }); return; } setTimeout(poll,4000); });
       };

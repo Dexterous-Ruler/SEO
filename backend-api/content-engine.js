@@ -179,6 +179,7 @@ function dedupeMerge(opps) {
       || cleanTitle(o.title || '').toLowerCase()
       || String(o.primaryKeyword || '').toLowerCase().trim()
       || `__anon_${anon++}`;
+    o.dedupeKey = key;   // write back the fallback so persist()/mirror dedupe on the SAME key we counted (else a zero-token opp is counted+mirrored but dropped from the saved worklist)
     const cur = byKey.get(key);
     if (cur) mergeInto(cur, o);
     else byKey.set(key, o);

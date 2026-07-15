@@ -275,6 +275,7 @@ Object.assign(window, {
       who: r.actor || "Agent", icon: r.icon || "check", text: r.text, meta: r.meta || "",
     };
   }
+  window.mapActivityRow = mapActivity;   // so the Activity screen can refresh window.ACTIVITY after a write
 
   function timeAgo(iso) {
     const d = (Date.now() - new Date(iso).getTime()) / 1000;
