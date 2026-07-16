@@ -186,7 +186,12 @@ async function readPage(url, siteId) {
       const siteUrl = creds && (creds.baseUrl || (creds.site && creds.site.url));
       if (creds && creds.baseUrl && siteUrl && sameHost(url, siteUrl)) {
         const wp = new WordPressClient({ baseUrl: creds.baseUrl, username: creds.username, appPassword: creds.appPassword });
-        const found = await resolvePostId(wp, url);
+        let found = await resolvePostId(wp, url);
+        if (!found) {
+          // Also handle default permalinks (?p=<id> / ?page_id=<id>) which carry no slug.
+          const m = url.match(/[?&](?:p|page_id)=(\d+)/);
+          if (m) for (const type of ['posts', 'pages']) { const chk = await wp.request(`/${type}/${m[1]}?_fields=id`).catch(() => null); if (chk && chk.id) { found = { postId: m[1], objectType: type }; break; } }
+        }
         if (found) {
           const post = await wp.request(`/${found.objectType}/${found.postId}?_fields=title,content`).catch(() => null);
           const rendered = post && post.content && post.content.rendered;
