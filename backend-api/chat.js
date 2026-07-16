@@ -129,7 +129,7 @@ const TOOLS = [
   { name: 'extract_citable_facts', description: "Extract the citable facts + FAQ from a page to improve LLM/AI-search citation (GEO), and produce a ready FAQPage schema. Use when asked how to make a page more citable by AI assistants, or for FAQ/fact-structure suggestions.", input_schema: { type: 'object', properties: { url: { type: 'string', description: 'the page URL to analyze' } }, required: ['url'] } },
   { name: 'get_prioritized_worklist', description: "Get the site's audit findings ranked by RICE score ((Reach × Impact × Confidence) ÷ Effort), weighted by real GSC clicks-per-page when connected, with impact×effort quadrants (Quick win / Major project / Fill-in / Deprioritize). Use when asked 'what should I fix first', 'what's the priority', or for a worklist/roadmap.", input_schema: { type: 'object', properties: {} } },
   { name: 'get_traffic_value', description: "Model the £/$ value of the site's organic rankings: estimated monthly clicks (volume × CTR-by-position) × CPC, per keyword and total, plus value-at-risk on page-2 keywords and the £ uplift of pushing them to page 1. Use for ROI/business-value questions ('what's our organic traffic worth', 'what's the biggest money opportunity'). CTR curve is calibrated from the site's own Search Console data when available.", input_schema: { type: 'object', properties: {} } },
-  { name: 'fetch_url', description: 'Fetch any web page and return its title + main text (e.g. a competitor or a reference article the user links).', input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
+  { name: 'fetch_url', description: 'Fetch any web page and return its title + main text (e.g. a competitor or a reference article the user links). Renders JS + defeats bot-walls automatically. If it returns "READ FAILED", the page could NOT be read — never summarise or write about a page you have not actually read; tell the user and ask them to paste the text.', input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
   // ── ACTION (write) tools — perform REAL changes on the live site when the user asks ──
   { name: 'push_keywords_to_airtable', description: "ACTION: push keywords into the site's configured Airtable keyword column — this feeds the n8n article writer and creates real rows. Use ONLY when the user explicitly asks to push/add keywords or topics to Airtable (or 'send these to the writer'). Pass `keywords` to push specific ones; omit to auto-derive the site's content-gap keywords. De-dupes against existing rows.", input_schema: { type: 'object', properties: { keywords: { type: 'array', items: { type: 'string' }, description: 'optional explicit keywords; omit to auto-derive content gaps' } } } },
   { name: 'push_article_brief', description: "ACTION: create a FULL article brief as a row in the site's Article Writer table (the n8n-watched table) — Title + Keyword + the whole content plan in the Content Brief column, so the writer builds the article from the plan, not a bare keyword. Use when the user wants to turn a content plan (e.g. one you built from a link they pasted) into a real article. Pass `title`, `keyword`, and `brief` (the full plan as markdown/text: angle, outline, sections, FAQs, target length); optional `description` (meta) and `goal` (one-line angle). De-dupes by Title (re-pushing the same title updates the brief). Set `startWriting:true` ONLY when the user explicitly says to write/publish it now — that sets Status='Write Article' and n8n generates + publishes a LIVE article to WordPress (costs API credits, writes live); it requires the site to be write-armed. Default leaves Status blank so the user flips it themselves.", input_schema: { type: 'object', properties: { title: { type: 'string', description: 'the article title' }, keyword: { type: 'string', description: 'the primary target keyword' }, brief: { type: 'string', description: 'the full content plan / brief as markdown or text (angle, outline, sections, FAQs, target length)' }, description: { type: 'string', description: 'optional meta description / summary' }, goal: { type: 'string', description: 'optional one-line goal / angle of the article' }, startWriting: { type: 'boolean', description: "set true ONLY if the user explicitly asked to write/publish now — triggers n8n to generate + publish live to WordPress" } }, required: ['title', 'keyword', 'brief'] } },
@@ -175,9 +175,35 @@ function htmlToText(html) {
 //  1) OWN-SITE article → WordPress REST (post.content.rendered): the clean article body,
 //     bypassing the front-end bot-firewall (authenticated /wp-json) and JS rendering entirely.
 //  2) Direct real-browser-UA fetch + extraction — external pages, the common case.
-//  3) Hosted reader (r.jina.ai) that renders JS + defeats most bot-walls — for a JS-heavy or
-//     firewalled EXTERNAL page. Delivers what a headless-browser crawler would, with no
-//     Chromium/Python service to host.
+//  3) Firecrawl — hosted headless-browser render → clean markdown; the guaranteed reader
+//     for JS-heavy or bot-walled external pages a direct fetch can't get.
+//  4) r.jina.ai — free hosted reader, last-ditch fallback if Firecrawl is unset.
+// If every tier fails it returns { error: 'READ_FAILED' } so the caller REFUSES to invent content.
+
+// Firecrawl scrape: hosted headless browser (renders JS, defeats bot-walls) → clean main-content
+// markdown. Key stored ENCRYPTED in app_secrets (getAppSecret), resolved server-side, never sent
+// to the browser; env FIRECRAWL_API_KEY is a fallback. Returns { title, text } or null on any miss.
+async function firecrawlScrape(url, timeoutMs = 45000) {
+  let apiKey = null;
+  try { apiKey = await db.getAppSecret('firecrawl_api_key'); } catch (e) { apiKey = null; }
+  if (!apiKey) apiKey = process.env.FIRECRAWL_API_KEY || null;
+  if (!apiKey) return null;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch('https://api.firecrawl.dev/v1/scrape', {
+      method: 'POST', signal: ctrl.signal,
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, formats: ['markdown'], onlyMainContent: true }),
+    });
+    if (!r.ok) return null;
+    const j = await r.json().catch(() => null);
+    const md = j && j.success && j.data && (j.data.markdown || j.data.content);
+    const meta = (j && j.data && j.data.metadata) || {};
+    if (md && md.trim().length > 200) return { title: meta.title || meta.ogTitle || '', text: md.trim().slice(0, 24000) };
+    return null;
+  } catch (e) { return null; } finally { clearTimeout(t); }
+}
 async function readPage(url, siteId) {
   // 1) own-site via WP REST — read-only creds (a READ must not require write-armed).
   if (siteId) {
@@ -203,11 +229,16 @@ async function readPage(url, siteId) {
       }
     } catch (e) { /* fall through to fetch */ }
   }
-  // 2) direct browser-UA fetch + extraction.
+  // 2) direct browser-UA fetch + extraction (fast, free — the common case).
   const direct = await fetchPageText(url);
-  const blocked = /bot verification|captcha|checking your browser|attention required|cf-browser-verification|please enable javascript/i.test(direct.text || '');
+  const blocked = /bot verification|captcha|checking your browser|attention required|cf-browser-verification|please enable javascript|enable javascript to (?:run|view)/i.test(direct.text || '');
   if (!direct.error && direct.text && direct.text.length > 600 && !blocked) return { ...direct, via: 'direct' };
-  // 3) hosted reader fallback (renders JS + bypasses many walls; returns clean markdown/text).
+  // 3) Firecrawl — precisely when the direct fetch is blocked/thin ("the system cannot check it").
+  try {
+    const fc = await firecrawlScrape(url);
+    if (fc && fc.text && fc.text.length > 300) return { title: fc.title || direct.title || '', text: fc.text, url, via: 'firecrawl' };
+  } catch (e) { /* fall through */ }
+  // 4) r.jina.ai — free hosted reader, last-ditch fallback if Firecrawl is unset/unavailable.
   try {
     const rr = await fetchHtmlBounded('https://r.jina.ai/' + url, { timeoutMs: 25000 });
     if (rr.ok && rr.html && rr.html.length > 300) {
@@ -215,7 +246,10 @@ async function readPage(url, siteId) {
       if (text.length > 300) return { title: direct.title || '', text: text.slice(0, 24000), url, via: 'reader' };
     }
   } catch (e) { /* fall through */ }
-  return (direct.text && direct.text.length > 100) ? { ...direct, via: 'direct-thin' } : { title: direct.title || '', text: '', url, error: direct.error || 'the page is blocked or returns no readable content' };
+  // 5) A thin-but-real direct read is better than nothing (only if NOT a bot-wall page).
+  if (direct.text && direct.text.length > 400 && !blocked) return { ...direct, via: 'direct-thin' };
+  // 6) genuinely unreadable — LOUD failure so the model refuses to fabricate the contents.
+  return { title: direct.title || '', text: '', url, error: 'READ_FAILED', blocked: !!blocked };
 }
 const META_FIELD_MAP = { title: 'rank_math_title', meta_description: 'rank_math_description', canonical: 'rank_math_canonical_url' };
 // Meta key for a semantic field on THIS site's SEO plugin (mirrors audit-pipeline
@@ -234,7 +268,11 @@ export function metaKeyFor(field, seoPlugin) {
 async function runTool(name, input, siteId) {
   try {
     if (!siteId && name !== 'fetch_url') return 'No site is selected. Ask the user to pick an account first.';
-    if (name === 'fetch_url') { const p = await readPage(input.url, siteId); if (p.error) return `Could not read ${input.url} — ${p.error}. Ask the user to paste the content.`; return `Title: ${p.title}\nURL: ${p.url}\n\n${p.text}`; }
+    if (name === 'fetch_url') {
+      const p = await readPage(input.url, siteId);
+      if (p.error || !p.text) return `READ FAILED for ${input.url}${p.blocked ? ' (the page is behind a bot-wall / requires JavaScript)' : ''}. The page content is NOT available. Do NOT write, summarise, or invent anything about this page — you have not read it. Tell the user you could not read that URL and ask them to paste the article text (or try a different link).`;
+      return `Title: ${p.title}\nURL: ${p.url}\n\n${p.text}`;
+    }
 
     const site = await db.getSite(siteId);
     if (!site) return 'Site not found.';

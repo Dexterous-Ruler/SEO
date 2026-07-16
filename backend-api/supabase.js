@@ -61,6 +61,9 @@ let _anyAt = { v: null, exp: 0 };
 // n8n instance config (base URL + public API key). ONE instance serves every site,
 // so this is a single global credential (encrypted at rest in app_secrets).
 let _n8n = { v: null, exp: 0 };
+// Generic per-name cache for other global app_secrets (e.g. the Firecrawl API key),
+// so a hot path like readPage() doesn't decrypt on every call.
+const _secrets = new Map(); // name -> { v, exp }
 
 function headers(extra) {
   return Object.assign({
@@ -165,6 +168,23 @@ export const db = {
     await rpc('set_app_secret', { p_name: 'n8n_api_key', p_val: '', p_key: encKey() }).catch(() => {});
     await rpc('set_app_secret', { p_name: 'n8n_base_url', p_val: '', p_key: encKey() }).catch(() => {});
     return { ok: true };
+  },
+
+  // Generic encrypted app-secret accessors (same pgcrypto store as the n8n key).
+  // Used for global service keys like the Firecrawl API key. NEVER return the value
+  // to a browser route — resolve it server-side and use it there only. Cached 5 min.
+  async setAppSecret(name, val) {
+    _secrets.delete(name);
+    await rpc('set_app_secret', { p_name: String(name), p_val: String(val == null ? '' : val), p_key: encKey() });
+    return { ok: true };
+  },
+  async getAppSecret(name) {
+    const now = Date.now();
+    const hit = _secrets.get(name);
+    if (hit && hit.exp > now) return hit.v;
+    const v = await rpc('get_app_secret', { p_name: String(name), p_key: encKey() }).catch(() => null);
+    _secrets.set(name, { v: v || null, exp: now + 300000 });
+    return v || null;
   },
 
   // GSC credential (OAuth refresh token OR service-account JSON), encrypted.

@@ -3461,6 +3461,31 @@ const routes = {
     await db.clearN8nConfig().catch(() => {});
     return { ok: true, connected: false };
   },
+
+  // ── Firecrawl (robust page reader for the chat tool) ───────────────────────
+  // Store the API key ENCRYPTED in app_secrets, validated against Firecrawl first.
+  // Resolved server-side by readPage(); the key is NEVER returned to a browser.
+  'POST /firecrawl-connect': async (body) => {
+    const apiKey = String(body.apiKey || '').trim();
+    if (!apiKey) return { error: 'Provide the Firecrawl API key.' };
+    let ok = false, detail = '';
+    try {
+      const r = await fetch('https://api.firecrawl.dev/v1/team/credit-usage', { headers: { Authorization: `Bearer ${apiKey}` } });
+      ok = r.ok; if (!r.ok) detail = `Firecrawl rejected the key (HTTP ${r.status}).`;
+    } catch (e) { detail = 'Could not reach Firecrawl to validate the key: ' + (e && e.message || e); }
+    if (!ok) return { error: detail || 'Invalid Firecrawl key.' };
+    await db.setAppSecret('firecrawl_api_key', apiKey);
+    return { ok: true, connected: true };
+  },
+  // Is Firecrawl connected server-side? Never returns the key itself.
+  'POST /firecrawl-status': async () => {
+    const k = await db.getAppSecret('firecrawl_api_key').catch(() => null);
+    return { connected: !!k };
+  },
+  'POST /firecrawl-disconnect': async () => {
+    await db.setAppSecret('firecrawl_api_key', '').catch(() => {});
+    return { ok: true, connected: false };
+  },
   'POST /n8n-workflows': async (body) => {
     const { baseUrl, apiKey } = await n8nCreds(body);
     if (!baseUrl || !apiKey) return { error: 'Connect n8n first (base URL + API key).' };
@@ -3751,7 +3776,10 @@ setTimeout(function(){try{window.close();}catch(e){} if(!window.closed){location
           });
         }
       } catch (e) { /* best-effort */ }
-      sse('done', { reply: r.reply, toolsUsed: r.toolsUsed, conversationId: convoId, title });
+      // Deliver the authoritative api_history WITH this response so the browser sets its
+      // resume-memory synchronously — no separate load round-trip that a fast follow-up
+      // message can race (that race is what made the assistant "forget" a just-built plan).
+      sse('done', { reply: r.reply, toolsUsed: r.toolsUsed, conversationId: convoId, title, apiHistory: r.messages });
     } catch (e) {
       sse('error', { error: e.message });
     } finally {

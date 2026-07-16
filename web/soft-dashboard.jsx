@@ -5409,7 +5409,11 @@ function useChat(siteId) {
   const [busy,setBusy] = useState(false);
   const [convoId,setConvoId] = useState(null);
   const abortRef = useRef(null);
-  useEffect(()=>{ setMsgs([]); setHistory([]); setConvoId(null); },[siteId]);
+  // Mirror history in a ref so send() always reads the LATEST memory (never a stale
+  // closure). This is what stops the assistant "forgetting" a plan on a fast follow-up.
+  const historyRef = useRef([]);
+  const applyHistory = (h)=>{ const v=h||[]; historyRef.current=v; setHistory(v); };
+  useEffect(()=>{ setMsgs([]); applyHistory([]); setConvoId(null); },[siteId]);
   const stop = ()=>{ if(abortRef.current){ try{ abortRef.current.abort(); }catch(e){} } };
 
   // send: text + optional images. STREAMS the reply token-by-token via SSE.
@@ -5427,7 +5431,7 @@ function useChat(siteId) {
     try{
       const res=await fetch((cfg.engineApi!=null?cfg.engineApi:"http://localhost:8787")+"/chat-stream",{
         method:"POST", headers:{"Content-Type":"application/json"}, signal:ctrl.signal,
-        body:JSON.stringify({ siteId, text:t, images:imgs.map(i=>i.url), apiHistory:history, displayMessages:nextDisplay, conversationId:convoId }),
+        body:JSON.stringify({ siteId, text:t, images:imgs.map(i=>i.url), apiHistory:historyRef.current, displayMessages:nextDisplay, conversationId:convoId }),
       });
       const reader=res.body.getReader(); const dec=new TextDecoder(); let buf="";
       for(;;){
@@ -5439,8 +5443,12 @@ function useChat(siteId) {
           if(!ev||!dm) continue; let d; try{ d=JSON.parse(dm); }catch{ continue; }
           if(ev==="delta") apply(a=>({...a,text:a.text+d.text}));
           else if(ev==="tools") apply(a=>({...a,tools:[...new Set([...(a.tools||[]),...d.tools])]}));
-          else if(ev==="done"){ apply(a=>({...a,streaming:false,tools:d.toolsUsed||a.tools})); if(d.conversationId){ setConvoId(d.conversationId);
-              API.chatLoad(d.conversationId).then(rr=>{ if(rr.conversation&&rr.conversation.api_history) setHistory(rr.conversation.api_history); }).catch(()=>{}); } }
+          else if(ev==="done"){ apply(a=>({...a,streaming:false,tools:d.toolsUsed||a.tools}));
+              // Authoritative memory comes back WITH this response — set it synchronously so the
+              // next turn can't race a separate load round-trip (the old "forgot the plan" bug).
+              if(d.apiHistory) applyHistory(d.apiHistory);
+              if(d.conversationId){ setConvoId(d.conversationId);
+                if(!d.apiHistory) API.chatLoad(d.conversationId).then(rr=>{ if(rr.conversation&&rr.conversation.api_history) applyHistory(rr.conversation.api_history); }).catch(()=>{}); } }
           else if(ev==="error") apply(a=>({...a,text:(a.text||"")+"\n⚠️ "+d.error,streaming:false}));
         }
       }
@@ -5451,12 +5459,12 @@ function useChat(siteId) {
     }
     finally{ setBusy(false); abortRef.current=null; }
   };
-  const reset = ()=>{ setMsgs([]); setHistory([]); setConvoId(null); };
+  const reset = ()=>{ setMsgs([]); applyHistory([]); setConvoId(null); };
   // resume a saved conversation
   const load = (id)=>{
     API.chatLoad(id).then(r=>{
       const c=r.conversation; if(!c) return;
-      setMsgs(c.messages||[]); setHistory(c.api_history||[]); setConvoId(c.id);
+      setMsgs(c.messages||[]); applyHistory(c.api_history||[]); setConvoId(c.id);
     }).catch(()=>{});
   };
   return { msgs, busy, send, stop, reset, load, convoId };
