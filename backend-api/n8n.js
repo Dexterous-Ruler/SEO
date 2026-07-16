@@ -100,6 +100,17 @@ function setByPath(obj, path, value) {
   return obj;
 }
 
+// Read the value at a dot-path (mirror of setByPath) — used to capture the BEFORE
+// value of every edit so the change history can roll a workflow's prompts back.
+function getByPath(obj, path) {
+  let cur = obj;
+  for (const seg of String(path).split('.')) {
+    if (cur == null || typeof cur !== 'object') return undefined;
+    cur = cur[/^\d+$/.test(seg) ? Number(seg) : seg];
+  }
+  return cur;
+}
+
 // Which n8n settings keys the PUT endpoint tolerates (everything else 400s).
 const ALLOWED_SETTINGS = [
   'saveExecutionProgress', 'saveManualExecutions', 'saveDataErrorExecution',
@@ -254,7 +265,7 @@ async function listWorkflows(baseUrl, apiKey) {
       if (!cursor || !rows.length) break;
     }
     const workflows = raw
-      .map((w) => { const c = classify(w.name); return { id: w.id, name: w.name, active: !!w.active, site: c.site, type: c.type, isWriter: c.isWriter }; })
+      .map((w) => { const c = classify(w.name); return { id: w.id, name: w.name, active: !!w.active, site: c.site, type: c.type, isWriter: c.isWriter, updatedAt: w.updatedAt || null }; })
       .sort((a, b) => String(a.name).localeCompare(String(b.name)));
     const writerCount = workflows.filter((w) => w.isWriter).length;
     return { workflows, writerCount, total: workflows.length, structure: reconcilePlan(workflows) };
@@ -304,10 +315,15 @@ async function updatePrompts(baseUrl, apiKey, id, edits) {
     const nodes = Array.isArray(wf.nodes) ? wf.nodes : [];
     const byId = new Map(nodes.map((n) => [n.id, n]));
 
+    // Capture the BEFORE value of every path being changed — the caller records these
+    // as an undo-history entry so any save can be rolled back.
+    const captured = [];
     for (const edit of list) {
       const node = byId.get(edit.nodeId);
       if (!node) return { error: `Node not found: ${edit.nodeId}` };
       if (!node.parameters || typeof node.parameters !== 'object') node.parameters = {};
+      const before = getByPath(node.parameters, edit.path);
+      captured.push({ nodeId: edit.nodeId, nodeName: node.name, path: edit.path, before: before === undefined ? null : before, after: edit.value });
       setByPath(node.parameters, edit.path, edit.value);
     }
 
@@ -319,7 +335,7 @@ async function updatePrompts(baseUrl, apiKey, id, edits) {
     };
     const put = await api('PUT', baseUrl, apiKey, `/workflows/${encodeURIComponent(id)}`, putBody);
     if (!put.ok) return apiError(put.status, put.data, apiKey);
-    return { ok: true, updated: list.length };
+    return { ok: true, updated: list.length, captured, workflowName: wf.name };
   } catch (e) {
     return apiError(0, null, apiKey, e);
   }

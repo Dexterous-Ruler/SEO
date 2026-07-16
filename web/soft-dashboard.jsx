@@ -1403,6 +1403,7 @@ function N8nScreen({ ctx }){
   const [busy,setBusy] = useState("");
   const [runOut,setRunOut] = useState(null);
   const [errs,setErrs] = useState(null);
+  const [hist,setHist] = useState([]);            // prompt-change history (undo) for the selected workflow
   const [showAll,setShowAll] = useState(false);   // writers-only by default; toggle reveals every workflow
   const [maxPrompt,setMaxPrompt] = useState(null);  // { k, label, nodeName, value } — prompt shown maximized
   const eKey=(nodeId,path)=>nodeId+"\n"+path;
@@ -1450,13 +1451,15 @@ function N8nScreen({ ctx }){
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
   };
   const loadWf = (id)=>{
-    setWfId(id); setWf(null); setEdits({}); setRunOut(null); setErrs(null);
+    setWfId(id); setWf(null); setEdits({}); setRunOut(null); setErrs(null); setHist([]);
     if(!id) return;
     setBusy("load");
     API.n8nWorkflowPrompts(base.trim(),undefined,id).then(r=>{
       if(r&&r.error){ ctx.toast("n8n: "+r.error,"clay"); return; }
       setWf(r);
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
+    // change history (undo) — separate fetch, never blocks the prompts themselves
+    API.n8nPromptHistory(id).then(r=>setHist((r&&r.history)||[])).catch(()=>{});
   };
   const save = ()=>{
     const list = Object.keys(edits).map(k=>{ const [nodeId,path]=k.split("\n"); return { nodeId, path, value: edits[k] }; });
@@ -1464,8 +1467,17 @@ function N8nScreen({ ctx }){
     setBusy("save");
     API.n8nUpdatePrompts(base.trim(),undefined,wfId,list).then(r=>{
       if(r&&r.error){ ctx.toast("n8n save: "+r.error,"clay"); return; }
-      ctx.toast("Saved "+((r&&r.updated)||list.length)+" prompt(s) to n8n ✓","teal");
+      ctx.toast("Saved "+((r&&r.updated)||list.length)+" prompt(s) to n8n ✓ — undo available in Change history","teal");
       setEdits({}); loadWf(wfId);
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
+  };
+  // Roll the workflow's prompts back to the values BEFORE a recorded save.
+  const rollback = (hid)=>{
+    setBusy("rollback");
+    API.n8nPromptRollback(base.trim(),undefined,wfId,hid).then(r=>{
+      if(r&&r.error){ ctx.toast("n8n rollback: "+r.error,"clay"); return; }
+      ctx.toast("Rolled back "+((r&&r.restored)||"")+" prompt(s) ✓","teal");
+      loadWf(wfId);
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
   };
   const run = ()=>{
@@ -1624,13 +1636,38 @@ function N8nScreen({ ctx }){
           </div>
           {wf && (
             <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap", marginTop:10 }}>
-              {(()=>{ const sel=(workflows||[]).find(w=>w.id===wfId); return sel? (<>{sel.site!=="Other"&&<Chip tone="teal" size="sm">{sel.site}</Chip>}{sel.type&&<Chip tone="gray" size="sm">{sel.type}</Chip>}<Chip tone={sel.active?"teal":"gray"} size="sm">{sel.active?"active":"inactive"}</Chip>{isDup(sel)&&<Chip tone="clay" size="sm">duplicate ⚠</Chip>}</>):null; })()}
+              {(()=>{ const sel=(workflows||[]).find(w=>w.id===wfId); return sel? (<>{sel.site!=="Other"&&<Chip tone="teal" size="sm">{sel.site}</Chip>}{sel.type&&<Chip tone="gray" size="sm">{sel.type}</Chip>}<Chip tone={sel.active?"teal":"gray"} size="sm">{sel.active?"active":"inactive"}</Chip>{isDup(sel)&&<Chip tone="clay" size="sm">duplicate ⚠</Chip>}{sel.updatedAt&&<span style={{ fontSize:11.5, color:"var(--faint)" }} title="Last saved in n8n (any editor, incl. the n8n UI)">· modified {new Date(sel.updatedAt).toLocaleString()}</span>}</>):null; })()}
               <NeoButton kind="primary" size="sm" icon={busy==="run"?undefined:"bolt"} disabled={busy==="run"||!wf.hasWebhook} onClick={run}>{busy==="run"&&<Icon name="cog" size={14} className="audit-spin" />}Run</NeoButton>
               <NeoButton kind="soft" size="sm" icon={busy==="errors"?undefined:"radar"} disabled={busy==="errors"} onClick={loadErrs}>{busy==="errors"&&<Icon name="cog" size={14} className="audit-spin" />}Errors</NeoButton>
               <NeoButton kind="soft" size="sm" icon={busy==="save"?undefined:"check"} disabled={busy==="save"||!nEdits} onClick={save}>{busy==="save"&&<Icon name="cog" size={14} className="audit-spin" />}Save prompts{nEdits?(" ("+nEdits+")"):""}</NeoButton>
             </div>
           )}
           {wf && !wf.hasWebhook && <div style={{ marginTop:8, fontSize:12, color:"var(--muted)" }}>No webhook trigger — Run from the n8n editor (this one is manual/schedule).</div>}
+        </SoftCard>
+      )}
+
+      {/* Change history — every prompt save from this panel is recorded (last 10) and can
+          be rolled back. Edits made directly in the n8n editor can't be hooked, but the
+          workflow's "modified" stamp above reveals them. */}
+      {wf && hist.length>0 && (
+        <SoftCard hover={false}>
+          <div style={{ fontSize:13, fontWeight:700, marginBottom:2 }}>Change history</div>
+          <div style={{ fontSize:12, color:"var(--muted)", marginBottom:10 }}>
+            Last {hist.length} prompt save{hist.length===1?"":"s"} from this panel — <b>Undo</b> restores the values from before that save. Rollbacks are recorded too, so an undo can itself be undone. <span style={{ color:"var(--faint)" }}>(Edits made directly in the n8n editor aren't captured here.)</span>
+          </div>
+          {hist.map(h=>{
+            const es=h.edits||[]; const nodes=[...new Set(es.map(e=>e.nodeName||e.nodeId))];
+            return (
+              <div key={h.id} style={{ display:"flex", gap:10, alignItems:"center", padding:"9px 11px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", marginBottom:8 }}>
+                <Chip tone={h.source==="rollback"?"gold":"teal"} size="sm">{h.source==="rollback"?"rollback":"edit"}</Chip>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:12.5, color:"var(--ink)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{es.length} prompt{es.length===1?"":"s"} · {nodes.slice(0,3).join(", ")}{nodes.length>3?" +"+(nodes.length-3):""}</div>
+                  <div style={{ fontSize:11.5, color:"var(--faint)" }}>{new Date(h.created_at).toLocaleString()}</div>
+                </div>
+                <NeoButton kind="soft" size="sm" disabled={busy==="rollback"} onClick={()=>rollback(h.id)}>{busy==="rollback"&&<Icon name="cog" size={13} className="audit-spin" />}Undo</NeoButton>
+              </div>
+            );
+          })}
         </SoftCard>
       )}
 

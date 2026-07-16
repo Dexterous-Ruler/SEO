@@ -270,6 +270,26 @@ export const db = {
     return rest(`chat_conversations?id=eq.${id}`, { method: 'DELETE' });
   },
 
+  // ---- n8n prompt-edit history (undo/rollback — last 10 entries per workflow) ----
+  // edits jsonb = [{nodeId,nodeName,path,before,after}] captured at save time.
+  async addN8nPromptHistory(row) {
+    const o = await rest('n8n_prompt_history', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(row) });
+    return Array.isArray(o) ? o[0] : o;
+  },
+  async listN8nPromptHistory(workflowId, limit = 10) {
+    return rest(`n8n_prompt_history?workflow_id=eq.${encodeURIComponent(workflowId)}&select=id,workflow_name,edits,source,created_at&order=created_at.desc&limit=${limit}`);
+  },
+  async getN8nPromptHistoryRow(id) {
+    const o = await rest(`n8n_prompt_history?id=eq.${encodeURIComponent(id)}&select=*`);
+    return o && o[0];
+  },
+  async pruneN8nPromptHistory(workflowId, keep = 10) {
+    const extra = await rest(`n8n_prompt_history?workflow_id=eq.${encodeURIComponent(workflowId)}&select=id&order=created_at.desc&offset=${keep}`).catch(() => []);
+    const ids = (extra || []).map((r) => r.id);
+    if (ids.length) await rest(`n8n_prompt_history?id=in.(${ids.join(',')})`, { method: 'DELETE' }).catch(() => {});
+    return { pruned: ids.length };
+  },
+
   // ---- proposals / audits / activity ----
   async createProposal(row) {
     const out = await rest('proposals', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(row) });

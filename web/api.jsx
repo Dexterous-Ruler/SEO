@@ -128,6 +128,8 @@
     n8nUpdatePrompts(baseUrl, apiKey, id, edits) { return engine("/n8n-update-prompts", { baseUrl, apiKey, id, edits }); },
     n8nRun(baseUrl, apiKey, id, payload) { return engine("/n8n-run", { baseUrl, apiKey, id, payload }); },
     n8nExecutions(baseUrl, apiKey, id, status) { return engine("/n8n-executions", { baseUrl, apiKey, id, status }); },
+    n8nPromptHistory(id) { return engine("/n8n-prompt-history", { id }); },
+    n8nPromptRollback(baseUrl, apiKey, id, historyId) { return engine("/n8n-prompt-rollback", { baseUrl, apiKey, id, historyId }); },
     // Auto-draft: push the top-N scored opportunities into the existing Airtable Article Writer
     // (n8n watches it → drafts + publishes → back in Approve Changes). Flips those rows → queued.
     engineAutodraft(siteId, opts) { return engine("/engine-autodraft", Object.assign({ siteId }, opts || {})); },

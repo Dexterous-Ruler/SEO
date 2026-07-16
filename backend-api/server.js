@@ -3507,7 +3507,41 @@ const routes = {
     const { baseUrl, apiKey } = await n8nCreds(body);
     if (!baseUrl || !apiKey) return { error: 'Connect n8n first (base URL + API key).' };
     if (!body.id || !Array.isArray(body.edits)) return { error: 'id + edits[] required' };
-    return n8n.updatePrompts(baseUrl, apiKey, body.id, body.edits);
+    const r = await n8n.updatePrompts(baseUrl, apiKey, body.id, body.edits);
+    // Record the change as an undo-history entry (before/after per path, last 10 per
+    // workflow). Best-effort: history must never block or fail the save itself.
+    if (r && r.ok && Array.isArray(r.captured) && r.captured.length) {
+      try {
+        await db.addN8nPromptHistory({ workflow_id: String(body.id), workflow_name: r.workflowName || null, edits: r.captured, source: 'dashboard' });
+        await db.pruneN8nPromptHistory(String(body.id), 10);
+      } catch (e) { /* best-effort */ }
+    }
+    return r;
+  },
+  // Undo history for one workflow's prompt edits (newest first, capped at 10).
+  'POST /n8n-prompt-history': async (body) => {
+    if (!body.id) return { error: 'workflow id required' };
+    const rows = await db.listN8nPromptHistory(String(body.id), 10).catch(() => []);
+    return { history: rows || [] };
+  },
+  // Roll a workflow's prompts back to the values BEFORE a recorded edit. The rollback
+  // is itself recorded (source='rollback'), so it can be undone too.
+  'POST /n8n-prompt-rollback': async (body) => {
+    const { baseUrl, apiKey } = await n8nCreds(body);
+    if (!baseUrl || !apiKey) return { error: 'Connect n8n first (base URL + API key).' };
+    if (!body.id || !body.historyId) return { error: 'id + historyId required' };
+    const row = await db.getN8nPromptHistoryRow(body.historyId).catch(() => null);
+    if (!row || String(row.workflow_id) !== String(body.id)) return { error: 'History entry not found for this workflow.' };
+    const edits = (Array.isArray(row.edits) ? row.edits : []).map((c) => ({ nodeId: c.nodeId, path: c.path, value: c.before == null ? '' : c.before }));
+    if (!edits.length) return { error: 'Nothing to roll back in this entry.' };
+    const r = await n8n.updatePrompts(baseUrl, apiKey, body.id, edits);
+    if (r && r.ok && Array.isArray(r.captured) && r.captured.length) {
+      try {
+        await db.addN8nPromptHistory({ workflow_id: String(body.id), workflow_name: r.workflowName || null, edits: r.captured, source: 'rollback' });
+        await db.pruneN8nPromptHistory(String(body.id), 10);
+      } catch (e) { /* best-effort */ }
+    }
+    return (r && r.ok) ? { ok: true, restored: edits.length } : r;
   },
   'POST /n8n-run': async (body) => {
     const { baseUrl, apiKey } = await n8nCreds(body);
