@@ -80,7 +80,10 @@ async function fetchHtmlBounded(url, { timeoutMs = 15000, maxChars = 1_500_000 }
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': 'wp-seo-agent/2.0 (assistant)' }, redirect: 'follow', signal: ctrl.signal });
+    // Browser UA: several of the user's sites sit behind a bot-firewall (Hostinger hcdn /
+    // Wordfence) that serves a "Bot Verification" page to non-browser agents — a bot UA
+    // meant the assistant read the challenge page instead of the article.
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36', Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' }, redirect: 'follow', signal: ctrl.signal });
     let html = await res.text();
     if (html.length > maxChars) html = html.slice(0, maxChars);
     return { ok: res.ok, status: res.status, html };
@@ -94,8 +97,20 @@ async function fetchPageText(url) {
   try { ({ html } = await fetchHtmlBounded(url)); }
   catch (e) { return { title: '', text: '', url, error: e.name === 'AbortError' ? 'timed out after 15s' : e.message }; }
   const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || '';
-  const text = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-  return { title: title.trim(), text: text.slice(0, 6000), url };
+  // Strip non-content chrome (nav/header/footer/aside/forms/svg/comments) BEFORE the tag
+  // strip, and keep a generous window. On heavy Elementor pages the article body sits ~50%
+  // down the HTML, so the old 6000-char cap returned the site menu + a truncated fragment —
+  // the model then "couldn't read the article / extract its point". 24k covers a full article.
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<(nav|header|footer|aside|form|noscript|svg)\b[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
+    .replace(/&amp;/g, '&').replace(/&nbsp;/gi, ' ').replace(/&[a-z]+;/gi, ' ')
+    .replace(/\s+/g, ' ').trim();
+  return { title: title.trim(), text: text.slice(0, 24000), url };
 }
 
 // ── Tool definitions exposed to Claude ─────────────────────────────────────
