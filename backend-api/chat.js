@@ -583,13 +583,16 @@ export async function chat({ messages = [], userText, images = [], siteId, siteC
   const userContent = buildUserContent(userText, images);
   if (userContent) convo.push({ role: 'user', content: userContent });
 
+  const MAX_STEPS = 8;  // non-stream must land inside the ~100s edge cap → keep tighter than the stream path
   let guard = 0;
-  while (guard++ < 8) {
+  while (guard++ < MAX_STEPS) {
+    // Final step: drop tools so the model answers in text from what it has (no dead-end).
+    const lastStep = guard >= MAX_STEPS;
     // max_tokens 8000 (was 3500): the assistant is told to produce full briefs/articles,
     // which routinely exceed 3500 output tokens and were being truncated mid-sentence.
     // Kept moderate on the NON-streaming path (no keepalive → the whole reply must land
     // inside the ~100s edge cap); the streaming path below runs a higher ceiling.
-    const res = await anthropicFetch({ model: MODEL, max_tokens: 8000, system, tools: TOOLS, messages: convo });
+    const res = await anthropicFetch({ model: MODEL, max_tokens: 8000, system, tools: lastStep ? undefined : TOOLS, messages: convo });
     const data = await res.json();
     if (!res.ok) throw new Error(`Claude chat ${res.status}: ${data.error?.message || ''}`);
 
@@ -645,13 +648,17 @@ export async function chatStream({ messages = [], userText, images = [], siteId,
   if (userContent) convo.push({ role: 'user', content: userContent });
 
   const toolsUsed = [];
+  const MAX_STEPS = 12;  // was 8 — heavy briefs (fetch + several research tools + write) need headroom
   let guard = 0;
-  while (guard++ < 8) {
+  while (guard++ < MAX_STEPS) {
+    // On the final permitted step, DROP the tools so the model must answer in text from what
+    // it already gathered — a real deliverable — instead of dead-ending at "too many steps".
+    const lastStep = guard >= MAX_STEPS;
     // max_tokens 16000 (was 3500): streaming keeps the socket alive with data, so the
     // low ceiling had no HTTP-timeout justification — it just truncated long briefs/
     // articles the assistant is instructed to produce. 16000 gives generous headroom
     // for realistic deliverables (it's a ceiling; short replies are unaffected).
-    const res = await anthropicFetch({ model: MODEL, max_tokens: 16000, system, tools: TOOLS, messages: convo }, { stream: true });
+    const res = await anthropicFetch({ model: MODEL, max_tokens: 16000, system, tools: lastStep ? undefined : TOOLS, messages: convo }, { stream: true });
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(`Claude stream ${res.status}: ${e.error?.message || ''}`); }
 
     // Parse the SSE stream, reconstructing content blocks + emitting text deltas.
