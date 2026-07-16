@@ -2417,6 +2417,37 @@ const routes = {
     return { status: 'running', at: j.at };
   },
 
+  // Append a responsive YouTube embed to a post/page (classic/Gutenberg HTML — e.g. the
+  // n8n-authored posts; NOT for Elementor layouts, which store content as JSON). Idempotent
+  // (skips when the video id is already in the content). Inserted just before the FIRST <h2>
+  // (i.e. right after the intro), appended at the end if the post has no <h2>. WordPress
+  // keeps a revision, so /content-restore is the undo.
+  'POST /embed-video': async (body) => {
+    const pageUrl = body.pageUrl || body.url;
+    const vidUrl = String(body.videoUrl || '');
+    const m = vidUrl.match(/(?:youtube\.com\/watch\?(?:.*&)?v=|youtu\.be\/|youtube\.com\/embed\/)([A-Za-z0-9_-]{6,20})/);
+    if (!body.siteId || !pageUrl || !m) return { error: 'siteId, pageUrl and a valid YouTube videoUrl are required' };
+    const videoId = m[1];
+    let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
+    const site = await db.getSite(body.siteId).catch(() => null);
+    const wp = new WordPressClient(creds);
+    let found = null; try { found = await wp.resolvePostByUrl(pageUrl); } catch (e) {}
+    if (!found || !found.id) return { error: 'Could not match this URL to a WordPress post/page.' };
+    const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=id,title,content`);
+    const raw = String((post.content && (post.content.raw != null ? post.content.raw : post.content.rendered)) || '');
+    if (!raw) return { error: 'Could not read the post content.' };
+    if (raw.includes(videoId)) return { ok: true, already: true, postId: found.id, videoId };
+    const safeTitle = String(body.title || 'Fast ILA — video guide').replace(/"/g, '&quot;');
+    const embed = `\n\n<figure class="yt-embed" style="margin:28px 0;"><div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:12px;"><iframe src="https://www.youtube-nocookie.com/embed/${videoId}" title="${safeTitle}" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy"></iframe></figure>\n\n`;
+    const h2 = raw.search(/<h2[\s>]/i);
+    const content = h2 > 0 ? raw.slice(0, h2) + embed + raw.slice(h2) : raw + embed;
+    await wp.request(`/${found.type}/${found.id}`, { method: 'POST', body: { content } });
+    const check = await wp.request(`/${found.type}/${found.id}?_fields=content`).catch(() => null);
+    const stuck = !!(check && check.content && String(check.content.rendered || '').includes(videoId));
+    if (site) await db.logActivity({ site_id: site.id, type: stuck ? 'verified' : 'warning', actor: 'Agent', icon: 'sparkles', text: `Embedded YouTube video into “${((post.title && post.title.rendered) || pageUrl).slice(0, 70)}”`, meta: 'youtube ' + videoId + (stuck ? ' · verified' : ' · not visible in render') }).catch(() => {});
+    return { ok: true, postId: found.id, type: found.type, videoId, verified: stuck };
+  },
+
   // Undo a bad auto-apply: restore a page's PREVIOUS WordPress revision — the one-click
   // revert for when a rewrite broke the layout. `list:true` returns recent revisions with a
   // text preview so the UI can offer a picker; otherwise restores `revisionId` (or the
