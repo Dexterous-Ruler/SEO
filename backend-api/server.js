@@ -1223,11 +1223,17 @@ const routes = {
           const c = await db.createConversation(body.siteId, title);
           convoId = c.id;
         }
-        await db.saveConversation(convoId, {
+        const saveRow = {
           messages: [...display, { role: 'assistant', text: r.reply, tools: r.toolsUsed || [] }],
-          apiHistory: r.messages,
-          messageCount: (display.length || 0) + 1,
-        });
+          apiHistory: r.messages, messageCount: (display.length || 0) + 1, siteId: body.siteId,
+        };
+        const saved = await db.saveConversation(convoId, saveRow);
+        if (!saved && body.conversationId) {
+          // Supplied conversationId isn't this site's → don't cross-write; persist to a fresh one.
+          const c = await db.createConversation(body.siteId, (body.text || 'New chat').slice(0, 60));
+          convoId = c.id;
+          await db.saveConversation(convoId, saveRow);
+        }
       }
     } catch (e) { /* persistence best-effort */ }
     return { ...r, conversationId: convoId };
@@ -3770,10 +3776,19 @@ setTimeout(function(){try{window.close();}catch(e){} if(!window.closed){location
             const c = await db.createConversation(body.siteId, title || (body.text || 'New chat').slice(0, 60));
             convoId = c.id;
           }
-          await db.saveConversation(convoId, {
+          const saveRow = {
             messages: [...display, { role: 'assistant', text: r.reply, tools: r.toolsUsed || [] }],
-            apiHistory: r.messages, messageCount: (display.length || 0) + 1,
-          });
+            apiHistory: r.messages, messageCount: (display.length || 0) + 1, siteId: body.siteId,
+          };
+          const saved = await db.saveConversation(convoId, saveRow);
+          if (!saved && body.conversationId) {
+            // The supplied conversationId does not belong to this site (raced/buggy client) → do
+            // NOT cross-write; start a fresh conversation for this site and persist there instead.
+            title = await chatbot.generateTitle(body.text, r.reply);
+            const c = await db.createConversation(body.siteId, title || (body.text || 'New chat').slice(0, 60));
+            convoId = c.id;
+            await db.saveConversation(convoId, saveRow);
+          }
         }
       } catch (e) { /* best-effort */ }
       // Deliver the authoritative api_history WITH this response so the browser sets its

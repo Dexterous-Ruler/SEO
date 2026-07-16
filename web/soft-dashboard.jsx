@@ -5413,13 +5413,21 @@ function useChat(siteId) {
   // closure). This is what stops the assistant "forgetting" a plan on a fast follow-up.
   const historyRef = useRef([]);
   const applyHistory = (h)=>{ const v=h||[]; historyRef.current=v; setHistory(v); };
-  useEffect(()=>{ setMsgs([]); applyHistory([]); setConvoId(null); },[siteId]);
+  // Generation counter: any context change (site switch, New chat, resume) bumps it and aborts
+  // the in-flight stream, so a late response from a PREVIOUS context can never write its history/
+  // convoId into the new one (cross-client leak). Every send tags itself with the current gen and
+  // gates all its state writes on it.
+  const genRef = useRef(0);
+  const invalidate = ()=>{ genRef.current++; if(abortRef.current){ try{ abortRef.current.abort(); }catch(e){} abortRef.current=null; } setBusy(false); };
+  useEffect(()=>{ invalidate(); setMsgs([]); applyHistory([]); setConvoId(null); },[siteId]);
   const stop = ()=>{ if(abortRef.current){ try{ abortRef.current.abort(); }catch(e){} } };
 
   // send: text + optional images. STREAMS the reply token-by-token via SSE.
   const send = async (text, images)=>{
     const t=(text||"").trim(); const imgs=(images||[]);
     if((!t&&!imgs.length)||busy||!siteId) return;
+    const myGen=genRef.current;             // this send belongs to the current context…
+    const fresh=()=>genRef.current===myGen; // …still current? (no site switch / New chat / resume since)
     const userMsg={ role:"user", text:t, images:imgs.map(i=>i.url) };
     const nextDisplay=[...msgs,userMsg];
     // add the user msg + an empty assistant msg we stream into
@@ -5427,7 +5435,7 @@ function useChat(siteId) {
     setBusy(true);
     const cfg=window.SENTINEL_CONFIG||{};
     const ctrl=new AbortController(); abortRef.current=ctrl;
-    const apply=(fn)=>setMsgs(m=>{ const a=[...m]; const last=a[a.length-1]; if(last&&last.role==="assistant") a[a.length-1]=fn(last); return a; });
+    const apply=(fn)=>{ if(!fresh()) return; setMsgs(m=>{ const a=[...m]; const last=a[a.length-1]; if(last&&last.role==="assistant") a[a.length-1]=fn(last); return a; }); };
     try{
       const res=await fetch((cfg.engineApi!=null?cfg.engineApi:"http://localhost:8787")+"/chat-stream",{
         method:"POST", headers:{"Content-Type":"application/json"}, signal:ctrl.signal,
@@ -5444,24 +5452,26 @@ function useChat(siteId) {
           if(ev==="delta") apply(a=>({...a,text:a.text+d.text}));
           else if(ev==="tools") apply(a=>({...a,tools:[...new Set([...(a.tools||[]),...d.tools])]}));
           else if(ev==="done"){ apply(a=>({...a,streaming:false,tools:d.toolsUsed||a.tools}));
-              // Authoritative memory comes back WITH this response — set it synchronously so the
-              // next turn can't race a separate load round-trip (the old "forgot the plan" bug).
-              if(d.apiHistory) applyHistory(d.apiHistory);
-              if(d.conversationId){ setConvoId(d.conversationId);
-                if(!d.apiHistory) API.chatLoad(d.conversationId).then(rr=>{ if(rr.conversation&&rr.conversation.api_history) applyHistory(rr.conversation.api_history); }).catch(()=>{}); } }
+              // Only adopt this response's memory/convo if the context hasn't changed since we sent
+              // it — otherwise a stale stream would poison a DIFFERENT site's chat (cross-client leak).
+              if(fresh()){
+                if(d.apiHistory) applyHistory(d.apiHistory);
+                if(d.conversationId){ setConvoId(d.conversationId);
+                  if(!d.apiHistory) API.chatLoad(d.conversationId).then(rr=>{ if(fresh()&&rr.conversation&&rr.conversation.api_history) applyHistory(rr.conversation.api_history); }).catch(()=>{}); } } }
           else if(ev==="error") apply(a=>({...a,text:(a.text||"")+"\n⚠️ "+d.error,streaming:false}));
         }
       }
       apply(a=>({...a,streaming:false}));
     }catch(e){
       if(e.name==="AbortError"){ apply(a=>({...a,text:(a.text||"")+(a.text?"\n\n_(stopped)_":"_(stopped)_"),streaming:false,stopped:true})); }
-      else setMsgs(m=>{ const a=[...m]; const last=a[a.length-1]; if(last&&last.role==="assistant"&&!last.text) a[a.length-1]={...last,text:"⚠️ "+e.message,streaming:false}; return a; });
+      else if(fresh()) setMsgs(m=>{ const a=[...m]; const last=a[a.length-1]; if(last&&last.role==="assistant"&&!last.text) a[a.length-1]={...last,text:"⚠️ "+e.message,streaming:false}; return a; });
     }
-    finally{ setBusy(false); abortRef.current=null; }
+    finally{ if(fresh()){ setBusy(false); abortRef.current=null; } }
   };
-  const reset = ()=>{ setMsgs([]); applyHistory([]); setConvoId(null); };
-  // resume a saved conversation
+  const reset = ()=>{ invalidate(); setMsgs([]); applyHistory([]); setConvoId(null); };
+  // resume a saved conversation (abort any in-flight stream first so it can't clobber the load)
   const load = (id)=>{
+    invalidate();
     API.chatLoad(id).then(r=>{
       const c=r.conversation; if(!c) return;
       setMsgs(c.messages||[]); applyHistory(c.api_history||[]); setConvoId(c.id);

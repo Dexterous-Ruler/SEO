@@ -254,13 +254,16 @@ export const db = {
     const o = await rest('chat_conversations', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ site_id: siteId, title: title || 'New chat' }) });
     return Array.isArray(o) ? o[0] : o;
   },
-  async saveConversation(id, { title, messages, apiHistory, messageCount }) {
+  async saveConversation(id, { title, messages, apiHistory, messageCount, siteId }) {
     const patch = { updated_at: new Date().toISOString() };
     if (title !== undefined) patch.title = title;
     if (messages !== undefined) patch.messages = messages;
     if (apiHistory !== undefined) patch.api_history = apiHistory;
     if (messageCount !== undefined) patch.message_count = messageCount;
-    const o = await rest(`chat_conversations?id=eq.${id}`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(patch) });
+    // Scope the write to the owning site when known → a mismatched convoId (from a raced/buggy
+    // client) updates 0 rows instead of cross-writing into another tenant's conversation.
+    const scope = siteId ? `&site_id=eq.${siteId}` : '';
+    const o = await rest(`chat_conversations?id=eq.${id}${scope}`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(patch) });
     return Array.isArray(o) ? o[0] : o;
   },
   async deleteConversation(id) {

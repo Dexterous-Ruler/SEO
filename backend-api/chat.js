@@ -180,10 +180,18 @@ function htmlToText(html) {
 //  4) r.jina.ai — free hosted reader, last-ditch fallback if Firecrawl is unset.
 // If every tier fails it returns { error: 'READ_FAILED' } so the caller REFUSES to invent content.
 
+// Detect a bot-wall / JS-challenge interstitial. These pages are SHORT; a long real article
+// that merely mentions "captcha"/"enable JavaScript" (a JS tutorial, a cookie notice) is NOT a
+// wall — so gate on length to avoid false-positives that would wrongly force READ_FAILED.
+const CHALLENGE_RE = /bot verification|are you a robot|checking your browser|attention required|cf-browser-verification|please enable javascript|enable javascript to (?:run|view)|verify you are human|target url returned error|access denied/i;
+function looksBlocked(text) { const t = String(text || ''); return t.length < 2000 && CHALLENGE_RE.test(t); }
+
 // Firecrawl scrape: hosted headless browser (renders JS, defeats bot-walls) → clean main-content
 // markdown. Key stored ENCRYPTED in app_secrets (getAppSecret), resolved server-side, never sent
 // to the browser; env FIRECRAWL_API_KEY is a fallback. Returns { title, text } or null on any miss.
-async function firecrawlScrape(url, timeoutMs = 45000) {
+// 20s cap keeps the worst-case serial reader chain (direct 15s + fc 20s + jina 15s ≈ 50s) safely
+// under the non-stream /chat 95s request budget.
+async function firecrawlScrape(url, timeoutMs = 20000) {
   let apiKey = null;
   try { apiKey = await db.getAppSecret('firecrawl_api_key'); } catch (e) { apiKey = null; }
   if (!apiKey) apiKey = process.env.FIRECRAWL_API_KEY || null;
@@ -231,23 +239,26 @@ async function readPage(url, siteId) {
   }
   // 2) direct browser-UA fetch + extraction (fast, free — the common case).
   const direct = await fetchPageText(url);
-  const blocked = /bot verification|captcha|checking your browser|attention required|cf-browser-verification|please enable javascript|enable javascript to (?:run|view)/i.test(direct.text || '');
+  const blocked = looksBlocked(direct.text);
   if (!direct.error && direct.text && direct.text.length > 600 && !blocked) return { ...direct, via: 'direct' };
   // 3) Firecrawl — precisely when the direct fetch is blocked/thin ("the system cannot check it").
   try {
     const fc = await firecrawlScrape(url);
-    if (fc && fc.text && fc.text.length > 300) return { title: fc.title || direct.title || '', text: fc.text, url, via: 'firecrawl' };
+    if (fc && fc.text && fc.text.length > 300 && !looksBlocked(fc.text)) return { title: fc.title || direct.title || '', text: fc.text, url, via: 'firecrawl' };
   } catch (e) { /* fall through */ }
   // 4) r.jina.ai — free hosted reader, last-ditch fallback if Firecrawl is unset/unavailable.
+  //    It answers 200 even for pages it couldn't fetch (its own notice), so run the SAME
+  //    challenge check on its body — otherwise a notice page would be handed back as content.
   try {
-    const rr = await fetchHtmlBounded('https://r.jina.ai/' + url, { timeoutMs: 25000 });
+    const rr = await fetchHtmlBounded('https://r.jina.ai/' + url, { timeoutMs: 15000 });
     if (rr.ok && rr.html && rr.html.length > 300) {
       const text = rr.html.replace(/\r/g, '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
-      if (text.length > 300) return { title: direct.title || '', text: text.slice(0, 24000), url, via: 'reader' };
+      if (text.length > 300 && !looksBlocked(text)) return { title: direct.title || '', text: text.slice(0, 24000), url, via: 'reader' };
     }
   } catch (e) { /* fall through */ }
-  // 5) A thin-but-real direct read is better than nothing (only if NOT a bot-wall page).
-  if (direct.text && direct.text.length > 400 && !blocked) return { ...direct, via: 'direct-thin' };
+  // 5) A thin-but-real direct read is better than nothing (short real pages — a glossary entry,
+  //    a definition, example.com ~170 chars — that old fetch_url returned). Only if NOT a wall.
+  if (direct.text && direct.text.trim().length >= 120 && !blocked) return { ...direct, via: 'direct-thin' };
   // 6) genuinely unreadable — LOUD failure so the model refuses to fabricate the contents.
   return { title: direct.title || '', text: '', url, error: 'READ_FAILED', blocked: !!blocked };
 }
@@ -569,6 +580,20 @@ function buildUserContent(userText, images) {
   return blocks;
 }
 
+// When the agentic loop exhausts its tool-step budget with work still pending, make ONE final
+// call WITHOUT tools so the model writes a real answer from everything it gathered — and FORBID
+// it from claiming an action it never actually performed (no false "✅ pushed to Airtable").
+const FINAL_NUDGE = '\n\n[FINAL STEP — no tools available] You have used all tool steps for this turn. Answer now from what you already have. Do NOT claim to have performed any action (push, apply, save, publish, create) unless a tool result in this conversation already confirmed it succeeded. If an action is still needed, say it is prepared and ask the user to confirm it.';
+async function finalTextAnswer(convo, system, onText, maxTokens) {
+  const res = await anthropicFetch({ model: MODEL, max_tokens: maxTokens || 8000, system: system + FINAL_NUDGE, messages: convo });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`Claude final ${res.status}: ${data.error?.message || ''}`);
+  const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')
+    || 'I gathered what I could but ran out of steps before finishing — ask me to continue.';
+  if (onText) onText(text);
+  return text;
+}
+
 // Main entry: one assistant turn with an agentic tool loop. Supports images.
 export async function chat({ messages = [], userText, images = [], siteId, siteCtx }) {
   // Always refresh site context server-side (authoritative).
@@ -586,13 +611,13 @@ export async function chat({ messages = [], userText, images = [], siteId, siteC
   const MAX_STEPS = 8;  // non-stream must land inside the ~100s edge cap → keep tighter than the stream path
   let guard = 0;
   while (guard++ < MAX_STEPS) {
-    // Final step: drop tools so the model answers in text from what it has (no dead-end).
-    const lastStep = guard >= MAX_STEPS;
+    // Tools stay available every step so a final-step action still runs; a tools-free wrap-up
+    // call below produces the answer if the budget is exhausted (no dead-end, no false claims).
     // max_tokens 8000 (was 3500): the assistant is told to produce full briefs/articles,
     // which routinely exceed 3500 output tokens and were being truncated mid-sentence.
     // Kept moderate on the NON-streaming path (no keepalive → the whole reply must land
     // inside the ~100s edge cap); the streaming path below runs a higher ceiling.
-    const res = await anthropicFetch({ model: MODEL, max_tokens: 8000, system, tools: lastStep ? undefined : TOOLS, messages: convo });
+    const res = await anthropicFetch({ model: MODEL, max_tokens: 8000, system, tools: TOOLS, messages: convo });
     const data = await res.json();
     if (!res.ok) throw new Error(`Claude chat ${res.status}: ${data.error?.message || ''}`);
 
@@ -616,7 +641,9 @@ export async function chat({ messages = [], userText, images = [], siteId, siteC
     }
     convo.push({ role: 'user', content: results });
   }
-  return { reply: 'That took too many steps — please narrow the question.', messages: convo };
+  // Budget exhausted with work still pending → one tools-free wrap-up (no false action claims).
+  const reply = await finalTextAnswer(convo, system, null, 8000);
+  return { reply, messages: convo, toolsUsed: convo.flatMap((m) => Array.isArray(m.content) ? m.content.filter((b) => b.type === 'tool_use').map((b) => b.name) : []) };
 }
 
 // Generate a short, smart conversation title from the first exchange.
@@ -651,14 +678,14 @@ export async function chatStream({ messages = [], userText, images = [], siteId,
   const MAX_STEPS = 12;  // was 8 — heavy briefs (fetch + several research tools + write) need headroom
   let guard = 0;
   while (guard++ < MAX_STEPS) {
-    // On the final permitted step, DROP the tools so the model must answer in text from what
-    // it already gathered — a real deliverable — instead of dead-ending at "too many steps".
-    const lastStep = guard >= MAX_STEPS;
+    // Tools stay available EVERY step so a final-step action (e.g. push_article_brief) still runs;
+    // when the budget is exhausted we make one tools-free wrap-up call below (finalTextAnswer),
+    // which also forbids the model from falsely claiming an action it never performed.
     // max_tokens 16000 (was 3500): streaming keeps the socket alive with data, so the
     // low ceiling had no HTTP-timeout justification — it just truncated long briefs/
     // articles the assistant is instructed to produce. 16000 gives generous headroom
     // for realistic deliverables (it's a ceiling; short replies are unaffected).
-    const res = await anthropicFetch({ model: MODEL, max_tokens: 16000, system, tools: lastStep ? undefined : TOOLS, messages: convo }, { stream: true });
+    const res = await anthropicFetch({ model: MODEL, max_tokens: 16000, system, tools: TOOLS, messages: convo }, { stream: true });
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(`Claude stream ${res.status}: ${e.error?.message || ''}`); }
 
     // Parse the SSE stream, reconstructing content blocks + emitting text deltas.
@@ -721,7 +748,9 @@ export async function chatStream({ messages = [], userText, images = [], siteId,
     for (const tu of toolUses) results.push({ type: 'tool_result', tool_use_id: tu.id, content: await runTool(tu.name, tu.input || {}, siteId) });
     convo.push({ role: 'user', content: results });
   }
-  return { reply: 'That took too many steps — please narrow the question.', messages: convo, toolsUsed };
+  // Budget exhausted with work still pending → one tools-free wrap-up (no false action claims).
+  const reply = await finalTextAnswer(convo, system, onText, 16000);
+  return { reply, messages: convo, toolsUsed };
 }
 
 export default { chat, chatStream, generateTitle };
