@@ -3555,6 +3555,21 @@ const routes = {
     if (!body.id) return { error: 'workflow id required' };
     return n8n.getExecutions(baseUrl, apiKey, body.id, { status: body.status });
   },
+  // Read one node's RAW parameters (read-only) — inspect field-mapper nodes (Set etc.)
+  // that the prompts view doesn't surface, e.g. to debug "Content Brief not fed".
+  'POST /n8n-node-params': async (body) => {
+    const { baseUrl, apiKey } = await n8nCreds(body);
+    if (!baseUrl || !apiKey) return { error: 'Connect n8n first (base URL + API key).' };
+    if (!body.id) return { error: 'workflow id required' };
+    return n8n.getNodeParams(baseUrl, apiKey, body.id, body.nodeName);
+  },
+  // What did one node actually OUTPUT during a given execution? (bounded, read-only)
+  'POST /n8n-execution-data': async (body) => {
+    const { baseUrl, apiKey } = await n8nCreds(body);
+    if (!baseUrl || !apiKey) return { error: 'Connect n8n first (base URL + API key).' };
+    if (!body.executionId) return { error: 'executionId required' };
+    return n8n.getExecutionNodeData(baseUrl, apiKey, body.executionId, body.nodeName);
+  },
 };
 
 // --- server ----------------------------------------------------------------

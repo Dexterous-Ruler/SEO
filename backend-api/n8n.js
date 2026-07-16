@@ -457,8 +457,49 @@ async function getExecutions(baseUrl, apiKey, id, { status = 'error', limit = 10
   }
 }
 
+// ===========================================================================
+// 6) getNodeParams — read ONE node's raw parameters (read-only). Lets ops inspect
+//    non-prompt nodes (e.g. the 'Set Airtable Fields for Agents' field mapper)
+//    without opening the n8n editor — used to debug "field not fed" issues.
+// ===========================================================================
+async function getNodeParams(baseUrl, apiKey, id, nodeName) {
+  try {
+    const { ok, status, data } = await api('GET', baseUrl, apiKey, `/workflows/${encodeURIComponent(id)}`);
+    if (!ok) return apiError(status, data, apiKey);
+    const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+    if (!nodeName) return { id: data.id, name: data.name, nodes: nodes.map((n) => ({ id: n.id, name: n.name, type: shortType(n.type) })) };
+    const node = nodes.find((n) => n.name === nodeName || n.id === nodeName);
+    if (!node) return { error: 'Node not found: ' + nodeName, nodes: nodes.map((n) => n.name) };
+    return { id: data.id, name: data.name, nodeId: node.id, nodeName: node.name, type: node.type, parameters: node.parameters || {} };
+  } catch (e) { return apiError(0, null, apiKey, e); }
+}
+
+// ===========================================================================
+// 7) getExecutionNodeData — what did ONE node actually OUTPUT during a run?
+//    Definitive check for "was field X fed downstream". Bounded to 3 items.
+// ===========================================================================
+async function getExecutionNodeData(baseUrl, apiKey, executionId, nodeName) {
+  try {
+    const det = await api('GET', baseUrl, apiKey, `/executions/${encodeURIComponent(executionId)}?includeData=true`);
+    if (!det.ok) return apiError(det.status, det.data, apiKey);
+    let d = det.data && det.data.data;
+    if (typeof d === 'string') { try { d = JSON.parse(d); } catch { d = null; } }
+    const run = d && d.resultData && d.resultData.runData;
+    if (!run) return { error: 'No run data on this execution.' };
+    if (!nodeName) return { executionId, nodes: Object.keys(run) };
+    const arr = run[nodeName];
+    if (!arr) return { error: 'Node not in run data: ' + nodeName, nodes: Object.keys(run) };
+    const out = [];
+    try {
+      const items = (arr[0] && arr[0].data && arr[0].data.main && arr[0].data.main[0]) || [];
+      for (const it of items.slice(0, 3)) out.push(it && it.json);
+    } catch (e) { /* leave what we have */ }
+    return { executionId, nodeName, items: out };
+  } catch (e) { return apiError(0, null, apiKey, e); }
+}
+
 // Internal helper exported for offline unit testing of the path-setter.
 export { setByPath as _setByPath };
 
-export { listWorkflows, getWorkflowPrompts, updatePrompts, runWorkflow, getExecutions };
-export default { listWorkflows, getWorkflowPrompts, updatePrompts, runWorkflow, getExecutions };
+export { listWorkflows, getWorkflowPrompts, updatePrompts, runWorkflow, getExecutions, getNodeParams, getExecutionNodeData };
+export default { listWorkflows, getWorkflowPrompts, updatePrompts, runWorkflow, getExecutions, getNodeParams, getExecutionNodeData };
