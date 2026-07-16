@@ -159,6 +159,59 @@ async function resolvePostId(wp, url) {
   }
   return null;
 }
+
+function sameHost(a, b) {
+  try { const h = (u) => new URL(/^https?:/i.test(u) ? u : 'https://' + u).host.replace(/^www\./, ''); return h(a) === h(b); } catch (e) { return false; }
+}
+function htmlToText(html) {
+  return String(html || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<(nav|header|footer|aside|form|noscript|svg)\b[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ').replace(/<[^>]+>/g, ' ')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)).replace(/&amp;/g, '&').replace(/&nbsp;/gi, ' ').replace(/&[a-z]+;/gi, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+// Guaranteed page reader for ANY page type. Tiers, best-first:
+//  1) OWN-SITE article → WordPress REST (post.content.rendered): the clean article body,
+//     bypassing the front-end bot-firewall (authenticated /wp-json) and JS rendering entirely.
+//  2) Direct real-browser-UA fetch + extraction — external pages, the common case.
+//  3) Hosted reader (r.jina.ai) that renders JS + defeats most bot-walls — for a JS-heavy or
+//     firewalled EXTERNAL page. Delivers what a headless-browser crawler would, with no
+//     Chromium/Python service to host.
+async function readPage(url, siteId) {
+  // 1) own-site via WP REST — read-only creds (a READ must not require write-armed).
+  if (siteId) {
+    try {
+      const creds = await credsForSite(siteId).catch(() => null);
+      const siteUrl = creds && (creds.baseUrl || (creds.site && creds.site.url));
+      if (creds && creds.baseUrl && siteUrl && sameHost(url, siteUrl)) {
+        const wp = new WordPressClient({ baseUrl: creds.baseUrl, username: creds.username, appPassword: creds.appPassword });
+        const found = await resolvePostId(wp, url);
+        if (found) {
+          const post = await wp.request(`/${found.objectType}/${found.postId}?_fields=title,content`).catch(() => null);
+          const rendered = post && post.content && post.content.rendered;
+          if (rendered) {
+            const text = htmlToText(rendered);
+            if (text.length > 200) return { title: (post.title && post.title.rendered) || '', text: text.slice(0, 24000), url, via: 'wp-rest' };
+          }
+        }
+      }
+    } catch (e) { /* fall through to fetch */ }
+  }
+  // 2) direct browser-UA fetch + extraction.
+  const direct = await fetchPageText(url);
+  const blocked = /bot verification|captcha|checking your browser|attention required|cf-browser-verification|please enable javascript/i.test(direct.text || '');
+  if (!direct.error && direct.text && direct.text.length > 600 && !blocked) return { ...direct, via: 'direct' };
+  // 3) hosted reader fallback (renders JS + bypasses many walls; returns clean markdown/text).
+  try {
+    const rr = await fetchHtmlBounded('https://r.jina.ai/' + url, { timeoutMs: 25000 });
+    if (rr.ok && rr.html && rr.html.length > 300) {
+      const text = rr.html.replace(/\r/g, '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+      if (text.length > 300) return { title: direct.title || '', text: text.slice(0, 24000), url, via: 'reader' };
+    }
+  } catch (e) { /* fall through */ }
+  return (direct.text && direct.text.length > 100) ? { ...direct, via: 'direct-thin' } : { title: direct.title || '', text: '', url, error: direct.error || 'the page is blocked or returns no readable content' };
+}
 const META_FIELD_MAP = { title: 'rank_math_title', meta_description: 'rank_math_description', canonical: 'rank_math_canonical_url' };
 // Meta key for a semantic field on THIS site's SEO plugin (mirrors audit-pipeline
 // metaFieldMap): RankMath uses its native keys; Yoast/SEOPress/AIOSEO/none use the
@@ -176,7 +229,7 @@ export function metaKeyFor(field, seoPlugin) {
 async function runTool(name, input, siteId) {
   try {
     if (!siteId && name !== 'fetch_url') return 'No site is selected. Ask the user to pick an account first.';
-    if (name === 'fetch_url') { const p = await fetchPageText(input.url); if (p.error) return `Could not fetch ${input.url} — ${p.error}. Proceed without it or ask the user to paste the content.`; return `Title: ${p.title}\nURL: ${p.url}\n\n${p.text}`; }
+    if (name === 'fetch_url') { const p = await readPage(input.url, siteId); if (p.error) return `Could not read ${input.url} — ${p.error}. Ask the user to paste the content.`; return `Title: ${p.title}\nURL: ${p.url}\n\n${p.text}`; }
 
     const site = await db.getSite(siteId);
     if (!site) return 'Site not found.';
