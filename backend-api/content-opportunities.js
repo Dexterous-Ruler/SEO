@@ -21,6 +21,35 @@ const STOP = new Set('the a an and or of for to in on with your you our how what
 function tokens(s) { return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !STOP.has(t)); }
 function cleanTitle(t) { return (t || '').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim(); }
 
+// Deterministic fallback clustering — used when the Claude clustering call fails or
+// returns nothing, so a run never discards the (paid) keyword data it just gathered.
+// Groups keywords by their most common significant token; keeps groups of 2+.
+function fallbackClusters(ranked) {
+  const byTok = new Map();
+  for (const k of ranked) {
+    for (const t of new Set(tokens(k.keyword))) {
+      if (!byTok.has(t)) byTok.set(t, []);
+      byTok.get(t).push(k);
+    }
+  }
+  const used = new Set();
+  const out = [];
+  for (const [tok, ks] of [...byTok.entries()].sort((a, b) => b[1].length - a[1].length)) {
+    const fresh = ks.filter((k) => !used.has(k.keyword));
+    if (fresh.length < 2) continue;
+    fresh.forEach((k) => used.add(k.keyword));
+    const top = fresh.slice().sort((a, b) => (b.volume || 0) - (a.volume || 0))[0];
+    out.push({
+      label: tok,
+      suggestedTitle: (top.keyword || tok).replace(/(^|\s)([a-z])/g, (m, sp, c) => sp + c.toUpperCase()),
+      intent: 'informational', format: 'guide',
+      keywords: fresh.map((k) => k.keyword),
+    });
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
 // Does any sitemap page cover a cluster? Coverage = strong token overlap with a
 // page title or URL slug. Returns the covering URL or null.
 function coveringPage(cluster, pages) {
@@ -36,7 +65,7 @@ function coveringPage(cluster, pages) {
   return bestScore >= 0.6 ? best.url : null; // ≥60% of cluster tokens present on a page
 }
 
-export async function findOpportunities(siteId, { db: region, maxKeywords = 160, includeTrending = true } = {}) {
+export async function findOpportunities(siteId, { db: region, maxKeywords = 160, includeTrending = true, longRun = false } = {}) {
   const site = await db.getSite(siteId);
   if (!site) return { error: 'Site not found.' };
   const domain = (site.url || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
@@ -111,7 +140,19 @@ export async function findOpportunities(siteId, { db: region, maxKeywords = 160,
   // geo_context. The old fallback passed stack.type (literally "WordPress"), so clustering
   // ran with no idea what the site sells and produced generic, off-topic clusters.
   const niche = (site.geo_context && String(site.geo_context).slice(0, 1500)) || (site.stack && site.stack.type) || '';
-  const clusters = await claude.clusterKeywords({ keywords: ranked, siteName: site.name, niche, siteId });
+  // longRun = invoked from the background job (no edge cap) → a slightly larger budget.
+  // NEVER let a clustering failure throw away every (paid) DataForSEO row we just gathered:
+  // fall back to deterministic token clustering so the operator still gets a Content Plan.
+  let clusters = [];
+  try {
+    clusters = await claude.clusterKeywords({ keywords: ranked, siteName: site.name, niche, siteId,
+      ...(longRun ? { timeoutMs: 60000, deadlineMs: 120000 } : {}) });
+  } catch (e) { sources.clusterError = String(e && e.message || e); }
+  if (!clusters.length) {
+    if (!sources.clusterError) sources.clusterError = 'clustering returned nothing';
+    clusters = fallbackClusters(ranked);
+    sources.clusterFallback = clusters.length;
+  }
   const byKw = new Map(ranked.map((k) => [k.keyword.toLowerCase(), k]));
 
   const enriched = clusters.map((cl) => {

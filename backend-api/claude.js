@@ -84,10 +84,16 @@ async function _anthropicPost(payload, { timeoutMs = 60000, retries = 2, deadlin
 
 // Low-level call. Returns the assistant text. `promptKey` lets per-prompt admin
 // model/temperature overrides apply; explicit model/temperature still win.
-export async function complete({ system, messages, maxTokens = 1024, temperature, model, promptKey }) {
+// timeoutMs/deadlineMs: callers running OUTSIDE a request (background jobs) can raise the
+// per-attempt and total budgets — the defaults are sized for the ~100s edge cap, which does
+// not apply there. A big clustering generation was failing at a 34s retry sliver otherwise.
+export async function complete({ system, messages, maxTokens = 1024, temperature, model, promptKey, timeoutMs, deadlineMs }) {
   const m = model || (promptKey ? modelFor(promptKey) : null) || MODEL;
   const t = temperature != null ? temperature : (promptKey && tempFor(promptKey) != null ? tempFor(promptKey) : 0.3);
-  const res = await anthropicPost({ model: m, max_tokens: maxTokens, temperature: t, system, messages });
+  const budget = {};
+  if (timeoutMs) budget.timeoutMs = timeoutMs;
+  if (deadlineMs) budget.deadlineMs = deadlineMs;
+  const res = await anthropicPost({ model: m, max_tokens: maxTokens, temperature: t, system, messages }, budget);
   const data = await res.json();
   if (!res.ok) throw new Error(`Claude ${res.status}: ${data.error?.message || JSON.stringify(data).slice(0, 200)}`);
   return (data.content || []).map((b) => b.text || '').join('').trim();
@@ -412,12 +418,19 @@ export async function projectPlan({ siteName, niche, baseUrl, keyPages, scores, 
 // and a suggested content title/format. Claude ONLY groups + labels — it must
 // use the EXACT keyword strings provided (no inventing keywords); volumes/gaps
 // are computed deterministically by the caller.
-export async function clusterKeywords({ keywords, siteName, niche, siteId }) {
+export async function clusterKeywords({ keywords, siteName, niche, siteId, timeoutMs, deadlineMs, model }) {
   const list = (keywords || []).slice(0, 140).map((k) => `${k.keyword}${k.volume ? ` (${k.volume})` : ''}`).join('\n');
+  // Haiku by DEFAULT (measured 12.7s vs Sonnet 24.8s p50 and a >60s tail on this exact
+  // payload — the tail was aborting the whole Content Plan). An explicit caller model or an
+  // admin per-prompt override still wins. maxTokens 3000: real output measured ~1900 tokens,
+  // and the salvage parser below already recovers a truncated tail.
+  const m = model || modelFor('content.cluster') || 'claude-haiku-4-5-20251001';
   const txt = await complete({
     system: [{ type: 'text', text: P('content.cluster', siteId) }],   // per-site prompt when set
     promptKey: 'content.cluster',
-    maxTokens: 8000,
+    model: m,
+    maxTokens: 3000,
+    timeoutMs, deadlineMs,
     messages: [{ role: 'user', content: `Site: ${siteName || ''}\nNiche: ${niche || ''}\n\nKeywords (with volume):\n${list}\n\nReturn the clustered JSON.` }],
   });
   // Parse; if the JSON was truncated, salvage whatever complete cluster objects exist.

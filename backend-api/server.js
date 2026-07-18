@@ -1745,7 +1745,7 @@ const routes = {
     OPP_RUNS.set(body.siteId, { status: 'running', at: Date.now() });
     (async () => {
       try {
-        const r = await findOpportunities(body.siteId, { db: body.db, maxKeywords: body.maxKeywords || 160, includeTrending: body.includeTrending !== false });
+        const r = await findOpportunities(body.siteId, { db: body.db, maxKeywords: body.maxKeywords || 160, includeTrending: body.includeTrending !== false, longRun: true });
         OPP_RUNS.set(body.siteId, { status: 'done', result: r, at: Date.now() });
       } catch (e) {
         OPP_RUNS.set(body.siteId, { status: 'error', error: 'Content-opportunity analysis failed: ' + (e && e.message || e), at: Date.now() });
