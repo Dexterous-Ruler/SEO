@@ -2438,20 +2438,23 @@ const routes = {
     const raw = String((post.content && (post.content.raw != null ? post.content.raw : post.content.rendered)) || '');
     if (!raw) return { error: 'Could not read the post content.' };
     if (raw.includes(videoId)) {
-      // Repair pass: earlier embeds shipped with an unclosed <div> inside the figure
-      // (browsers auto-close so it LOOKED fine, but unclosed divs have broken this
-      // site's layout before). Close it in place; idempotent (fixed content no longer
-      // contains the broken sequence).
-      if (raw.includes('</iframe></figure>')) {
-        const fixed = raw.split('</iframe></figure>').join('</iframe></div></figure>');
+      // Repair pass — idempotent, fixes two historical template defects in place:
+      // (1) unclosed <div> inside the figure (unclosed divs have broken this site before);
+      // (2) missing referrerpolicy on the iframe — Safari strips the referer on cross-site
+      //     iframes without an explicit attribute, and YouTube now answers that with
+      //     "Error 153: Video player configuration error" instead of playing.
+      let fixed = raw;
+      if (fixed.includes('</iframe></figure>')) fixed = fixed.split('</iframe></figure>').join('</iframe></div></figure>');
+      fixed = fixed.replace(/(<iframe\b(?![^>]*\breferrerpolicy=)[^>]*youtube-nocookie[^>]*?)(\s*\/?>)/g, '$1 referrerpolicy="strict-origin-when-cross-origin"$2');
+      if (fixed !== raw) {
         await wp.request(`/${found.type}/${found.id}`, { method: 'POST', body: { content: fixed } });
-        if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: `Repaired video embed markup on post #${found.id}`, meta: 'closed unclosed <div>' }).catch(() => {});
+        if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: `Repaired video embed markup on post #${found.id}`, meta: 'div close + referrerpolicy (YT error 153)' }).catch(() => {});
         return { ok: true, already: true, repaired: true, postId: found.id, videoId };
       }
       return { ok: true, already: true, postId: found.id, videoId };
     }
     const safeTitle = String(body.title || 'Fast ILA — video guide').replace(/"/g, '&quot;');
-    const embed = `\n\n<figure class="yt-embed" style="margin:28px 0;"><div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:12px;"><iframe src="https://www.youtube-nocookie.com/embed/${videoId}" title="${safeTitle}" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy"></iframe></div></figure>\n\n`;
+    const embed = `\n\n<figure class="yt-embed" style="margin:28px 0;"><div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:12px;"><iframe src="https://www.youtube-nocookie.com/embed/${videoId}" title="${safeTitle}" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy" referrerpolicy="strict-origin-when-cross-origin"></iframe></div></figure>\n\n`;
     const h2 = raw.search(/<h2[\s>]/i);
     const content = h2 > 0 ? raw.slice(0, h2) + embed + raw.slice(h2) : raw + embed;
     await wp.request(`/${found.type}/${found.id}`, { method: 'POST', body: { content } });
@@ -2459,6 +2462,41 @@ const routes = {
     const stuck = !!(check && check.content && String(check.content.rendered || '').includes(videoId));
     if (site) await db.logActivity({ site_id: site.id, type: stuck ? 'verified' : 'warning', actor: 'Agent', icon: 'sparkles', text: `Embedded YouTube video into “${((post.title && post.title.rendered) || pageUrl).slice(0, 70)}”`, meta: 'youtube ' + videoId + (stuck ? ' · verified' : ' · not visible in render') }).catch(() => {});
     return { ok: true, postId: found.id, type: found.type, videoId, verified: stuck };
+  },
+
+  // Clean unresolved contact placeholders out of PUBLISHED posts. The writer agents are
+  // (correctly) told to emit {PHONE}/{BOOKING_URL} rather than invent contact details when
+  // APPROVED FACTS is empty — but until the prompts carried the real values, those tokens
+  // reached live pages. Scans recent posts, resolves the tokens to the site's real values,
+  // saves (WordPress revision = undo), read-back verifies. Idempotent.
+  'POST /fix-contact-tokens': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    const phone = String(body.phone || '020 7459 4037');
+    const tel = String(body.tel || 'tel:+442074594037');
+    const book = String(body.bookingUrl || 'https://fast-ila.co.uk/book-now/');
+    let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
+    const site = await db.getSite(body.siteId).catch(() => null);
+    const wp = new WordPressClient(creds);
+    const posts = await wp.request(`/posts?orderby=date&order=desc&per_page=${body.limit || 30}&context=edit&_fields=id,title,content,link`);
+    const fixed = [], stillTokened = [];
+    for (const p of (posts || [])) {
+      const raw = String((p.content && (p.content.raw != null ? p.content.raw : p.content.rendered)) || '');
+      if (!/\{(?:PHONE|PHONE_TEL|BOOKING_URL)\}/.test(raw)) continue;
+      const content = raw
+        .replace(/call\s+\{PHONE\}/gi, `call <a href="${tel}">${phone}</a>`)
+        .replace(/\{PHONE_TEL\}/g, tel)
+        .replace(/\{PHONE\}/g, `<a href="${tel}">${phone}</a>`)
+        .replace(/href="\{BOOKING_URL\}"/g, `href="${book}"`)
+        .replace(/use\s+\{BOOKING_URL\}\s+to\s+book/gi, `<a href="${book}">book online</a>`)
+        .replace(/\{BOOKING_URL\}/g, `<a href="${book}">${book.replace('https://', '').replace(/\/$/, '')}</a>`);
+      await wp.request(`/posts/${p.id}`, { method: 'POST', body: { content } });
+      const check = await wp.request(`/posts/${p.id}?_fields=content`).catch(() => null);
+      const clean = !!(check && !/\{(?:PHONE|PHONE_TEL|BOOKING_URL)\}/.test(String((check.content && check.content.rendered) || '')));
+      fixed.push({ id: p.id, title: (p.title && p.title.rendered || '').slice(0, 70), verified: clean });
+      if (!clean) stillTokened.push(p.id);
+      if (site) await db.logActivity({ site_id: site.id, type: clean ? 'verified' : 'warning', actor: 'Agent', icon: 'check', text: `Resolved contact placeholders on “${(p.title && p.title.rendered || '#' + p.id).slice(0, 60)}”`, meta: '{PHONE}/{BOOKING_URL} → real values' }).catch(() => {});
+    }
+    return { ok: true, scanned: (posts || []).length, fixed, stillTokened };
   },
 
   // Undo a bad auto-apply: restore a page's PREVIOUS WordPress revision — the one-click
@@ -3685,6 +3723,7 @@ const HEAVY_ROUTES = new Set([
   'POST /apply-local-schema', 'POST /engine-autodraft', 'POST /engine-sync-published',
   'POST /n8n-run',
   'POST /ux-crawl',
+  'POST /fix-contact-tokens', 'POST /embed-video',   // WP read+write loops over posts
   // Added: renamed/omitted routes that genuinely call Claude / DataForSEO / GSC / PSI / crawl.
   'POST /content-opportunities',            // renamed from the phantom /generate-opportunities (DataForSEO + clustering + Claude)
   'POST /audit-full',                       // full page crawl + PSI + on-page SEO read
