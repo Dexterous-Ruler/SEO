@@ -133,7 +133,21 @@ export async function findOpportunities(siteId, { db: region, maxKeywords = 160,
   if (pool.size < 3) return { error: 'Not enough keyword data — connect Search Console or DataForSEO, and add competitors.', sources, clusters: [] };
 
   // Rank the pool + cap for clustering (by volume).
-  const ranked = [...pool.values()].map((k) => ({ ...k, src: [...k.src] })).sort((a, b) => b.volume - a.volume).slice(0, maxKeywords);
+  let ranked = [...pool.values()].map((k) => ({ ...k, src: [...k.src] })).sort((a, b) => b.volume - a.volume).slice(0, maxKeywords);
+
+  // NICHE FILTER — the pool is fed by BROAD competitors and generic keyword ideas, so a
+  // specialist site was getting high-volume but irrelevant clusters (family law, power of
+  // attorney, "find a solicitor"). Filter the pool against this site's own service context
+  // BEFORE clustering, using the same geo_context filter the keyword-gap route uses.
+  // Fail-open, and never filter down to a stub.
+  if (site.geo_context && ranked.length) {
+    try {
+      const keep = await claude.filterKeywordsByNiche({ keywords: ranked.map((k) => k.keyword), niche: site.geo_context, siteName: site.name, siteId });
+      const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
+      const onNiche = ranked.filter((k) => keepSet.has(String(k.keyword).toLowerCase().trim()));
+      if (onNiche.length >= 8) { sources.offNicheFiltered = ranked.length - onNiche.length; ranked = onNiche; }
+    } catch (e) { /* fail-open: cluster the unfiltered pool */ }
+  }
 
   // Cluster with Claude (labels/intent/title only — metrics stay deterministic).
   // niche: there is NO `niche` column — the site's real niche/service context lives in
