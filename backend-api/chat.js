@@ -132,7 +132,7 @@ const TOOLS = [
   { name: 'fetch_url', description: 'Fetch any web page and return its title + main text (e.g. a competitor or a reference article the user links). Renders JS + defeats bot-walls automatically. If it returns "READ FAILED", the page could NOT be read — never summarise or write about a page you have not actually read; tell the user and ask them to paste the text.', input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
   // ── ACTION (write) tools — perform REAL changes on the live site when the user asks ──
   { name: 'push_keywords_to_airtable', description: "ACTION: push keywords into the site's configured Airtable keyword column — this feeds the n8n article writer and creates real rows. Use ONLY when the user explicitly asks to push/add keywords or topics to Airtable (or 'send these to the writer'). Pass `keywords` to push specific ones; omit to auto-derive the site's content-gap keywords. De-dupes against existing rows.", input_schema: { type: 'object', properties: { keywords: { type: 'array', items: { type: 'string' }, description: 'optional explicit keywords; omit to auto-derive content gaps' } } } },
-  { name: 'push_article_brief', description: "ACTION: create a FULL article brief as a row in the site's Article Writer table (the n8n-watched table) — Title + Keyword + the whole content plan in the Content Brief column, so the writer builds the article from the plan, not a bare keyword. Use when the user wants to turn a content plan (e.g. one you built from a link they pasted) into a real article. Pass `title`, `keyword`, and `brief` (the full plan as markdown/text: angle, outline, sections, FAQs, target length); optional `description` (meta) and `goal` (one-line angle). De-dupes by Title (re-pushing the same title updates the brief). Set `startWriting:true` ONLY when the user explicitly says to write/publish it now — that sets Status='Write Article' and n8n generates + publishes a LIVE article to WordPress (costs API credits, writes live); it requires the site to be write-armed. Default leaves Status blank so the user flips it themselves.", input_schema: { type: 'object', properties: { title: { type: 'string', description: 'the article title' }, keyword: { type: 'string', description: 'the primary target keyword' }, brief: { type: 'string', description: 'the full content plan / brief as markdown or text (angle, outline, sections, FAQs, target length)' }, description: { type: 'string', description: 'optional meta description / summary' }, goal: { type: 'string', description: 'optional one-line goal / angle of the article' }, startWriting: { type: 'boolean', description: "set true ONLY if the user explicitly asked to write/publish now — triggers n8n to generate + publish live to WordPress" } }, required: ['title', 'keyword', 'brief'] } },
+  { name: 'push_article_brief', description: "ACTION: create a FULL article brief as a row in the site's Article Writer table (the n8n-watched table) — Title + Keyword + the whole content plan in the Content Brief column, so the writer builds the article from the plan, not a bare keyword. Use when the user wants to turn a content plan (e.g. one you built from a link they pasted) into a real article. Pass `title`, `keyword`, and `brief` (the full plan as markdown/text: angle, outline, sections, FAQs, target length); optional `description` (meta) and `goal` (one-line angle). De-dupes by Title (re-pushing the same title updates the brief). Set `startWriting:true` ONLY when the user explicitly says to write/publish it now — that sets Status='Write Article' and n8n generates + publishes a LIVE article to WordPress (costs API credits, writes live); it requires the site to be write-armed. Default leaves Status blank so the user flips it themselves.", input_schema: { type: 'object', properties: { title: { type: 'string', description: 'the article title' }, keyword: { type: 'string', description: 'the primary target keyword' }, brief: { type: 'string', description: 'the full content plan / brief as markdown or text (angle, outline, sections, FAQs, target length)' }, description: { type: 'string', description: 'optional meta description / summary' }, goal: { type: 'string', description: 'optional one-line goal / angle of the article' }, startWriting: { type: 'boolean', description: "set true ONLY if the user explicitly asked to write/publish now — triggers n8n to generate + publish live to WordPress" }, source_url: { type: 'string', description: 'REQUIRED when the brief is based on a page/article you read: the exact URL you passed to fetch_url. The push is REJECTED if that URL was not successfully read in this conversation, and the source is recorded on the row.' } }, required: ['title', 'keyword', 'brief'] } },
   { name: 'apply_page_meta', description: "ACTION: write an SEO meta field to a LIVE page/post and verify it stuck (read-back). Use when the user approves a title / meta-description / canonical change and asks you to push/apply/make it live. `url` = the page to change; `field` = title | meta_description | canonical; `value` = the new text. The site must be write-armed. This is a real, reversible change.", input_schema: { type: 'object', properties: { url: { type: 'string', description: 'the live page URL to update' }, field: { type: 'string', enum: ['title', 'meta_description', 'canonical'], description: 'which meta field' }, value: { type: 'string', description: 'the new value to write' } }, required: ['url', 'field', 'value'] } },
   { name: 'apply_schema_to_page', description: "ACTION: inject JSON-LD structured data (e.g. a FAQPage / Article / Organization schema) into a LIVE page via the seo-agent-optimize plugin. Use after extract_citable_facts produces a FAQPage, or when the user asks to add/push schema to a page. `url` = the page; `jsonld` = the JSON-LD object or string. The site must be write-armed.", input_schema: { type: 'object', properties: { url: { type: 'string', description: 'the live page URL' }, jsonld: { type: 'string', description: 'the JSON-LD as a string (or object)' } }, required: ['url', 'jsonld'] } },
   { name: 'apply_site_css', description: "ACTION: apply site-wide custom CSS to the LIVE site via the seo-agent-optimize plugin (e.g. an accessibility/contrast fix). Use only when the user explicitly approves a CSS change. The site must be write-armed.", input_schema: { type: 'object', properties: { css: { type: 'string', description: 'the CSS to inject site-wide' } }, required: ['css'] } },
@@ -160,6 +160,11 @@ async function resolvePostId(wp, url) {
   return null;
 }
 
+// Canonical form for comparing URLs across tool calls (provenance matching).
+function normUrl(u) {
+  try { const x = new URL(String(u)); return (x.hostname.replace(/^www\./, '') + x.pathname.replace(/\/+$/, '')).toLowerCase(); }
+  catch (e) { return String(u || '').trim().toLowerCase(); }
+}
 function sameHost(a, b) {
   try { const h = (u) => new URL(/^https?:/i.test(u) ? u : 'https://' + u).host.replace(/^www\./, ''); return h(a) === h(b); } catch (e) { return false; }
 }
@@ -276,12 +281,18 @@ export function metaKeyFor(field, seoPlugin) {
 }
 
 // Execute a tool call for a given siteId. Returns a string result.
-async function runTool(name, input, siteId) {
+// `turn` (optional) carries per-turn provenance: which URLs were ACTUALLY read, and how.
+// push_article_brief consults it so a brief can never claim a source the model never read.
+async function runTool(name, input, siteId, turn) {
   try {
     if (!siteId && name !== 'fetch_url') return 'No site is selected. Ask the user to pick an account first.';
     if (name === 'fetch_url') {
       const p = await readPage(input.url, siteId);
-      if (p.error || !p.text) return `READ FAILED for ${input.url}${p.blocked ? ' (the page is behind a bot-wall / requires JavaScript)' : ''}. The page content is NOT available. Do NOT write, summarise, or invent anything about this page — you have not read it. Tell the user you could not read that URL and ask them to paste the article text (or try a different link).`;
+      if (p.error || !p.text) {
+        if (turn) turn.reads.set(normUrl(input.url), { ok: false });
+        return `READ FAILED for ${input.url}${p.blocked ? ' (the page is behind a bot-wall / requires JavaScript)' : ''}. The page content is NOT available. Do NOT write, summarise, or invent anything about this page — you have not read it. Tell the user you could not read that URL and ask them to paste the article text (or try a different link).`;
+      }
+      if (turn) turn.reads.set(normUrl(input.url), { ok: true, via: p.via || 'direct', chars: p.text.length, title: p.title || '' });
       return `Title: ${p.title}\nURL: ${p.url}\n\n${p.text}`;
     }
 
@@ -465,6 +476,21 @@ async function runTool(name, input, siteId) {
       const keyword = String(input.keyword || '').trim();
       const brief = String(input.brief || '').trim();
       if (!title || !keyword) return 'I need at least a title and a keyword to create the brief.';
+      // PROVENANCE GUARD — a brief that claims a source must actually be grounded in it.
+      // The model can no longer push a plan for a page it failed to read (or never read):
+      // the tool result told it not to, but nothing enforced it. Now the push is REJECTED,
+      // and a verified source is stamped onto the brief so the row is auditable.
+      let sourceNote = '';
+      const src = String(input.source_url || '').trim();
+      if (src) {
+        const rec = turn && turn.reads.get(normUrl(src));
+        if (!rec) return `REJECTED: you passed source_url ${src} but that page was not read in this conversation. Call fetch_url on it first; if the read fails, do NOT push a brief for it — tell the user instead.`;
+        if (!rec.ok) return `REJECTED: the read of ${src} FAILED, so any brief for it would be invented. Do NOT push it. Tell the user you could not read that URL and ask them to paste the article text.`;
+        sourceNote = `\n\n---\nSource: ${src} (read ${rec.chars.toLocaleString()} chars via ${rec.via})`;
+      } else if (turn && [...turn.reads.values()].some((r) => !r.ok) && ![...turn.reads.values()].some((r) => r.ok)) {
+        // Every read this turn failed and no source was declared → the brief cannot be grounded.
+        return 'REJECTED: every page read in this conversation failed, so a brief would be invented. Tell the user you could not read the source and ask them to paste the text.';
+      }
       // Resolve the Article Writer table (stored as table_gaps) + ensure the Content Brief column exists.
       let tables = [];
       try { tables = await airtable.listTables(pat, base); } catch (e) { return 'Could not read the Airtable base: ' + e.message; }
@@ -478,7 +504,8 @@ async function runTool(name, input, siteId) {
       const row = { Title: title, Keyword: keyword, 'Primary Keyword': keyword, Category: 'Blog' };
       if (input.goal) row['Goal of Article'] = String(input.goal);
       if (input.description) row.Description = String(input.description);
-      if (brief) { if (briefField && briefField !== 'Description') row[briefField] = brief; else row.Description = (row.Description ? row.Description + '\n\n' : '') + brief; }
+      const briefText = brief ? brief + sourceNote : brief;
+      if (briefText) { if (briefField && briefField !== 'Description') row[briefField] = briefText; else row.Description = (row.Description ? row.Description + '\n\n' : '') + briefText; }
       for (const k of Object.keys(row)) if (!names.has(k)) delete row[k];
       // De-dupe by Title (case-insensitive) → upsert so re-pushing updates the brief.
       let existingId = null;
@@ -608,6 +635,7 @@ export async function chat({ messages = [], userText, images = [], siteId, siteC
   const userContent = buildUserContent(userText, images);
   if (userContent) convo.push({ role: 'user', content: userContent });
 
+  const turn = { reads: new Map() };   // per-turn read provenance (grounds push_article_brief)
   const MAX_STEPS = 8;  // non-stream must land inside the ~100s edge cap → keep tighter than the stream path
   let guard = 0;
   while (guard++ < MAX_STEPS) {
@@ -636,7 +664,7 @@ export async function chat({ messages = [], userText, images = [], siteId, siteC
 
     const results = [];
     for (const tu of toolUses) {
-      const out = await runTool(tu.name, tu.input || {}, siteId);
+      const out = await runTool(tu.name, tu.input || {}, siteId, turn);
       results.push({ type: 'tool_result', tool_use_id: tu.id, content: out });
     }
     convo.push({ role: 'user', content: results });
@@ -675,6 +703,7 @@ export async function chatStream({ messages = [], userText, images = [], siteId,
   if (userContent) convo.push({ role: 'user', content: userContent });
 
   const toolsUsed = [];
+  const turn = { reads: new Map() };   // per-turn read provenance (grounds push_article_brief)
   const MAX_STEPS = 12;  // was 8 — heavy briefs (fetch + several research tools + write) need headroom
   let guard = 0;
   while (guard++ < MAX_STEPS) {
@@ -745,7 +774,7 @@ export async function chatStream({ messages = [], userText, images = [], siteId,
     if (onTool) onTool(toolUses.map((t) => t.name));
     toolUses.forEach((t) => toolsUsed.push(t.name));
     const results = [];
-    for (const tu of toolUses) results.push({ type: 'tool_result', tool_use_id: tu.id, content: await runTool(tu.name, tu.input || {}, siteId) });
+    for (const tu of toolUses) results.push({ type: 'tool_result', tool_use_id: tu.id, content: await runTool(tu.name, tu.input || {}, siteId, turn) });
     convo.push({ role: 'user', content: results });
   }
   // Budget exhausted with work still pending → one tools-free wrap-up (no false action claims).

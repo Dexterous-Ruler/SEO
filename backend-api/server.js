@@ -1803,15 +1803,16 @@ const routes = {
     }
     // Query each seed (bounded to 3) and merge, de-duped by question text.
     const seeds = derived.length ? derived.slice(0, 3) : [seed];
+    // PARALLEL — each seed is an independent DataForSEO SERP call; serially, 3 seeds at
+    // depth 2 could outrun the request cap.
+    const settled = await Promise.all(seeds.map((s) =>
+      semrush.peopleAlsoAsk(s, { db: market, depth: body.depth || 2 }).then((r) => ({ r }), (e) => ({ e }))));
+    if (settled.every((x) => x.e)) {
+      const noUnits = settled.some((x) => x.e && x.e.code === 'NO_UNITS');
+      return { error: noUnits ? 'DataForSEO balance exhausted — top up at app.dataforseo.com' : ('People Also Ask lookup failed: ' + (settled[0].e && settled[0].e.message || 'unknown error')) };
+    }
     let res = null;
-    for (const s of seeds) {
-      let one;
-      try {
-        one = await semrush.peopleAlsoAsk(s, { db: market, depth: body.depth || 2 });
-      } catch (e) {
-        if (e.code === 'NO_UNITS') return { error: 'DataForSEO balance exhausted — top up at app.dataforseo.com' };
-        continue;   // one bad seed must not sink the whole lookup
-      }
+    for (const { r: one } of settled.filter((x) => x.r)) {
       if (!res) res = { ...one, questions: [...(one.questions || [])] };
       else {
         const seen = new Set(res.questions.map((q) => String(q.question || '').toLowerCase()));
