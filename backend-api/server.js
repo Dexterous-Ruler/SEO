@@ -124,6 +124,16 @@ async function generateRewritePreview({ wp, found, page, site, siteId, brief }) 
 const REWRITES = new Map();   // `${siteId}:${postId}` -> { status:'running'|'done'|'error', result?, error?, at }
 const _atRecCache = new Map();  // `${base}:${table}:${filter}` -> { all, exp } — 10s TTL absorbs the grid's poll bursts
 const OPP_RUNS = new Map();     // siteId -> { status:'running'|'done'|'error', result?, error?, at } — content-opportunities background job
+// The site's niche context PLUS its target market, for claude.filterKeywordsByNiche. Without
+// the market, another country's terms survive the service test (a UK visa firm was seeded
+// with "visa go australia" and got a whole PAA set about Australian visas).
+function nicheWithMarket(site, db) {
+  const ctx = (site && site.geo_context) || '';
+  if (!ctx) return ctx;
+  let label = '';
+  try { label = (semrush.countryFor(db || (site && site.semrush_db) || 'uk') || {}).label || ''; } catch (e) {}
+  return label ? `${ctx}\n\nTARGET MARKET: ${label} — this business sells to this market. Drop keywords about another country's system, rules, fees or providers.` : ctx;
+}
 import { limiters, infraStats, withTimeout, HEAVY_MAX_QUEUE, Limiter, TTLCache } from './infra.js';
 import * as jobs from './jobs.js';
 import * as drift from './drift.js';
@@ -1197,7 +1207,7 @@ const routes = {
     if (site && site.geo_context && gaps.length && body.nicheFilter !== false) {
       try {
         const candidates = gaps.slice(0, 200);   // filter the top-volume slice (Haiku, fast) — matches the model's 200-keyword window
-        const keep = await claude.filterKeywordsByNiche({ keywords: candidates.map((g) => g.keyword), niche: site.geo_context, siteName: site.name, siteId: body.siteId });
+        const keep = await claude.filterKeywordsByNiche({ keywords: candidates.map((g) => g.keyword), niche: nicheWithMarket(site, body.db || (site && site.semrush_db)), siteName: site.name, siteId: body.siteId });
         const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
         const nf = candidates.filter((g) => keepSet.has(g.keyword.toLowerCase().trim()));
         if (nf.length) { offNicheFiltered = candidates.length - nf.length; gaps = nf; }
@@ -1784,13 +1794,26 @@ const routes = {
     if (!seed) {
       if (!site) return { error: 'A seed keyword is required (no site selected).' };
       // 1) the site's own ranking keywords — highest volume first (real demand, on-topic).
+      //    A site ranks for plenty of BRAND and off-market terms (e.g. a competitor's brand,
+      //    or another country's system). Those make terrible seeds: Google answers them
+      //    literally and the whole PAA set ends up about that brand/country. So the
+      //    candidates are service-filtered (market-aware) BEFORE we pick the top 3.
       try {
         const dom = (site.url || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
         const kw = await semrush.organicKeywords(dom, { db: market, limit: 60 });   // returns a bare array
         const rows = (Array.isArray(kw) ? kw : (kw && (kw.keywords || kw.rows)) || [])
           .filter((k) => k && k.keyword && String(k.keyword).split(/\s+/).length <= 6)
           .sort((a, b) => (b.volume || 0) - (a.volume || 0));
-        for (const k of rows.slice(0, 3)) derived.push(k.keyword);
+        let cand = rows.slice(0, 40).map((k) => k.keyword);
+        if (site.geo_context && cand.length) {
+          try {
+            const keep = await claude.filterKeywordsByNiche({ keywords: cand, niche: nicheWithMarket(site, market), siteName: site.name, siteId: body.siteId });
+            const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
+            const onService = cand.filter((k) => keepSet.has(String(k).toLowerCase().trim()));
+            if (onService.length) cand = onService;
+          } catch (e) { /* fail-open: use the unfiltered candidates */ }
+        }
+        for (const k of cand.slice(0, 3)) derived.push(k);
       } catch (e) { /* fall through to context-derived seeds */ }
       // 2) fall back to distilling the site's niche/service context into search-like seeds.
       if (!derived.length && site.geo_context) {
@@ -1833,7 +1856,7 @@ const routes = {
     // ones survive. Fail-open — never return nothing because the filter erred.
     if (res.autoSeeded && site && site.geo_context && (res.questions || []).length) {
       try {
-        const keep = await claude.filterKeywordsByNiche({ keywords: res.questions.map((q) => q.question), niche: site.geo_context, siteName: site.name, siteId: body.siteId });
+        const keep = await claude.filterKeywordsByNiche({ keywords: res.questions.map((q) => q.question), niche: nicheWithMarket(site, body.db || (site && site.semrush_db)), siteName: site.name, siteId: body.siteId });
         const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
         const kept = res.questions.filter((q) => keepSet.has(String(q.question).toLowerCase().trim()));
         if (kept.length) { res.offNicheFiltered = res.questions.length - kept.length; res.questions = kept; }

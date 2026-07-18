@@ -471,7 +471,9 @@ DROP — this is the part that matters most — anything in the same INDUSTRY or
 - a dental clinic must DROP general "doctor"/hospital terms.
 If this business would have to refer the searcher to someone else, DROP it.
 
-Also DROP: other companies' brand names, jobs/careers/salary terms, directories and regulators, generic profession lookups, and definitions of unrelated concepts.
+Also DROP: other companies' brand names (and anything asking whether a named company is legit/safe/reviews), jobs/careers/salary terms, directories and regulators, generic profession lookups, and definitions of unrelated concepts.
+
+If a TARGET MARKET is stated in the context, DROP keywords aimed at a DIFFERENT country or market — a UK business does not want questions about another country's system, even in the same service area.
 
 Be STRICT: a short, precise list is far more valuable than a broad one. High search volume is NOT a reason to keep something off-service. Return ONLY a JSON array of the kept keywords (exact strings copied from the input). No prose.` }],
     model: 'claude-haiku-4-5-20251001',   // fast — a filtering task; keeps the gap route under the edge timeout

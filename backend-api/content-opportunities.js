@@ -138,13 +138,18 @@ export async function findOpportunities(siteId, { db: region, maxKeywords = 160,
   // real service keywords (lower volume, far higher intent) BEFORE they could be judged —
   // so the plan was generic no matter how strict the filter got. Filter the whole pool in
   // batches (the filter only inspects ~200 at a time), then rank what's left.
+  // Niche context + the TARGET MARKET, so another country's terms can't pass the service
+  // test (a UK site was surfacing another country's system in the same service area).
+  const nicheCtx = site.geo_context
+    ? `${site.geo_context}\n\nTARGET MARKET: ${(dfs.countryFor(dbRegion) || {}).label || dbRegion} — this business sells to this market. Drop keywords about another country's system, rules, fees or providers.`
+    : '';
   let poolArr = [...pool.values()].map((k) => ({ ...k, src: [...k.src] }));
   if (site.geo_context && poolArr.length) {
     const kept = [];
     for (let i = 0; i < poolArr.length; i += 180) {
       const batch = poolArr.slice(i, i + 180);
       try {
-        const keep = await claude.filterKeywordsByNiche({ keywords: batch.map((k) => k.keyword), niche: site.geo_context, siteName: site.name, siteId });
+        const keep = await claude.filterKeywordsByNiche({ keywords: batch.map((k) => k.keyword), niche: nicheCtx, siteName: site.name, siteId });
         const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
         kept.push(...batch.filter((k) => keepSet.has(String(k.keyword).toLowerCase().trim())));
       } catch (e) { kept.push(...batch); }   // fail-open for this batch only
@@ -179,7 +184,7 @@ export async function findOpportunities(siteId, { db: region, maxKeywords = 160,
   if (site.geo_context && clusters.length > 3) {
     try {
       const titles = clusters.map((c) => c.suggestedTitle || c.label).filter(Boolean);
-      const keep = await claude.filterKeywordsByNiche({ keywords: titles, niche: site.geo_context, siteName: site.name, siteId });
+      const keep = await claude.filterKeywordsByNiche({ keywords: titles, niche: nicheCtx, siteName: site.name, siteId });
       const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
       const onService = clusters.filter((c) => keepSet.has(String(c.suggestedTitle || c.label).toLowerCase().trim()));
       if (onService.length >= 3) { sources.offServiceClusters = clusters.length - onService.length; clusters = onService; }
