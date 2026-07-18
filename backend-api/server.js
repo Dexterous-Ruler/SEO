@@ -2621,6 +2621,43 @@ const routes = {
     return { ok: true, postId: found.id, videoId, removed: gone };
   },
 
+  // Remove BROKEN YouTube embeds from published posts. A real YouTube id is exactly 11
+  // chars of [A-Za-z0-9_-]; anything else (e.g. the literal template placeholder "XXXX",
+  // or "VIDEO_ID") is not a video and renders as YouTube's "An error occurred" player.
+  // Deletes the whole video block — figure/lead-in/caption wrapper included — so no empty
+  // shell is left behind. Revision-backed, read-back verified, idempotent.
+  'POST /fix-broken-embeds': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
+    const site = await db.getSite(body.siteId).catch(() => null);
+    const wp = new WordPressClient(creds);
+    const VALID = /^[A-Za-z0-9_-]{11}$/;
+    const posts = await wp.request(`/posts?orderby=date&order=desc&per_page=${body.limit || 30}&context=edit&_fields=id,title,content`);
+    const fixed = [];
+    for (const p of (posts || [])) {
+      const raw = String((p.content && (p.content.raw != null ? p.content.raw : p.content.rendered)) || '');
+      const bad = [...new Set([...raw.matchAll(/youtube(?:-nocookie)?\.com\/embed\/([A-Za-z0-9_-]+)/g)].map((m) => m[1]))].filter((id) => !VALID.test(id));
+      if (!bad.length) continue;
+      let content = raw;
+      for (const id of bad) {
+        const esc = id.replace(/[-\\^$*+?.()|[\]{}]/g, '\\$&');
+        const inFig = `(?:(?!<\\/figure>)[\\s\\S])*?`;
+        const inDiv = `(?:(?!<\\/div>)[\\s\\S])*?`;
+        content = content
+          .replace(new RegExp(`<figure[^>]*>${inFig}/embed/${esc}${inFig}</figure>\\s*`, 'g'), '')
+          .replace(new RegExp(`<div class="youtube-embed-container"[^>]*>${inDiv}/embed/${esc}${inDiv}</div>\\s*`, 'g'), '')
+          .replace(new RegExp(`<iframe[^>]*/embed/${esc}[^>]*>\\s*</iframe>\\s*`, 'g'), '');
+      }
+      if (content === raw) { fixed.push({ id: p.id, badIds: bad, removed: false, note: 'wrapper not recognised — left untouched' }); continue; }
+      await wp.request(`/posts/${p.id}`, { method: 'POST', body: { content } });
+      const check = await wp.request(`/posts/${p.id}?_fields=content`).catch(() => null);
+      const gone = !!(check && !bad.some((id) => String((check.content && check.content.rendered) || '').includes('/embed/' + id)));
+      fixed.push({ id: p.id, title: (p.title && p.title.rendered || '').slice(0, 70), badIds: bad, removed: gone });
+      if (site) await db.logActivity({ site_id: site.id, type: gone ? 'verified' : 'warning', actor: 'Agent', icon: 'undo', text: `Removed broken video embed (${bad.join(', ')}) from “${(p.title && p.title.rendered || '#' + p.id).slice(0, 55)}”`, meta: 'placeholder id — not a real video' }).catch(() => {});
+    }
+    return { ok: true, scanned: (posts || []).length, fixed };
+  },
+
   // Strip INTERNAL strategy labels that leaked into reader-facing copy. The writer agents
   // receive directives named Hidden Insight / Semantic Analysis / Search Intent / Article
   // Goal etc. and are meant to APPLY them silently; occasionally one gets printed as a
@@ -3908,7 +3945,7 @@ const HEAVY_ROUTES = new Set([
   'POST /apply-local-schema', 'POST /engine-autodraft', 'POST /engine-sync-published',
   'POST /n8n-run',
   'POST /ux-crawl',
-  'POST /fix-contact-tokens', 'POST /embed-video', 'POST /remove-video-embed', 'POST /strip-internal-labels',   // WP read+write loops over posts
+  'POST /fix-contact-tokens', 'POST /embed-video', 'POST /remove-video-embed', 'POST /strip-internal-labels', 'POST /fix-broken-embeds',   // WP read+write loops over posts
   // Added: renamed/omitted routes that genuinely call Claude / DataForSEO / GSC / PSI / crawl.
   'POST /content-opportunities',            // renamed from the phantom /generate-opportunities (DataForSEO + clustering + Claude)
   'POST /audit-full',                       // full page crawl + PSI + on-page SEO read
