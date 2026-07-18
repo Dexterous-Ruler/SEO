@@ -455,7 +455,19 @@ export async function filterKeywordsByNiche({ keywords, niche, siteName, siteId 
   const remainder = all.slice(200);    // never evaluated — pass through unfiltered (don't drop)
   if (!list.length || !niche) return all;
   const txt = await complete({
-    system: [{ type: 'text', text: `You filter a keyword list down to terms genuinely relevant to a specific website's niche and services. KEEP a keyword only if a searcher using it could plausibly want what THIS site offers. DROP: other companies' brand names, jobs/careers/salary terms, unrelated industries/topics, and anything outside the stated niche. Return ONLY a JSON array of the kept keywords (exact strings copied from the input). No prose.` }],
+    system: [{ type: 'text', text: `You filter a keyword list down to terms this specific business could actually SERVE.
+
+STEP 1: From the CONTEXT, identify the site's SPECIFIC SERVICES — the exact things it is hired to do.
+STEP 2: KEEP a keyword ONLY if the searcher wants one of THOSE SPECIFIC SERVICES (or is at a decision point that leads directly to one).
+
+DROP — this is the part that matters most — anything in the same INDUSTRY or PROFESSION but a DIFFERENT SERVICE. "Same industry" is NOT relevance:
+- a firm that does independent legal advice on guarantees/mortgages must DROP divorce, personal injury, legal aid, no-win-no-fee, conveyancing quotes, "find a solicitor", law-society/regulator lookups — it does not sell those;
+- a dental clinic must DROP general "doctor"/hospital terms.
+If this business would have to refer the searcher to someone else, DROP it.
+
+Also DROP: other companies' brand names, jobs/careers/salary terms, directories and regulators, generic profession lookups, and definitions of unrelated concepts.
+
+Be STRICT: a short, precise list is far more valuable than a broad one. High search volume is NOT a reason to keep something off-service. Return ONLY a JSON array of the kept keywords (exact strings copied from the input). No prose.` }],
     model: 'claude-haiku-4-5-20251001',   // fast — a filtering task; keeps the gap route under the edge timeout
     maxTokens: 6000,   // 200 echoed keywords can exceed 3000 output tokens — truncation broke the JSON and silently disabled the filter
     temperature: 0,

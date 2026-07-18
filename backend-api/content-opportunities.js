@@ -167,6 +167,20 @@ export async function findOpportunities(siteId, { db: region, maxKeywords = 160,
     clusters = fallbackClusters(ranked);
     sources.clusterFallback = clusters.length;
   }
+  // SECOND-PASS relevance, at CLUSTER level. Even with a filtered pool, clustering can
+  // assemble a whole topic the business does not sell (a "Divorce" or "No Win No Fee"
+  // cluster for an ILA-only firm). Judge the cluster TITLES against the same service
+  // test and drop the off-service ones. Fail-open; never strip everything.
+  if (site.geo_context && clusters.length > 3) {
+    try {
+      const titles = clusters.map((c) => c.suggestedTitle || c.label).filter(Boolean);
+      const keep = await claude.filterKeywordsByNiche({ keywords: titles, niche: site.geo_context, siteName: site.name, siteId });
+      const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
+      const onService = clusters.filter((c) => keepSet.has(String(c.suggestedTitle || c.label).toLowerCase().trim()));
+      if (onService.length >= 3) { sources.offServiceClusters = clusters.length - onService.length; clusters = onService; }
+    } catch (e) { /* fail-open */ }
+  }
+
   const byKw = new Map(ranked.map((k) => [k.keyword.toLowerCase(), k]));
 
   const enriched = clusters.map((cl) => {
