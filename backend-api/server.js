@@ -2632,7 +2632,7 @@ const routes = {
     const site = await db.getSite(body.siteId).catch(() => null);
     const wp = new WordPressClient(creds);
     const VALID = /^[A-Za-z0-9_-]{11}$/;
-    const posts = await wp.request(`/posts?orderby=date&order=desc&per_page=${body.limit || 30}&context=edit&_fields=id,title,content`);
+    const posts = await wp.request(`/posts?orderby=date&order=desc&per_page=${body.limit || 30}&status=publish,draft,pending,future,private&context=edit&_fields=id,title,content`);
     const fixed = [];
     for (const p of (posts || [])) {
       const raw = String((p.content && (p.content.raw != null ? p.content.raw : p.content.rendered)) || '');
@@ -2671,7 +2671,7 @@ const routes = {
     const LABEL = '(?:hidden insight|semantic analysis|search intent|article goal|writing style|target audience|content brief|primary keyword|key takeaway directive)';
     // "[Hidden Insight] Title" / "(Hidden Insight) Title" / "Hidden Insight: Title" — inside a heading only.
     const reHead = new RegExp(`(<h[1-6][^>]*>)\\s*(?:[\\[(]\\s*${LABEL}\\s*[\\])]|${LABEL}\\s*:)\\s*`, 'gi');
-    const posts = await wp.request(`/posts?orderby=date&order=desc&per_page=${body.limit || 30}&context=edit&_fields=id,title,content`);
+    const posts = await wp.request(`/posts?orderby=date&order=desc&per_page=${body.limit || 30}&status=publish,draft,pending,future,private&context=edit&_fields=id,title,content`);
     const fixed = [];
     for (const p of (posts || [])) {
       const raw = String((p.content && (p.content.raw != null ? p.content.raw : p.content.rendered)) || '');
@@ -2699,7 +2699,7 @@ const routes = {
     let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
     const site = await db.getSite(body.siteId).catch(() => null);
     const wp = new WordPressClient(creds);
-    const posts = await wp.request(`/posts?orderby=date&order=desc&per_page=${body.limit || 30}&context=edit&_fields=id,title,content,link`);
+    const posts = await wp.request(`/posts?orderby=date&order=desc&per_page=${body.limit || 30}&status=publish,draft,pending,future,private&context=edit&_fields=id,title,content,link`);
     const fixed = [], stillTokened = [];
     for (const p of (posts || [])) {
       const raw = String((p.content && (p.content.raw != null ? p.content.raw : p.content.rendered)) || '');
