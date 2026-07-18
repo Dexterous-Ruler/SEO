@@ -2437,6 +2437,11 @@ const routes = {
     const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=id,title,content`);
     const raw = String((post.content && (post.content.raw != null ? post.content.raw : post.content.rendered)) || '');
     if (!raw) return { error: 'Could not read the post content.' };
+    // ONE video per article: if the post already carries ANY YouTube embed (n8n's, a
+    // manual one, a different id), do not stack another on top of it.
+    if (!raw.includes(videoId) && /<iframe[^>]*youtube(?:-nocookie)?\.com\/embed\//.test(raw)) {
+      return { ok: true, already: true, otherVideo: true, postId: found.id, videoId, note: 'post already has a different YouTube embed — not adding a second' };
+    }
     if (raw.includes(videoId)) {
       // Repair pass — idempotent, fixes two historical template defects in place:
       // (1) unclosed <div> inside the figure (unclosed divs have broken this site before);
@@ -2445,7 +2450,7 @@ const routes = {
       //     "Error 153: Video player configuration error" instead of playing.
       let fixed = raw;
       if (fixed.includes('</iframe></figure>')) fixed = fixed.split('</iframe></figure>').join('</iframe></div></figure>');
-      fixed = fixed.replace(/(<iframe\b(?![^>]*\breferrerpolicy=)[^>]*youtube-nocookie[^>]*?)(\s*\/?>)/g, '$1 referrerpolicy="strict-origin-when-cross-origin"$2');
+      fixed = fixed.replace(/(<iframe\b(?![^>]*\breferrerpolicy=)[^>]*youtube(?:-nocookie)?\.com\/embed\/[^>]*?)(\s*\/?>)/g, '$1 referrerpolicy="strict-origin-when-cross-origin"$2');
       if (fixed !== raw) {
         await wp.request(`/${found.type}/${found.id}`, { method: 'POST', body: { content: fixed } });
         if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: `Repaired video embed markup on post #${found.id}`, meta: 'div close + referrerpolicy (YT error 153)' }).catch(() => {});
@@ -2462,6 +2467,41 @@ const routes = {
     const stuck = !!(check && check.content && String(check.content.rendered || '').includes(videoId));
     if (site) await db.logActivity({ site_id: site.id, type: stuck ? 'verified' : 'warning', actor: 'Agent', icon: 'sparkles', text: `Embedded YouTube video into “${((post.title && post.title.rendered) || pageUrl).slice(0, 70)}”`, meta: 'youtube ' + videoId + (stuck ? ' · verified' : ' · not visible in render') }).catch(() => {});
     return { ok: true, postId: found.id, type: found.type, videoId, verified: stuck };
+  },
+
+  // Remove ONE specific YouTube embed from a post (undo for a double-embed or a broken
+  // placeholder like embed/XXXX). Strips the embed's wrapping container (figure.yt-embed /
+  // div.youtube-embed-container / bare iframe) for the given videoId only. Revision-backed.
+  'POST /remove-video-embed': async (body) => {
+    const pageUrl = body.pageUrl || body.url;
+    const videoId = String(body.videoId || '').trim();
+    if (!body.siteId || !pageUrl || !/^[A-Za-z0-9_-]{2,20}$/.test(videoId)) return { error: 'siteId, pageUrl and videoId required' };
+    let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
+    const site = await db.getSite(body.siteId).catch(() => null);
+    const wp = new WordPressClient(creds);
+    let found = null; try { found = await wp.resolvePostByUrl(pageUrl); } catch (e) {}
+    if (!found || !found.id) return { error: 'Could not match this URL to a WordPress post/page.' };
+    const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=id,title,content`);
+    const raw = String((post.content && (post.content.raw != null ? post.content.raw : post.content.rendered)) || '');
+    if (!raw.includes(`/embed/${videoId}`)) return { ok: true, absent: true, postId: found.id, videoId };
+    const esc = videoId.replace(/[-]/g, '\\-');
+    // Bounded matches: never cross the wrapper's own closing tag, so a wrapper that does
+    // NOT contain this id can never be spanned/removed by accident.
+    const inFigure = `(?:(?!</figure>)[\\s\\S])*?`;
+    const inDiv = `(?:(?!</div>)[\\s\\S])*?`;
+    let content = raw
+      // figure.yt-embed wrapper (our template)
+      .replace(new RegExp(`<figure class="yt-embed"[^>]*>${inFigure}/embed/${esc}${inFigure}</figure>\\s*`, 'g'), '')
+      // div.youtube-embed-container wrapper (the n8n template — holds only the iframe)
+      .replace(new RegExp(`<div class="youtube-embed-container"[^>]*>${inDiv}/embed/${esc}${inDiv}</div>\\s*`, 'g'), '');
+    // bare iframe fallback (no recognized wrapper)
+    content = content.replace(new RegExp(`<iframe[^>]*/embed/${esc}[^>]*>\\s*</iframe>\\s*`, 'g'), '');
+    if (content === raw) return { error: 'Embed found but its wrapper was not recognized — not touching the content.' };
+    await wp.request(`/${found.type}/${found.id}`, { method: 'POST', body: { content } });
+    const check = await wp.request(`/${found.type}/${found.id}?_fields=content`).catch(() => null);
+    const gone = !!(check && !String((check.content && check.content.rendered) || '').includes(`/embed/${videoId}`));
+    if (site) await db.logActivity({ site_id: site.id, type: gone ? 'verified' : 'warning', actor: 'Agent', icon: 'undo', text: `Removed YouTube embed ${videoId} from post #${found.id}`, meta: gone ? 'verified gone' : 'still present after save' }).catch(() => {});
+    return { ok: true, postId: found.id, videoId, removed: gone };
   },
 
   // Clean unresolved contact placeholders out of PUBLISHED posts. The writer agents are
@@ -3723,7 +3763,7 @@ const HEAVY_ROUTES = new Set([
   'POST /apply-local-schema', 'POST /engine-autodraft', 'POST /engine-sync-published',
   'POST /n8n-run',
   'POST /ux-crawl',
-  'POST /fix-contact-tokens', 'POST /embed-video',   // WP read+write loops over posts
+  'POST /fix-contact-tokens', 'POST /embed-video', 'POST /remove-video-embed',   // WP read+write loops over posts
   // Added: renamed/omitted routes that genuinely call Claude / DataForSEO / GSC / PSI / crawl.
   'POST /content-opportunities',            // renamed from the phantom /generate-opportunities (DataForSEO + clustering + Claude)
   'POST /audit-full',                       // full page crawl + PSI + on-page SEO read
