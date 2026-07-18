@@ -1821,6 +1821,17 @@ const routes = {
     if (!res) return { error: 'People Also Ask lookup failed for every seed — try again or enter a keyword.' };
     res.seedsUsed = seeds;
     res.autoSeeded = !!derived.length;
+    // Auto-derived seeds can be short/ambiguous (e.g. the acronym "ila" returned "Is ILA a
+    // girl's name?"). Run the questions through the site's niche filter so only on-topic
+    // ones survive. Fail-open — never return nothing because the filter erred.
+    if (res.autoSeeded && site && site.geo_context && (res.questions || []).length) {
+      try {
+        const keep = await claude.filterKeywordsByNiche({ keywords: res.questions.map((q) => q.question), niche: site.geo_context, siteName: site.name, siteId: body.siteId });
+        const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
+        const kept = res.questions.filter((q) => keepSet.has(String(q.question).toLowerCase().trim()));
+        if (kept.length) { res.offNicheFiltered = res.questions.length - kept.length; res.questions = kept; }
+      } catch (e) { /* fail-open */ }
+    }
     // Optional: push each PAA question to the Airtable Article Writer table as a brief,
     // reusing the EXISTING airtable-sync brief path (mapArticleBrief → the n8n-watched
     // table). The question becomes the suggested title; its pattern rides along so the
