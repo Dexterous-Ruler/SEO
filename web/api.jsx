@@ -109,6 +109,8 @@
     generateContent(task, input, finding, siteId) { return engine("/generate-content", { task, input, finding, siteId }); },
     contentIntel(siteId, niche) { return engine("/content-intel", { siteId, niche }); },
     contentOpportunities(siteId, opts) { return engine("/content-opportunities", Object.assign({ siteId }, opts || {})); },
+    contentOpportunitiesStart(siteId, opts) { return engine("/content-opportunities-start", Object.assign({ siteId }, opts || {})); },
+    contentOpportunitiesStatus(siteId) { return engine("/content-opportunities-status", { siteId }); },
     contentBrief(siteId, keyword, intent) { return engine("/content-brief", { siteId, keyword, intent }); },
     // Content Engine — one unified, de-duped, scored worklist from every content source
     // (keywords, trending, People Also Ask, AI-visibility). HEAVY/slow route (~20-60s).

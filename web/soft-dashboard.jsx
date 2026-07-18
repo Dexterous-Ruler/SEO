@@ -2014,7 +2014,27 @@ function OpportunitiesScreen({ ctx }) {
   };
   const cName = ((dbList||[]).find(c=>c.db===dbVal)||{}).label || dbVal.toUpperCase();
 
-  const load = ()=>{ setBusy(true); setErr(null); API.contentOpportunities(s.id,{db:dbVal}).then(r=>{ if(r.error){setErr(r.error);return;} setData(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy(false)); };
+  // Run as a BACKGROUND job and poll — the analysis (GSC + DataForSEO + Claude clustering)
+  // routinely outlives the request cap, which used to surface as "took too long and timed out".
+  const load = ()=>{
+    setBusy(true); setErr(null);
+    let stopped=false, tries=0;
+    const poll=()=>{
+      if(stopped) return;
+      API.contentOpportunitiesStatus(s.id).then(r=>{
+        if(stopped) return;
+        if(r.status==="running"){ if(++tries>150){ setErr("Still running after several minutes — try again."); setBusy(false); return; } setTimeout(poll,3000); return; }
+        if(r.status==="error"||r.error){ setErr(r.error||"Analysis failed"); setBusy(false); return; }
+        if(r.status==="unknown"){ setErr("The run was lost (server restart) — press Find opportunities again."); setBusy(false); return; }
+        setData(r); setBusy(false);
+      }).catch(e=>{ if(!stopped){ setErr(e.message); setBusy(false); } });
+    };
+    API.contentOpportunitiesStart(s.id,{db:dbVal}).then(r=>{
+      if(r&&r.error){ setErr(r.error); setBusy(false); return; }
+      setTimeout(poll,2500);
+    }).catch(e=>{ setErr(e.message); setBusy(false); });
+    return ()=>{ stopped=true; };
+  };
   const loadTrending = ()=>{ setTrendBusy(true); API.trendingIntel(s.id, undefined, dbVal).then(r=>setTrend(r)).catch(e=>setTrend({error:e.message})).finally(()=>setTrendBusy(false)); };
   // ITEM 4: one-click — push the trending topics straight into the Airtable keyword
   // column so the n8n writer turns each into an article. No cluster step needed.
@@ -2044,10 +2064,13 @@ function OpportunitiesScreen({ ctx }) {
   const startAmend = (idea,i)=>setIdea(i,{ edit:{ title:idea.title, angle:ideaPlan(idea) } });
   // ITEM 1: People Also Ask — pull real Google PAA questions for a seed keyword (in the
   // site's market via DataForSEO SERP), then push them to Airtable as content briefs.
+  // Seed is OPTIONAL — with the box empty the server derives seeds from THIS site
+  // (its top ranking keywords, else its saved site context) and returns seedsUsed.
   const findPaa = ()=>{
-    const seed=(paaSeed||"").trim(); if(!seed){ ctx.toast("Enter a seed keyword","gold"); return; }
+    const seed=(paaSeed||"").trim();
     setPaaBusy(true); setPaa(null);
-    API.peopleAlsoAsk(s.id, seed).then(r=>{ if(r.error){ ctx.toast("People Also Ask: "+r.error,"clay"); setPaa({error:r.error}); return; } setPaa(r); }).catch(e=>{ ctx.toast(e.message,"clay"); setPaa({error:e.message}); }).finally(()=>setPaaBusy(false));
+    if(!seed) ctx.toast("Using your site's own topics…","teal");
+    API.peopleAlsoAsk(s.id, seed||undefined).then(r=>{ if(r.error){ ctx.toast("People Also Ask: "+r.error,"clay"); setPaa({error:r.error}); return; } setPaa(r); if(r.autoSeeded&&(r.seedsUsed||[]).length) ctx.toast("Questions for: "+r.seedsUsed.join(", "),"teal"); }).catch(e=>{ ctx.toast(e.message,"clay"); setPaa({error:e.message}); }).finally(()=>setPaaBusy(false));
   };
   const pushPaa = ()=>{
     const kws=[...new Set([...(((paa&&paa.questions)||[]).map(q=>q.question)), ...((paa&&paa.related)||[])].map(k=>(k||"").trim()).filter(Boolean))];
@@ -2060,7 +2083,10 @@ function OpportunitiesScreen({ ctx }) {
   // "Push to writer": re-run PAA with push:true → each question becomes an Article Writer brief
   // (carries pattern→intent, snippetFormat→format). Toasts the synced count from the airtable result.
   const pushPaaToWriter = ()=>{
-    const seed=(paaSeed||"").trim(); if(!seed){ ctx.toast("Find questions first","gold"); return; }
+    // Reuse the seed the RESULTS came from (auto-derived or typed) — requiring the box to
+    // be filled made "Push to writer" impossible after an auto-seeded search.
+    const seed=(paaSeed||"").trim() || (((paa&&paa.seedsUsed)||[])[0]||"");
+    if(!seed){ ctx.toast("Find questions first","gold"); return; }
     const n=((paa&&paa.questions)||[]).length;
     setPushing("paa-writer"); ctx.toast("Sending "+n+" question(s) to the Article Writer…","teal");
     API.peopleAlsoAskPush(s.id, seed).then(r=>{
@@ -2186,7 +2212,7 @@ function OpportunitiesScreen({ ctx }) {
             ) : null
           }>People Also Ask</SectionHead>
           <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:(paa&&!paa.error&&(paa.questions||[]).length)?14:0 }}>
-            <input value={paaSeed} onChange={e=>setPaaSeed(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")findPaa();}} placeholder="Seed keyword (e.g. uk skilled worker visa)" style={{ flex:1, minWidth:220, padding:"10px 14px", borderRadius:"var(--r-pill)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none" }} />
+            <input value={paaSeed} onChange={e=>setPaaSeed(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")findPaa();}} placeholder="Optional — leave empty to use your site's own topics" style={{ flex:1, minWidth:220, padding:"10px 14px", borderRadius:"var(--r-pill)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none" }} />
             <NeoButton kind="primary" size="sm" icon={paaBusy?undefined:"search"} disabled={paaBusy} onClick={findPaa}>{paaBusy&&<Icon name="cog" size={14} className="audit-spin" />}{paaBusy?"Finding…":"Find questions"}</NeoButton>
           </div>
           {paa && paa.error && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"4px 2px" }}>{paa.error}</div>}
@@ -2202,7 +2228,8 @@ function OpportunitiesScreen({ ctx }) {
             </div>
           )}
           {paa && !paa.error && (paa.questions||[]).length===0 && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"4px 2px" }}>No People Also Ask box for that keyword — try a broader seed.</div>}
-          {!paa && !paaBusy && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"2px" }}>{`Enter a seed keyword to pull the live Google "People Also Ask" questions for ${cName}.`}</div>}
+          {!paa && !paaBusy && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"2px" }}>{`Just click Find questions — we use your site's own top topics. Add a keyword only to steer it somewhere specific. Live Google "People Also Ask" for ${cName}.`}</div>}
+          {paa && paa.autoSeeded && (paa.seedsUsed||[]).length>0 && <div style={{ fontSize:12, color:"var(--muted)", padding:"2px 2px 6px" }}>From your site's topics: {(paa.seedsUsed||[]).map((sd,i)=>(<span key={i}>{i>0?", ":""}<b style={{ color:"var(--t-700)" }}>{sd}</b></span>))}</div>}
         </SoftCard>
       )}
       {live && err && <div style={{ marginBottom:16 }}><ErrBanner msg={err} onRetry={load} /></div>}
@@ -6135,13 +6162,22 @@ function App() {
             try{ await API.updateSite(siteId,{scores:sc,prev_scores:site.scores,last_audit:new Date().toISOString(),open_findings:(res.findings||[]).length}); }catch(e){}
             try{ await API.createAudit({site_id:siteId,owner:site.owner,scope:"single",scores:sc,cwv:res.cwv,findings:res.findings,summary:variance?{variance}:null}); }catch(e){}
             try{ await API.logActivity({site_id:siteId,owner:site.owner,type:"audit",actor:"Agent",icon:"radar",text:(res.findings||[]).length+" findings · "+site.name,meta:"Perf "+sc.performance+" · SEO "+sc.seo}); }catch(e){}
-            // Create draft proposals in Supabase (deduped against existing).
+            // Create draft proposals in Supabase — DE-DUPED against what's already queued.
+            // Without this, every audit re-filed each finding as a fresh "proposed" row, so
+            // work the user had already approved/applied was buried under new copies of the
+            // same finding (20+ duplicates per finding) and looked like it had reverted.
             const drafts=res.proposals||[];
             const created=[];
+            let tracked=new Set();
+            try{
+              const cur=await API.listProposals(siteId);
+              tracked=new Set((cur||[]).filter(r=>r.status!=="dismissed").map(r=>r.finding_id));
+            }catch(e){}
             for(const p of drafts){
+              if(tracked.has(p.findingId)) continue;   // already in the queue (any state) — don't re-file
               try{
                 const row=await API.createProposal({site_id:siteId,owner:site.owner,finding_id:p.findingId,disc:p.disc,risk:p.risk,channel:p.channel,title:p.title,page:p.page,impact:p.impact,target:p.target,field:p.field,before_val:p.before,after_val:p.after,status:"proposed"});
-                created.push(row);
+                created.push(row); tracked.add(p.findingId);
               }catch(e){}
             }
             // Refresh proposals from Supabase so Review Queue is live.
@@ -6259,6 +6295,11 @@ function App() {
         const approved=proposals.filter(p=>p.status==="approved");
         return (async()=>{
           let applied=0,failed=0,manual=0,blocked=0; const cssProps=[];
+          // PERSIST the outcome. Previously only /apply-meta (rest-write) wrote back to
+          // Supabase; schema + theme/css applies updated React state only, so a reload
+          // showed them as still-approved — the change "went back" even though the site
+          // had been written. Every channel now records status + applied_at.
+          const markApplied=(p,status)=>API.updateProposal(p.id,{ status, applied_at:new Date().toISOString() }).catch(()=>{});
           for(const p of approved){
             if(p.channel==="rest-write"){
               try{
@@ -6272,7 +6313,7 @@ function App() {
             } else if(p.channel==="schema"){
               // Structured-data proposal → write JSON-LD to the live page.
               if(killSwitch){ /* simulated under kill switch */ }
-              else{ try{ const r=await API.applySchema(siteId,{ url:p.page, jsonld:p.after }); if(r&&r.ok){ applied++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"verified"}:x)); } else if(r&&r.status==="blocked"){ blocked++; } else { failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); } }catch(e){ failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); } }
+              else{ try{ const r=await API.applySchema(siteId,{ url:p.page, jsonld:p.after }); if(r&&r.ok){ applied++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"verified"}:x)); await markApplied(p,"verified"); } else if(r&&r.status==="blocked"){ blocked++; } else { failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); await markApplied(p,"failed"); } }catch(e){ failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); await markApplied(p,"failed"); } }
             } else if(p.channel==="theme/css"){
               cssProps.push(p);   // batch — one bundled seo-agent-a11y.css write below
             } else {
@@ -6290,9 +6331,9 @@ function App() {
               const g=await API.generateCss(siteId, findings);
               if(g && !g.error && g.css){
                 const w=await API.applyCss(siteId, g.css);
-                if(w && w.ok){ cssProps.forEach(p=>{ applied++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"verified"}:x)); }); }
+                if(w && w.ok){ for(const p of cssProps){ applied++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"verified"}:x)); await markApplied(p,"verified"); } }
                 else if(w && w.status==="blocked"){ cssProps.forEach(()=>blocked++); }
-                else { cssProps.forEach(p=>{ failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); }); }
+                else { for(const p of cssProps){ failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); await markApplied(p,"failed"); } }
               } else { cssProps.forEach(()=>manual++); }   // nothing CSS-expressible → still manual
             }catch(e){ cssProps.forEach(()=>failed++); }
           }

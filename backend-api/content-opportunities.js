@@ -83,20 +83,21 @@ export async function findOpportunities(siteId, { db: region, maxKeywords = 160,
     try { const ranked = await dfs.organicKeywords(domain, { db: dbRegion, limit: 100 }); ranked.forEach((k) => add(k, 'ranking')); sources.ranked = ranked.length; } catch (e) { sources.rankedError = String(e.message || e); }
   }
 
-  // 3) COMPETITORS — keyword gap vs saved competitors.
+  // 3) COMPETITORS — keyword gap vs saved competitors, run in PARALLEL (they're
+  //    independent; serially they were a large slice of the request budget).
   const competitors = Array.isArray(site.competitors) ? site.competitors.slice(0, 2) : [];
   if (dfs.hasKey() && competitors.length) {
     let gapCount = 0;
-    for (const c of competitors) {
-      try { const g = await dfs.keywordGap(domain, c.replace(/^https?:\/\//, ''), { db: dbRegion, limit: 60, negatives: site.negative_keywords || [], extraBrands: competitors }); g.gaps.forEach((k) => add({ ...k, position: null }, 'competitor')); gapCount += g.gaps.length; } catch (e) {}
-    }
+    const gs = await Promise.all(competitors.map((c) =>
+      dfs.keywordGap(domain, c.replace(/^https?:\/\//, ''), { db: dbRegion, limit: 60, negatives: site.negative_keywords || [], extraBrands: competitors }).catch(() => null)));
+    for (const g of gs) { if (!g) continue; g.gaps.forEach((k) => add({ ...k, position: null }, 'competitor')); gapCount += g.gaps.length; }
     sources.competitorGap = gapCount;
   }
 
   // 4) TRENDING — keyword ideas seeded from the site's strongest topics.
   if (includeTrending && dfs.hasKey()) {
     const seeds = [...pool.values()].sort((a, b) => b.volume - a.volume).slice(0, 5).map((k) => k.keyword);
-    const seedTerms = seeds.length ? seeds : [site.niche || domain.split('.')[0]];
+    const seedTerms = seeds.length ? seeds : [domain.split('.')[0]];
     try { const ideas = await dfs.keywordIdeas(seedTerms, { db: dbRegion, limit: 120 }); ideas.forEach((k) => add(k, 'trending')); sources.trending = ideas.length; } catch (e) { sources.trendingError = String(e.message || e); }
   }
 
@@ -106,7 +107,11 @@ export async function findOpportunities(siteId, { db: region, maxKeywords = 160,
   const ranked = [...pool.values()].map((k) => ({ ...k, src: [...k.src] })).sort((a, b) => b.volume - a.volume).slice(0, maxKeywords);
 
   // Cluster with Claude (labels/intent/title only — metrics stay deterministic).
-  const clusters = await claude.clusterKeywords({ keywords: ranked, siteName: site.name, niche: site.niche || (site.stack && site.stack.type), siteId });
+  // niche: there is NO `niche` column — the site's real niche/service context lives in
+  // geo_context. The old fallback passed stack.type (literally "WordPress"), so clustering
+  // ran with no idea what the site sells and produced generic, off-topic clusters.
+  const niche = (site.geo_context && String(site.geo_context).slice(0, 1500)) || (site.stack && site.stack.type) || '';
+  const clusters = await claude.clusterKeywords({ keywords: ranked, siteName: site.name, niche, siteId });
   const byKw = new Map(ranked.map((k) => [k.keyword.toLowerCase(), k]));
 
   const enriched = clusters.map((cl) => {

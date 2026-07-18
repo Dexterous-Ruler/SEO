@@ -123,6 +123,7 @@ async function generateRewritePreview({ wp, found, page, site, siteId, brief }) 
 }
 const REWRITES = new Map();   // `${siteId}:${postId}` -> { status:'running'|'done'|'error', result?, error?, at }
 const _atRecCache = new Map();  // `${base}:${table}:${filter}` -> { all, exp } — 10s TTL absorbs the grid's poll bursts
+const OPP_RUNS = new Map();     // siteId -> { status:'running'|'done'|'error', result?, error?, at } — content-opportunities background job
 import { limiters, infraStats, withTimeout, HEAVY_MAX_QUEUE, Limiter, TTLCache } from './infra.js';
 import * as jobs from './jobs.js';
 import * as drift from './drift.js';
@@ -1733,19 +1734,93 @@ const routes = {
     } catch (e) { return { error: 'Content-opportunity analysis failed: ' + e.message }; }
   },
 
+  // Same analysis, run as a BACKGROUND job so it can never hit the ~95s request cap
+  // (GSC + DataForSEO pulls + a large Claude clustering call routinely exceed it, which
+  // surfaced to the operator as "That request took too long and timed out"). Mirrors the
+  // content-engine startRun/runStatus pattern: start returns immediately, the UI polls.
+  'POST /content-opportunities-start': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const cur = OPP_RUNS.get(body.siteId);
+    if (cur && cur.status === 'running') return { status: 'running', at: cur.at };
+    OPP_RUNS.set(body.siteId, { status: 'running', at: Date.now() });
+    (async () => {
+      try {
+        const r = await findOpportunities(body.siteId, { db: body.db, maxKeywords: body.maxKeywords || 160, includeTrending: body.includeTrending !== false });
+        OPP_RUNS.set(body.siteId, { status: 'done', result: r, at: Date.now() });
+      } catch (e) {
+        OPP_RUNS.set(body.siteId, { status: 'error', error: 'Content-opportunity analysis failed: ' + (e && e.message || e), at: Date.now() });
+      }
+    })();
+    return { status: 'running', at: Date.now() };
+  },
+  'POST /content-opportunities-status': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const r = OPP_RUNS.get(body.siteId);
+    if (!r) return { status: 'unknown', reason: 'no active run — it may have completed or been lost to a restart; re-run' };
+    if (r.status === 'done') { OPP_RUNS.delete(body.siteId); return { status: 'done', ...(r.result || {}) }; }
+    if (r.status === 'error') { OPP_RUNS.delete(body.siteId); return { status: 'error', error: r.error }; }
+    return { status: 'running', at: r.at };
+  },
+
   // People Also Ask: real Google PAA questions for a seed keyword, in the active
   // site's market (semrush_db). Read-only research; the UI pushes the questions to
   // the Airtable keyword column so the writer answers one per article. Uses the
   // existing DataForSEO account (SERP advanced) — no new vendor/key.
   'POST /people-also-ask': async (body) => {
     if (!semrush.hasKey()) return { error: 'DataForSEO not configured — add DATAFORSEO_LOGIN + API password.' };
-    const seed = String(body.keyword || '').trim();
-    if (!seed) return { error: 'A seed keyword is required.' };
     const site = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
-    let res;
-    try {
-      res = await semrush.peopleAlsoAsk(seed, { db: (site && site.semrush_db) || body.db || 'uk', depth: body.depth || 2 });
-    } catch (e) { return { error: e.code === 'NO_UNITS' ? 'DataForSEO balance exhausted — top up at app.dataforseo.com' : ('People Also Ask lookup failed: ' + e.message) }; }
+    const market = (site && site.semrush_db) || body.db || 'uk';
+    // Seed is now OPTIONAL: with no keyword we derive seeds from THIS site's own context —
+    // its highest-volume ranking keywords, else its geo_context service description. The
+    // operator shouldn't have to guess a seed for their own site.
+    let seed = String(body.keyword || '').trim();
+    const derived = [];
+    if (!seed) {
+      if (!site) return { error: 'A seed keyword is required (no site selected).' };
+      // 1) the site's own ranking keywords — highest volume first (real demand, on-topic).
+      try {
+        const dom = (site.url || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+        const kw = await semrush.organicKeywords(dom, { db: market, limit: 60 });   // returns a bare array
+        const rows = (Array.isArray(kw) ? kw : (kw && (kw.keywords || kw.rows)) || [])
+          .filter((k) => k && k.keyword && String(k.keyword).split(/\s+/).length <= 6)
+          .sort((a, b) => (b.volume || 0) - (a.volume || 0));
+        for (const k of rows.slice(0, 3)) derived.push(k.keyword);
+      } catch (e) { /* fall through to context-derived seeds */ }
+      // 2) fall back to distilling the site's niche/service context into search-like seeds.
+      if (!derived.length && site.geo_context) {
+        try {
+          const txt = await claude.complete({
+            system: [{ type: 'text', text: 'You turn a website\'s service description into the SHORT search queries its customers actually type into Google. Return ONLY a JSON array of 3 lowercase query strings, 2-5 words each, no brand names, no prose.' }],
+            model: 'claude-haiku-4-5-20251001', maxTokens: 300, temperature: 0,
+            messages: [{ role: 'user', content: `SITE: ${site.name || ''}\n\nWHAT THIS SITE DOES:\n${String(site.geo_context).slice(0, 2000)}\n\nReturn the JSON array of 3 seed queries.` }],
+          });
+          const arr = JSON.parse(txt.slice(txt.indexOf('['), txt.lastIndexOf(']') + 1));
+          for (const q of arr.slice(0, 3)) if (q && String(q).trim()) derived.push(String(q).trim());
+        } catch (e) { /* leave derived empty */ }
+      }
+      if (!derived.length) return { error: 'Could not derive a seed from this site — add site context (Settings) or type a keyword.' };
+      seed = derived[0];
+    }
+    // Query each seed (bounded to 3) and merge, de-duped by question text.
+    const seeds = derived.length ? derived.slice(0, 3) : [seed];
+    let res = null;
+    for (const s of seeds) {
+      let one;
+      try {
+        one = await semrush.peopleAlsoAsk(s, { db: market, depth: body.depth || 2 });
+      } catch (e) {
+        if (e.code === 'NO_UNITS') return { error: 'DataForSEO balance exhausted — top up at app.dataforseo.com' };
+        continue;   // one bad seed must not sink the whole lookup
+      }
+      if (!res) res = { ...one, questions: [...(one.questions || [])] };
+      else {
+        const seen = new Set(res.questions.map((q) => String(q.question || '').toLowerCase()));
+        for (const q of (one.questions || [])) { const k = String(q.question || '').toLowerCase(); if (k && !seen.has(k)) { seen.add(k); res.questions.push(q); } }
+      }
+    }
+    if (!res) return { error: 'People Also Ask lookup failed for every seed — try again or enter a keyword.' };
+    res.seedsUsed = seeds;
+    res.autoSeeded = !!derived.length;
     // Optional: push each PAA question to the Airtable Article Writer table as a brief,
     // reusing the EXISTING airtable-sync brief path (mapArticleBrief → the n8n-watched
     // table). The question becomes the suggested title; its pattern rides along so the
