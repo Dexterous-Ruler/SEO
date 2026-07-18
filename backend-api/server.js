@@ -1851,6 +1851,7 @@ const routes = {
         label: q.question,
         intent: q.pattern,
         format: q.snippetFormat,
+        answer: q.answer,   // Google's PAA snippet → the row's Description
       }));
       try {
         res.airtable = await routes['POST /airtable-sync']({ siteId: body.siteId, kinds: ['opportunities'], clusters });

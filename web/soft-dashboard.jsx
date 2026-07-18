@@ -2113,7 +2113,8 @@ function OpportunitiesScreen({ ctx }) {
     if(!chosen.length){ ctx.toast("Find questions first","gold"); return; }
     const fallbackSeed=(paaSeed||"").trim() || (((paa&&paa.seedsUsed)||[])[0]||"");
     setPushing("paa-writer"); ctx.toast("Sending "+chosen.length+" question(s) to the Article Writer…","teal");
-    const clusters = chosen.map(q=>({ suggestedTitle:q.question, primaryKeyword:q.seed||fallbackSeed, keyword:q.seed||fallbackSeed, label:q.question, intent:q.pattern, format:q.snippetFormat }));
+    // answer = Google's own PAA snippet → becomes the row's Description (real context for the writer)
+    const clusters = chosen.map(q=>({ suggestedTitle:q.question, primaryKeyword:q.seed||fallbackSeed, keyword:q.seed||fallbackSeed, label:q.question, intent:q.pattern, format:q.snippetFormat, answer:q.answer }));
     API.airtableSync(s.id,{ kinds:["opportunities"], clusters }).then(r=>{
       if(r&&r.error){ ctx.toast("Push to writer: "+r.error,"clay"); return; }
       const o=(r&&r.synced&&r.synced.opportunities)||{};

@@ -290,6 +290,12 @@ export function mapGapBriefs(gaps, briefField) {
       'Write the definitive page for this keyword: match the search intent, answer it better and more completely than the competitor page, and route readers to the relevant service/booking CTA.',
     ].filter((l) => l !== '');
     const row = { Title: title, Keyword: kw, 'Primary Keyword': kw, Category: 'Blog' };
+    const desc = [
+      `Target keyword: ${kw}` + (g.volume ? ` (~${Number(g.volume).toLocaleString()} searches/mo)` : ''),
+      g.competitor ? `gap vs ${g.competitor}` + (g.competitorPos ? ` (ranks #${g.competitorPos})` : '') : '',
+      'Match the search intent and route the reader to the relevant service.',
+    ].filter(Boolean).join(' · ');
+    row.Description = desc.slice(0, 500);
     if (briefField) row[briefField] = lines.join('\n');
     return row;
   }).filter(Boolean);
@@ -363,7 +369,9 @@ export function mapArticleBrief(cluster, brief, briefField, fieldSet) {
     Category: 'Blog',  // drives the n8n Category switch (Blog branch); user can change
   };
   if (b.angle) row['Goal of Article'] = b.angle;
-  if (b.metaDescription) row.Description = b.metaDescription;
+  // Description: the generated meta when we have one, else a synthesised summary — never blank.
+  row.Description = b.metaDescription || summaryFor(c, title);
+  if (!row.Description) delete row.Description;
   if (planText) {
     if (briefField && briefField !== 'Description') row[briefField] = planText;
     else row.Description = (row.Description ? row.Description + '\n\n' : '') + planText;
@@ -373,6 +381,28 @@ export function mapArticleBrief(cluster, brief, briefField, fieldSet) {
   }
   return Object.keys(row).length ? row : null;
 }
+// Every pushed row must carry a Description — the n8n writers read it (SERPs/Writing/KWs
+// agent + Preliminary Plan) and an empty one starves them of context. When no AI brief with
+// a metaDescription exists (PAA questions, keyword gaps, plain clusters), synthesise a real
+// one-line summary from what we DO know, rather than leaving the cell blank.
+function summaryFor(c, title) {
+  const o = c || {};
+  // A People-Also-Ask row carries Google's own answer snippet — the best possible summary.
+  if (o.answer) return String(o.answer).replace(/\s+/g, ' ').trim().slice(0, 400);
+  const kw = o.primaryKeyword || o.keyword || '';
+  const bits = [];
+  if (kw) bits.push(`Target keyword: ${kw}`);
+  if (o.intent) bits.push(`${o.intent} intent`);
+  if (o.format) bits.push(String(o.format));
+  if (o.totalVolume) bits.push(`~${Number(o.totalVolume).toLocaleString()} searches/mo`);
+  const kws = (o.keywords || []).map((k) => (typeof k === 'string' ? k : k && k.keyword)).filter(Boolean).filter((k) => k.toLowerCase() !== String(kw).toLowerCase()).slice(0, 4);
+  const head = title ? `${title}. ` : '';
+  const meta = bits.length ? bits.join(' · ') + '. ' : '';
+  const also = kws.length ? `Also covers: ${kws.join(', ')}.` : '';
+  const out = (head + meta + also).trim();
+  return out.length > 12 ? out.slice(0, 500) : '';
+}
+
 // Flatten a structured brief object into readable text for Airtable.
 function briefToText(b) {
   if (!b) return '';

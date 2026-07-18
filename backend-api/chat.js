@@ -503,7 +503,15 @@ async function runTool(name, input, siteId, turn) {
       // field-set-filtered so a differing per-site schema can never 422.
       const row = { Title: title, Keyword: keyword, 'Primary Keyword': keyword, Category: 'Blog' };
       if (input.goal) row['Goal of Article'] = String(input.goal);
-      if (input.description) row.Description = String(input.description);
+      // Description is read by the n8n writers — never leave it blank. Fall back to the
+      // stated goal, else the brief's first substantive line.
+      let desc = String(input.description || '').trim();
+      if (!desc && input.goal) desc = String(input.goal).trim();
+      if (!desc && brief) {
+        const line = brief.split('\n').map((l) => l.replace(/^[#>*\-\s]+/, '').trim()).find((l) => l.length > 40 && !/^[A-Z\s]{6,}$/.test(l));
+        if (line) desc = line;
+      }
+      if (desc) row.Description = desc.slice(0, 500);
       const briefText = brief ? brief + sourceNote : brief;
       if (briefText) { if (briefField && briefField !== 'Description') row[briefField] = briefText; else row.Description = (row.Description ? row.Description + '\n\n' : '') + briefText; }
       for (const k of Object.keys(row)) if (!names.has(k)) delete row[k];
