@@ -274,6 +274,26 @@ export function mapGaps(gaps, source, now) {
     CPC: g.cpc || 0, 'Competitor URL': g.url || '', Source: source || 'SEMrush', 'Synced At': now,
   }));
 }
+// Gap keywords as WRITER-READY Article Writer rows (Title + Keyword + Content Brief),
+// not bare keyword rows whose stat fields get filtered away by the writer's field set.
+// This is what "push keyword gaps" should create: a row n8n can actually write from.
+export function mapGapBriefs(gaps, briefField) {
+  return (gaps || []).map((g) => {
+    if (!g || !g.keyword) return null;
+    const kw = String(g.keyword).trim();
+    const title = kw.replace(/\b\w/g, (c) => c.toUpperCase());
+    const lines = [
+      `Target keyword: ${kw}` + (g.volume ? ` (~${Number(g.volume).toLocaleString()} searches/mo)` : ''),
+      g.competitor ? `Keyword gap vs competitor: ${g.competitor}` + (g.competitorPos ? ` (they rank #${g.competitorPos}` + (g.url ? ` with ${g.url}` : '') + ')' : '') : '',
+      g.cpc ? `CPC ~$${Number(g.cpc).toFixed(2)} — commercial value signal` : '',
+      '',
+      'Write the definitive page for this keyword: match the search intent, answer it better and more completely than the competitor page, and route readers to the relevant service/booking CTA.',
+    ].filter((l) => l !== '');
+    const row = { Title: title, Keyword: kw, 'Primary Keyword': kw, Category: 'Blog' };
+    if (briefField) row[briefField] = lines.join('\n');
+    return row;
+  }).filter(Boolean);
+}
 export function mapContent(suggestions, now) {
   return (suggestions || []).map((s) => ({
     Title: s.title, 'Target Keyword': s.targetKeyword || '', Format: s.format || '',

@@ -1194,7 +1194,7 @@ const routes = {
     let offNicheFiltered = 0;
     if (site && site.geo_context && gaps.length && body.nicheFilter !== false) {
       try {
-        const candidates = gaps.slice(0, 120);   // filter the top-volume slice → keeps the Claude call fast
+        const candidates = gaps.slice(0, 200);   // filter the top-volume slice (Haiku, fast) — matches the model's 200-keyword window
         const keep = await claude.filterKeywordsByNiche({ keywords: candidates.map((g) => g.keyword), niche: site.geo_context, siteName: site.name, siteId: body.siteId });
         const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
         const nf = candidates.filter((g) => keepSet.has(g.keyword.toLowerCase().trim()));
@@ -2658,8 +2658,26 @@ const routes = {
           if (cols.length) filterByFormula = `OR(${cols.join(',')})`;
         }
       }
-      const page = await airtable.listRecords(pat, cfg.base_id, target.id, { pageSize: body.pageSize || 50, offset: body.offset, filterByFormula });
+      // NEWEST-FIRST: Airtable's default order is insertion order (oldest first), which
+      // buried fresh pushes behind "next 50 → next 50 → …". Pull up to 8 pages (800 rows),
+      // sort by createdTime desc, and page NUMERICALLY over the sorted list — recent rows
+      // are always on page one. (Legacy opaque Airtable offsets coerce to NaN → page 0.)
+      const all = [];
+      let atOffset; let pages = 0;
+      do {
+        const pg = await airtable.listRecords(pat, cfg.base_id, target.id, { pageSize: 100, offset: atOffset, filterByFormula });
+        for (const r of (pg.records || [])) all.push(r);
+        atOffset = pg.offset; pages++;
+      } while (atOffset && pages < 8);
+      all.sort((a, b) => String(b.createdTime || '').localeCompare(String(a.createdTime || '')));
+      const start = Math.max(0, Number(body.offset) || 0);
+      const size = body.pageSize || 50;
+      const page = { records: all.slice(start, start + size), offset: (start + size) < all.length ? String(start + size) : undefined };
+      // Which table is the MASTER content list (the n8n-watched Article Writer)?
+      const masterT = cfg.table_gaps ? tables.find((t) => t.id === cfg.table_gaps || t.name === cfg.table_gaps) : null;
       return {
+        total: all.length, truncatedAt: atOffset ? all.length : undefined,
+        masterTableId: (masterT && masterT.id) || null,
         fields: target.fields || [], tableName: target.name, tableId: target.id,
         records: page.records, offset: page.offset,
         tables: tables.map((t) => ({ id: t.id, name: t.name })),
@@ -2919,11 +2937,16 @@ const routes = {
         const g = await semrush.keywordGap(dom, body.competitor, { db: site.semrush_db || 'uk' }).catch(() => ({ gaps: [] }));
         gaps = g.gaps;
       }
-      const rows = airtable.mapGaps(gaps || [], 'DataForSEO', now);
+      // Writer-ready rows (Title + Keyword + Content Brief) — NOT bare keyword rows whose
+      // stat fields get filtered away, leaving half-empty "ghost" rows in the master list.
+      const aw = await articleWriterTarget();
+      const rows = aw
+        ? airtable.mapGapBriefs(gaps || [], aw.briefField)
+        : airtable.mapGaps(gaps || [], 'DataForSEO', now);
       // Land keywords in the Article Writer table (de-duped by Keyword); only if that
       // table isn't configured do we fall back to a dedicated 'SEO Keyword Gaps' table.
       const done = await pushToArticleWriter('gaps', rows, 'Keyword');
-      if (!done) await push('gaps', cfg.table_gaps, rows, airtable.SCHEMAS.gaps);
+      if (!done) await push('gaps', cfg.table_gaps, airtable.mapGaps(gaps || [], 'DataForSEO', now), airtable.SCHEMAS.gaps);
     }
     // 2) Content suggestions (passed from the UI's content-intel result)
     if (kinds.includes('content')) {

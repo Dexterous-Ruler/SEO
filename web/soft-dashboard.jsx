@@ -4654,6 +4654,7 @@ function SemrushScreen({ ctx }) {
   useEffect(()=>{ if(ctx.navTab && ["keywords","value","striking","competitors","gap"].includes(ctx.navTab)) setTab(ctx.navTab); },[ctx.navTab]);
   const [gapComp,setGapComp] = useState("");
   const [gaps,setGaps] = useState(null);
+  const [gapSel,setGapSel] = useState(()=>new Set());   // keywords ticked for a selective push
   const [gapBusy,setGapBusy] = useState(false);
   const [striking,setStriking] = useState(null);
   const [strikeBusy,setStrikeBusy] = useState(false);
@@ -4718,21 +4719,26 @@ function SemrushScreen({ ctx }) {
   const runGap = ()=>{
     const useComps = competitors.length ? competitors : (gapComp.trim()?[gapComp.trim()]:[]);
     if(!useComps.length){ ctx.toast("Add at least one competitor below","gold"); return; }
-    setGapBusy(true); setGaps(null);
-    // siteId makes the backend merge saved competitors + negatives + brand filtering
+    setGapBusy(true); setGaps(null); setGapSel(new Set());
+    // siteId makes the backend merge saved competitors + negatives + niche (geo_context) AI filtering
     API.semrushKeywordGap(domain, gapComp.trim()||undefined, (s.semrush_db)||"uk", s.id).then(r=>{
       if(r.needsKey){ setNeedsKey(true); return; }
       if(r.error){ if(r.unitsRemaining!=null) setUnits(r.unitsRemaining); setGaps({gaps:[],error:r.error,noUnits:!!r.noUnits}); return; }
       setGaps(r);
     }).catch(e=>setGaps({gaps:[],error:e.message})).finally(()=>setGapBusy(false));
   };
-  const pushGapsToAirtable = ()=>{
-    if(!gaps||!gaps.gaps||!gaps.gaps.length) return;
-    ctx.toast("Pushing "+gaps.gaps.length+" gaps to Airtable…","teal");
-    API.airtableSync(s.id,{ kinds:["gaps"], gaps:gaps.gaps }).then(r=>{
+  // Push gap keywords into the MASTER Article Writer as writer-ready rows (Title + Keyword +
+  // Content Brief). `only` = the ticked subset; omitted → all. De-duped by Keyword server-side.
+  const pushGapsToWriter = (only)=>{
+    const list = (gaps&&gaps.gaps||[]).filter(g=>!only||only.has(g.keyword));
+    if(!list.length) return;
+    ctx.toast("Pushing "+list.length+" keyword(s) to the Article Writer…","teal");
+    API.airtableSync(s.id,{ kinds:["gaps"], gaps:list }).then(r=>{
       if(r.error){ ctx.toast(r.error==="Airtable not connected"?"Connect Airtable first (Airtable Sync tab)":r.error, "clay"); return; }
-      const n=(r.synced&&r.synced.gaps&&r.synced.gaps.pushed)||0;
-      ctx.toast("Pushed "+n+" keyword gaps to Airtable ✓","teal");
+      const g=(r.synced&&r.synced.gaps)||{};
+      const n=g.pushed||0;
+      ctx.toast(n>0?("Pushed "+n+" → Article Writer ✓ — set Status to “Write Article” to generate"+(g.skipped?(" ("+g.skipped+" already there)"):"")):(g.skipped?"All selected already in the Article Writer":"Nothing pushed"), n>0?"teal":"gold");
+      if(n>0&&only) setGapSel(new Set());
     }).catch(e=>ctx.toast("Airtable: "+e.message,"clay"));
   };
 
@@ -4985,19 +4991,25 @@ function SemrushScreen({ ctx }) {
                 )}
                 {gaps && !gaps.error && (
                   <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-                    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
-                      <span style={{ fontSize:13, fontWeight:700, color:"var(--ink-2)" }}>{gaps.gapCount||(gaps.gaps||[]).length} gap keyword(s) · competitor brands & excluded terms filtered out</span>
-                      <NeoButton kind="soft" size="sm" icon="layers" disabled={!(gaps.gaps||[]).length} onClick={pushGapsToAirtable}>Push to Airtable</NeoButton>
+                    <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom:6 }}>
+                      <span style={{ fontSize:13, fontWeight:700, color:"var(--ink-2)" }}>{gaps.gapCount||(gaps.gaps||[]).length} gap keyword(s)</span>
+                      {gaps.offNicheFiltered>0 && <Chip tone="teal" size="sm" title="AI filtered these out using your site's niche context (Settings → Site context) — off-topic keywords from broad competitors">{gaps.offNicheFiltered} off-niche removed by AI</Chip>}
+                      <span style={{ fontSize:11.5, color:"var(--faint)" }}>brands & excluded terms auto-filtered · tick keywords to push only those</span>
+                      <div style={{ marginLeft:"auto", display:"flex", gap:8 }}>
+                        <NeoButton kind="primary" size="sm" icon="upload" disabled={!gapSel.size} onClick={()=>pushGapsToWriter(gapSel)} title="Push ONLY the ticked keywords into the master Article Writer as writer-ready rows">Push selected{gapSel.size?(" ("+gapSel.size+")"):""}</NeoButton>
+                        <NeoButton kind="soft" size="sm" icon="layers" disabled={!(gaps.gaps||[]).length} onClick={()=>pushGapsToWriter()} title="Push every listed keyword into the master Article Writer">Push all</NeoButton>
+                      </div>
                     </div>
-                    {(gaps.gaps||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No gap keywords found after filtering (all were competitor brand names or excluded terms).</div>}
-                    {(gaps.gaps||[]).slice(0,40).map((g,i)=>(
-                      <div key={i} style={{ display:"flex", alignItems:"center", padding:"9px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+                    {(gaps.gaps||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No gap keywords found after filtering (all were competitor brand names, excluded terms or off-niche).</div>}
+                    {(gaps.gaps||[]).slice(0,40).map((g,i)=>{ const on=gapSel.has(g.keyword); return (
+                      <div key={i} onClick={()=>setGapSel(p=>{ const n=new Set(p); if(n.has(g.keyword)) n.delete(g.keyword); else n.add(g.keyword); return n; })} style={{ display:"flex", alignItems:"center", padding:"9px 12px", borderRadius:"var(--r-md)", background:on?"var(--t-50)":"var(--bg)", boxShadow:on?"inset 0 0 0 1.5px var(--t-500)":"var(--neo-in)", cursor:"pointer", transition:"background .12s ease" }} title={on?"Click to unselect":"Click to select for push"}>
+                        <span style={{ width:30, display:"grid", placeItems:"center" }}><span style={{ width:17, height:17, borderRadius:5, display:"grid", placeItems:"center", background:on?"var(--t-500)":"var(--bg-2)", boxShadow:on?"none":"var(--neo-in)", color:"#fff", fontSize:11, fontWeight:900 }}>{on?"✓":""}</span></span>
                         <span style={{ width:50 }}><span style={{ display:"inline-grid", placeItems:"center", minWidth:30, height:22, padding:"0 6px", borderRadius:7, background:TT[posTone(g.competitorPos)][1], color:TT[posTone(g.competitorPos)][0], fontSize:12, fontWeight:800 }}>#{g.competitorPos}</span></span>
                         <span style={{ flex:1, fontSize:13, fontWeight:600, fontFamily:"var(--mono)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{g.keyword}</span>
                         <span style={{ width:90, textAlign:"right", fontSize:13, fontWeight:700 }}>{fmt(g.volume)}</span>
                         <span style={{ width:70, textAlign:"right", fontSize:12, color:"var(--muted)" }}>${(g.cpc||0).toFixed(2)}</span>
                       </div>
-                    ))}
+                    ); })}
                   </div>
                 )}
                 {!gaps && !gapBusy && <div style={{ padding:"10px 2px", fontSize:13, color:"var(--muted)" }}>Pick a competitor to find high-value keywords they rank for that you're missing — then push them to Airtable in one click.</div>}
@@ -5177,18 +5189,18 @@ function AirtableGrid({ ctx, siteId }) {
   const HCELL = { textAlign:"left", padding:"8px 10px", fontSize:11, fontWeight:700, letterSpacing:".02em", color:"var(--muted)", background:"var(--bg-2)", borderBottom:"2px solid var(--line)", borderRight:"1px solid var(--line-soft)", whiteSpace:"nowrap" };
   return (
     <SoftCard hover={false} style={{ padding:0, overflow:"hidden" }}>
-      {/* table tabs (Airtable-style) */}
+      {/* table tabs (Airtable-style) — the MASTER content list (Article Writer) always first + badged */}
       {(d.tables && d.tables.length>1) && (
         <div className="scroll" style={{ display:"flex", gap:2, padding:"7px 10px 0", borderBottom:"1px solid var(--line-soft)", overflowX:"auto" }}>
-          {d.tables.map(t=>{ const on=(d.tableId===t.id); return (
-            <button key={t.id} onClick={()=>{ if(!on){ setTable(t.id); setQ(""); setQActive(""); } }} style={{ padding:"8px 14px", fontSize:13, fontWeight:on?800:600, border:"none", borderRadius:"9px 9px 0 0", cursor:"pointer", whiteSpace:"nowrap", color:on?"var(--t-700)":"var(--muted)", background:on?"var(--surface)":"transparent", boxShadow:on?"inset 0 -2px 0 var(--t-500)":"none" }}>{t.name}</button>
+          {d.tables.slice().sort((a,b)=>(a.id===d.masterTableId?-1:0)-(b.id===d.masterTableId?-1:0)).map(t=>{ const on=(d.tableId===t.id); const master=(t.id===d.masterTableId); return (
+            <button key={t.id} onClick={()=>{ if(!on){ setTable(t.id); setQ(""); setQActive(""); } }} style={{ padding:"8px 14px", fontSize:13, fontWeight:on?800:600, border:"none", borderRadius:"9px 9px 0 0", cursor:"pointer", whiteSpace:"nowrap", color:on?"var(--t-700)":"var(--muted)", background:on?"var(--surface)":"transparent", boxShadow:on?"inset 0 -2px 0 var(--t-500)":"none", display:"inline-flex", alignItems:"center", gap:6 }}>{master&&<span style={{ fontSize:9.5, fontWeight:800, letterSpacing:".04em", padding:"1px 6px", borderRadius:8, background:"var(--t-100)", color:"var(--t-700)" }}>MASTER</span>}{t.name}</button>
           ); })}
         </div>
       )}
       {/* toolbar */}
       <div style={{ display:"flex", alignItems:"center", gap:11, padding:"12px 16px", borderBottom:"1px solid var(--line-soft)", flexWrap:"wrap" }}>
         <div style={{ fontSize:15, fontWeight:800 }}>{d.tableName||"Records"}</div>
-        <span style={{ fontSize:11.5, color:"var(--muted)" }}>{qActive?(<>{rows.length} match{rows.length===1?"":"es"} for “{qActive}”{d.offset?"+":""}</>):(<>{rows.length} record{rows.length===1?"":"s"}{d.offset?" · more available":""} · live-synced</>)} · click a row’s # to expand</span>
+        <span style={{ fontSize:11.5, color:"var(--muted)" }}>{qActive?(<>{rows.length} match{rows.length===1?"":"es"} for “{qActive}”{d.offset?"+":""}</>):(<>{rows.length}{d.total>rows.length?(" of "+d.total):""} record{(d.total||rows.length)===1?"":"s"} · newest first · live-synced</>)} · click a row’s # to expand</span>
         {(saving>0||loading) && <Chip tone="gold" size="sm"><Icon name="cog" size={11} className="audit-spin" />{saving>0?"Saving":"Loading"}</Chip>}
         <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:8 }}>
           <div style={{ position:"relative" }}>
@@ -5199,6 +5211,19 @@ function AirtableGrid({ ctx, siteId }) {
           <NeoButton kind="primary" size="sm" icon="plus" onClick={addRow}>Add row</NeoButton>
         </div>
       </div>
+      {/* what IS this table? — one-liner so the tabs aren't a mystery */}
+      {(()=>{ const isMaster=d.tableId&&d.tableId===d.masterTableId;
+        const INFO={
+          "AI Citation Results":"Read-only log from AI Visibility scans — which AI prompts cited your site. Tracking only; articles are not written from here.",
+          "AI Competitor Share":"Read-only share-of-AI-voice snapshots (you vs competitors) from each AI Visibility scan. Tracking only.",
+          "AI Visibility Opportunities":"Read-only list of AI prompts where your site is NOT cited yet — visibility gaps to target. Tracking only.",
+          "SEO Keyword Gaps":"Legacy sync table — keyword gaps now push into the master Article Writer instead. Safe to ignore.",
+          "Content Suggestions":"Legacy sync table from older content-intel runs. Safe to ignore.",
+          "Content Opportunities":"Legacy sync table — opportunities now push into the master Article Writer instead. Safe to ignore.",
+        };
+        const txt = isMaster ? "THE master content list — every push (Content Engine, Quick Wins, Keyword gaps, Trending, PAA, Chat) lands here, newest first. Set Status → “Write Article” to trigger the n8n writer."
+          : (INFO[d.tableName] || "Not written to by the dashboard — this table was created outside Sentinel (e.g. directly in Airtable or by n8n).");
+        return <div style={{ padding:"8px 16px", fontSize:12, color:isMaster?"var(--t-700)":"var(--muted)", background:isMaster?"var(--t-50)":"var(--bg-2)", borderBottom:"1px solid var(--line-soft)" }}>{isMaster&&<b>MASTER · </b>}{txt}</div>; })()}
       {/* grid */}
       <div ref={gridScroll} className="scroll" style={{ overflowX:"auto", maxHeight:600, overflowY:"auto", background:"var(--surface)" }}>
         <table style={{ borderCollapse:"separate", borderSpacing:0, width:"max-content", minWidth:"100%" }}>
