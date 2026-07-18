@@ -457,8 +457,14 @@ export async function filterKeywordsByNiche({ keywords, niche, siteName, siteId 
   const txt = await complete({
     system: [{ type: 'text', text: `You filter a keyword list down to terms this specific business could actually SERVE.
 
-STEP 1: From the CONTEXT, identify the site's SPECIFIC SERVICES — the exact things it is hired to do.
+STEP 1: From the CONTEXT, identify the site's SPECIFIC SERVICES — the exact things it is hired to do, including every document, instrument, transaction type, product and counterparty it names.
 STEP 2: KEEP a keyword ONLY if the searcher wants one of THOSE SPECIFIC SERVICES (or is at a decision point that leads directly to one).
+
+KEEP generously WITHIN those services — this is how the business is actually found:
+- the named documents/instruments/transactions themselves (and their abbreviations, forms, certificates, costs, process, timing, "do I need…", "who can witness…");
+- specific providers/lenders/products the site works with;
+- the problems and consequences that lead someone to buy that service.
+Do NOT drop something just because it is narrow, low-volume or phrased as a question.
 
 DROP — this is the part that matters most — anything in the same INDUSTRY or PROFESSION but a DIFFERENT SERVICE. "Same industry" is NOT relevance:
 - a firm that does independent legal advice on guarantees/mortgages must DROP divorce, personal injury, legal aid, no-win-no-fee, conveyancing quotes, "find a solicitor", law-society/regulator lookups — it does not sell those;
