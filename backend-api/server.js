@@ -1757,8 +1757,14 @@ const routes = {
     if (!body.siteId) return { error: 'No site selected.' };
     const r = OPP_RUNS.get(body.siteId);
     if (!r) return { status: 'unknown', reason: 'no active run — it may have completed or been lost to a restart; re-run' };
-    if (r.status === 'done') { OPP_RUNS.delete(body.siteId); return { status: 'done', ...(r.result || {}) }; }
-    if (r.status === 'error') { OPP_RUNS.delete(body.siteId); return { status: 'error', error: r.error }; }
+    // RESULTS ARE NOT CONSUMED ON READ: the operator navigates away mid-run and comes back,
+    // and the screen must still be able to show what finished. Kept for OPP_TTL_MS, so a
+    // run started on one screen is still there when they return (and keeps polling if it's
+    // still going). Cleared on a fresh start, or when it ages out.
+    const OPP_TTL_MS = 15 * 60 * 1000;
+    if (Date.now() - r.at > OPP_TTL_MS) { OPP_RUNS.delete(body.siteId); return { status: 'unknown', reason: 'the last run has expired — re-run' }; }
+    if (r.status === 'done') return { status: 'done', at: r.at, ...(r.result || {}) };
+    if (r.status === 'error') return { status: 'error', error: r.error, at: r.at };
     return { status: 'running', at: r.at };
   },
 
@@ -2589,6 +2595,34 @@ const routes = {
     const gone = !!(check && !String((check.content && check.content.rendered) || '').includes(`/embed/${videoId}`));
     if (site) await db.logActivity({ site_id: site.id, type: gone ? 'verified' : 'warning', actor: 'Agent', icon: 'undo', text: `Removed YouTube embed ${videoId} from post #${found.id}`, meta: gone ? 'verified gone' : 'still present after save' }).catch(() => {});
     return { ok: true, postId: found.id, videoId, removed: gone };
+  },
+
+  // Strip INTERNAL strategy labels that leaked into reader-facing copy. The writer agents
+  // receive directives named Hidden Insight / Semantic Analysis / Search Intent / Article
+  // Goal etc. and are meant to APPLY them silently; occasionally one gets printed as a
+  // heading prefix ("[Hidden Insight] Getting Your ILA Certificate…"). Removes only the
+  // label wrapper — the heading text itself is preserved. Revision-backed, idempotent.
+  'POST /strip-internal-labels': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
+    const site = await db.getSite(body.siteId).catch(() => null);
+    const wp = new WordPressClient(creds);
+    const LABEL = '(?:hidden insight|semantic analysis|search intent|article goal|writing style|target audience|content brief|primary keyword|key takeaway directive)';
+    // "[Hidden Insight] Title" / "(Hidden Insight) Title" / "Hidden Insight: Title" — inside a heading only.
+    const reHead = new RegExp(`(<h[1-6][^>]*>)\\s*(?:[\\[(]\\s*${LABEL}\\s*[\\])]|${LABEL}\\s*:)\\s*`, 'gi');
+    const posts = await wp.request(`/posts?orderby=date&order=desc&per_page=${body.limit || 30}&context=edit&_fields=id,title,content`);
+    const fixed = [];
+    for (const p of (posts || [])) {
+      const raw = String((p.content && (p.content.raw != null ? p.content.raw : p.content.rendered)) || '');
+      const content = raw.replace(reHead, '$1');
+      if (content === raw) continue;
+      await wp.request(`/posts/${p.id}`, { method: 'POST', body: { content } });
+      const check = await wp.request(`/posts/${p.id}?_fields=content`).catch(() => null);
+      const clean = !!(check && !reHead.test(String((check.content && check.content.rendered) || '')));
+      fixed.push({ id: p.id, title: (p.title && p.title.rendered || '').slice(0, 70), verified: clean });
+      if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: `Removed leaked internal label from “${(p.title && p.title.rendered || '#' + p.id).slice(0, 60)}”`, meta: 'writer directive printed as a heading' }).catch(() => {});
+    }
+    return { ok: true, scanned: (posts || []).length, fixed };
   },
 
   // Clean unresolved contact placeholders out of PUBLISHED posts. The writer agents are
@@ -3850,7 +3884,7 @@ const HEAVY_ROUTES = new Set([
   'POST /apply-local-schema', 'POST /engine-autodraft', 'POST /engine-sync-published',
   'POST /n8n-run',
   'POST /ux-crawl',
-  'POST /fix-contact-tokens', 'POST /embed-video', 'POST /remove-video-embed',   // WP read+write loops over posts
+  'POST /fix-contact-tokens', 'POST /embed-video', 'POST /remove-video-embed', 'POST /strip-internal-labels',   // WP read+write loops over posts
   // Added: renamed/omitted routes that genuinely call Claude / DataForSEO / GSC / PSI / crawl.
   'POST /content-opportunities',            // renamed from the phantom /generate-opportunities (DataForSEO + clustering + Claude)
   'POST /audit-full',                       // full page crawl + PSI + on-page SEO read

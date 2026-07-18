@@ -1999,6 +1999,7 @@ function OpportunitiesScreen({ ctx }) {
   const [paaSeed,setPaaSeed] = useState("");
   const [paa,setPaa] = useState(null);
   const [paaBusy,setPaaBusy] = useState(false);
+  const [paaSel,setPaaSel] = useState(()=>new Set());   // questions ticked for a selective push
   // Target country — same per-site market as the keyword data (semrush_db). Switching it
   // here re-points opportunities, trends & briefs at that country (mirrors Content Intel).
   const [dbVal,setDbVal] = useState(s.semrush_db||"uk");
@@ -2035,6 +2036,25 @@ function OpportunitiesScreen({ ctx }) {
     }).catch(e=>{ setErr(e.message); setBusy(false); });
     return ()=>{ stopped=true; };
   };
+  // RESUME on mount: the analysis runs SERVER-side, so navigating away no longer throws it
+  // away. Coming back re-attaches — showing the finished result, or resuming the progress
+  // spinner if it's still going. (The server keeps a completed run for 15 minutes.)
+  useEffect(()=>{
+    if(!live||!s.id) return;
+    let stopped=false;
+    const attach=()=>{
+      if(stopped) return;
+      API.contentOpportunitiesStatus(s.id).then(r=>{
+        if(stopped||!r) return;
+        if(r.status==="running"){ setBusy(true); setTimeout(attach,3000); return; }
+        if(r.status==="done"){ setData(r); setBusy(false); return; }
+        if(r.status==="error"){ setErr(r.error||"Analysis failed"); setBusy(false); return; }
+        // "unknown" → nothing in flight; leave the screen as-is (idle).
+      }).catch(()=>{});
+    };
+    attach();
+    return ()=>{ stopped=true; };
+  },[s.id]);   // eslint-disable-line
   const loadTrending = ()=>{ setTrendBusy(true); API.trendingIntel(s.id, undefined, dbVal).then(r=>setTrend(r)).catch(e=>setTrend({error:e.message})).finally(()=>setTrendBusy(false)); };
   // ITEM 4: one-click — push the trending topics straight into the Airtable keyword
   // column so the n8n writer turns each into an article. No cluster step needed.
@@ -2073,7 +2093,9 @@ function OpportunitiesScreen({ ctx }) {
     API.peopleAlsoAsk(s.id, seed||undefined).then(r=>{ if(r.error){ ctx.toast("People Also Ask: "+r.error,"clay"); setPaa({error:r.error}); return; } setPaa(r); if(r.autoSeeded&&(r.seedsUsed||[]).length) ctx.toast("Questions for: "+r.seedsUsed.join(", "),"teal"); }).catch(e=>{ ctx.toast(e.message,"clay"); setPaa({error:e.message}); }).finally(()=>setPaaBusy(false));
   };
   const pushPaa = ()=>{
-    const kws=[...new Set([...(((paa&&paa.questions)||[]).map(q=>q.question)), ...((paa&&paa.related)||[])].map(k=>(k||"").trim()).filter(Boolean))];
+    // Ticked questions only, when any are ticked; otherwise everything (incl. related terms).
+    const all=[...(((paa&&paa.questions)||[]).map(q=>q.question)), ...((paa&&paa.related)||[])];
+    const kws=[...new Set((paaSel.size?all.filter(k=>paaSel.has(k)):all).map(k=>(k||"").trim()).filter(Boolean))];
     if(!kws.length){ ctx.toast("No questions to push — find questions first","gold"); return; }
     setPushing("paa"); ctx.toast("Pushing "+kws.length+" question(s) to Airtable…","teal");
     API.airtablePushKeywords(s.id, kws).then(r=>{ if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
@@ -2082,18 +2104,22 @@ function OpportunitiesScreen({ ctx }) {
   };
   // "Push to writer": re-run PAA with push:true → each question becomes an Article Writer brief
   // (carries pattern→intent, snippetFormat→format). Toasts the synced count from the airtable result.
+  // Push the TICKED questions (or all, if none ticked) into the master Article Writer as
+  // briefs — one article answers each. Pushes exactly what's on screen rather than re-running
+  // the lookup, so the selection is honoured and the seed box no longer has to be filled.
   const pushPaaToWriter = ()=>{
-    // Reuse the seed the RESULTS came from (auto-derived or typed) — requiring the box to
-    // be filled made "Push to writer" impossible after an auto-seeded search.
-    const seed=(paaSeed||"").trim() || (((paa&&paa.seedsUsed)||[])[0]||"");
-    if(!seed){ ctx.toast("Find questions first","gold"); return; }
-    const n=((paa&&paa.questions)||[]).length;
-    setPushing("paa-writer"); ctx.toast("Sending "+n+" question(s) to the Article Writer…","teal");
-    API.peopleAlsoAskPush(s.id, seed).then(r=>{
-      const at=(r&&r.airtable)||{};
-      if(r.error||at.error){ ctx.toast("Push to writer: "+(r.error||at.error),"clay"); return; }
-      const synced=at.synced!=null?at.synced:n;
-      ctx.toast(synced>0?("Pushed "+synced+" question(s) → Article Writer ✓ — set Status to “Write Article” to generate"):"All questions already in the writer","teal");
+    const qs=((paa&&paa.questions)||[]);
+    const chosen = paaSel.size ? qs.filter(q=>paaSel.has(q.question)) : qs;
+    if(!chosen.length){ ctx.toast("Find questions first","gold"); return; }
+    const fallbackSeed=(paaSeed||"").trim() || (((paa&&paa.seedsUsed)||[])[0]||"");
+    setPushing("paa-writer"); ctx.toast("Sending "+chosen.length+" question(s) to the Article Writer…","teal");
+    const clusters = chosen.map(q=>({ suggestedTitle:q.question, primaryKeyword:q.seed||fallbackSeed, keyword:q.seed||fallbackSeed, label:q.question, intent:q.pattern, format:q.snippetFormat }));
+    API.airtableSync(s.id,{ kinds:["opportunities"], clusters }).then(r=>{
+      if(r&&r.error){ ctx.toast("Push to writer: "+r.error,"clay"); return; }
+      const o=(r&&r.synced&&r.synced.opportunities)||{};
+      const n=(o.pushed||0)+(o.updated||0);
+      ctx.toast(n>0?("Pushed "+n+" question(s) → Article Writer ✓ — set Status to “Write Article” to generate"+(o.skipped?(" ("+o.skipped+" already there)"):"")):"All selected questions are already in the writer", n>0?"teal":"gold");
+      if(n>0&&paaSel.size) setPaaSel(new Set());
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(""));
   };
   const genBrief = (c,i)=>{
@@ -2205,9 +2231,11 @@ function OpportunitiesScreen({ ctx }) {
         <SoftCard hover={false} style={{ marginBottom:18 }}>
           <SectionHead sub={`Real Google "People Also Ask" questions in ${cName} for any seed keyword — push them as content briefs (one article answers each).`} right={
             (paa && !paa.error && (paa.questions||[]).length>0) ? (
-              <span style={{ display:"inline-flex", gap:8 }}>
-                <NeoButton kind="soft" size="sm" icon={pushing==="paa"?undefined:"upload"} disabled={!!pushing} onClick={pushPaa}>{pushing==="paa"&&<Icon name="cog" size={14} className="audit-spin" />}Push questions → Airtable</NeoButton>
-                <NeoButton kind="primary" size="sm" icon={pushing==="paa-writer"?undefined:"doc"} disabled={!!pushing} onClick={pushPaaToWriter} title="Send each question to the Article Writer as a brief (carries its intent & snippet format)">{pushing==="paa-writer"&&<Icon name="cog" size={14} className="audit-spin" />}Push to writer</NeoButton>
+              <span style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
+                {(()=>{ const qs=(paa.questions||[]).map(q=>q.question); const allOn=qs.length>0&&qs.every(q=>paaSel.has(q));
+                  return <NeoButton kind="ghost" size="sm" onClick={()=>setPaaSel(allOn?new Set():new Set(qs))} title={allOn?"Clear selection":"Select every question"}>{allOn?"Clear all":"Select all"}</NeoButton>; })()}
+                <NeoButton kind="soft" size="sm" icon={pushing==="paa"?undefined:"upload"} disabled={!!pushing} onClick={pushPaa} title={paaSel.size?("Push the "+paaSel.size+" ticked question(s) to Airtable"):"Push every question to Airtable"}>{pushing==="paa"&&<Icon name="cog" size={14} className="audit-spin" />}Push{paaSel.size?(" "+paaSel.size):""} → Airtable</NeoButton>
+                <NeoButton kind="primary" size="sm" icon={pushing==="paa-writer"?undefined:"doc"} disabled={!!pushing} onClick={pushPaaToWriter} title={paaSel.size?("Send the "+paaSel.size+" ticked question(s) to the Article Writer as briefs"):"Send each question to the Article Writer as a brief"}>{pushing==="paa-writer"&&<Icon name="cog" size={14} className="audit-spin" />}Push{paaSel.size?(" "+paaSel.size):""} to writer</NeoButton>
               </span>
             ) : null
           }>People Also Ask</SectionHead>
@@ -2218,12 +2246,16 @@ function OpportunitiesScreen({ ctx }) {
           {paa && paa.error && <div style={{ fontSize:12.5, color:"var(--muted)", padding:"4px 2px" }}>{paa.error}</div>}
           {paa && !paa.error && (paa.questions||[]).length>0 && (
             <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
-              {(paa.questions||[]).map((q,i)=>(
-                <div key={i} style={{ padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
-                  <div style={{ fontSize:13, fontWeight:700, color:"var(--ink)", display:"flex", gap:8, alignItems:"flex-start" }}><Icon name="search" size={14} style={{ color:"var(--t-600)", flexShrink:0, marginTop:2 }} /><span style={{ flex:1 }}>{q.question}</span>{q.pattern && <Chip tone="plum" size="sm">{q.pattern}</Chip>}{q.snippetFormat && <Chip tone="teal" size="sm">{q.snippetFormat}</Chip>}</div>
-                  {q.answer && <div style={{ fontSize:12, color:"var(--muted)", marginTop:4, lineHeight:1.5 }}>{q.answer}{q.domain && <a href={q.url} target="_blank" style={{ color:"var(--t-600)", marginLeft:6 }}>— {q.domain}</a>}</div>}
+              {(paa.questions||[]).map((q,i)=>{ const on=paaSel.has(q.question); return (
+                <div key={i} onClick={()=>setPaaSel(p=>{ const n=new Set(p); if(n.has(q.question)) n.delete(q.question); else n.add(q.question); return n; })}
+                     title={on?"Ticked — click to unselect":"Click to tick this question for push"}
+                     style={{ padding:"11px 13px", borderRadius:"var(--r-md)", background:on?"var(--t-50)":"var(--bg)", boxShadow:on?"inset 0 0 0 1.5px var(--t-500)":"var(--neo-in)", cursor:"pointer", transition:"background .12s ease" }}>
+                  <div style={{ fontSize:13, fontWeight:700, color:"var(--ink)", display:"flex", gap:8, alignItems:"flex-start" }}>
+                    <span style={{ width:17, height:17, flexShrink:0, marginTop:1, borderRadius:5, display:"grid", placeItems:"center", background:on?"var(--t-500)":"var(--bg-2)", boxShadow:on?"none":"var(--neo-in)", color:"#fff", fontSize:11, fontWeight:900 }}>{on?"✓":""}</span>
+                    <span style={{ flex:1 }}>{q.question}</span>{q.pattern && <Chip tone="plum" size="sm">{q.pattern}</Chip>}{q.snippetFormat && <Chip tone="teal" size="sm">{q.snippetFormat}</Chip>}</div>
+                  {q.answer && <div style={{ fontSize:12, color:"var(--muted)", marginTop:4, lineHeight:1.5, paddingLeft:25 }}>{q.answer}{q.domain && <a href={q.url} target="_blank" onClick={e=>e.stopPropagation()} style={{ color:"var(--t-600)", marginLeft:6 }}>— {q.domain}</a>}</div>}
                 </div>
-              ))}
+              ); })}
               {(paa.related||[]).length>0 && <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:2 }}>Related searches: {(paa.related||[]).slice(0,10).join(" · ")}</div>}
             </div>
           )}
@@ -5793,8 +5825,17 @@ function Assistant({ ctx, open, setOpen }) {
   // Use the shared streaming chat hook (SSE) — same as the full chat screen — so
   // the floating assistant shows progressive output and survives proxy timeouts
   // instead of sitting on a blocking request that can drop with "Failed to fetch".
-  const { msgs, busy, send:sendChat, reset } = useChat(s.id);
+  // load/convoId give the mini window the same resumable history as the full chat screen —
+  // previously it could only ever show the CURRENT exchange, so closing it lost everything.
+  const { msgs, busy, send:sendChat, reset, load, convoId } = useChat(s.id);
+  const API = window.SentinelAPI;
   const [input,setInput] = useState("");
+  const [showHist,setShowHist] = useState(false);
+  const [convos,setConvos] = useState([]);
+  const loadConvos = ()=>{ if(!API||!API.chatList) return; API.chatList(s.id).then(r=>setConvos((r&&r.conversations)||[])).catch(()=>{}); };
+  // refresh the list when the panel opens, and after each exchange finishes (new/renamed convo)
+  useEffect(()=>{ if(open) loadConvos(); },[open, s.id]);   // eslint-disable-line
+  useEffect(()=>{ if(!busy && open) loadConvos(); },[busy, convoId]);   // eslint-disable-line
   const bodyRef = useRef(null);
   const voice = useVoice(setInput, ()=>input);
   const listening = voice.listening;
@@ -5825,9 +5866,24 @@ function Assistant({ ctx, open, setOpen }) {
           <div style={{ display:"flex", alignItems:"center", gap:11, padding:"15px 18px", borderBottom:"1px solid var(--line-soft)" }}>
             <div style={{ width:36, height:36, borderRadius:11, background:"linear-gradient(135deg,var(--t-500),var(--t-700))", color:"#F3EFE4", display:"grid", placeItems:"center", boxShadow:"var(--neo-sm)" }}><Icon name="sparkles" size={18} /></div>
             <div style={{ flex:1 }}><div style={{ fontSize:14.5, fontWeight:800 }}>SEO Assistant</div><div style={{ fontSize:11.5, color:"var(--muted)" }}>scoped to {s.name}</div></div>
+            <button onClick={()=>{ setShowHist(v=>{ const n=!v; if(n) loadConvos(); return n; }); }} className="neo-btn tip" data-tip="Past conversations" style={{ width:32, height:32, borderRadius:9, background:showHist?"var(--t-100)":"var(--bg)", boxShadow:"var(--neo-in)", display:"grid", placeItems:"center", color:showHist?"var(--t-700)":"var(--muted)" }}><Icon name="clock" size={15} /></button>
             <button onClick={()=>{ setOpen(false); ctx.goto("chat"); }} className="neo-btn tip" data-tip="Open full chat" style={{ width:32, height:32, borderRadius:9, background:"var(--bg)", boxShadow:"var(--neo-in)", display:"grid", placeItems:"center", color:"var(--muted)" }}><Icon name="upload" size={15} /></button>
-            <button onClick={reset} className="neo-btn tip" data-tip="New chat" style={{ width:32, height:32, borderRadius:9, background:"var(--bg)", boxShadow:"var(--neo-in)", display:"grid", placeItems:"center", color:"var(--muted)" }}><Icon name="edit" size={15} /></button>
+            <button onClick={()=>{ reset(); setShowHist(false); }} className="neo-btn tip" data-tip="New chat" style={{ width:32, height:32, borderRadius:9, background:"var(--bg)", boxShadow:"var(--neo-in)", display:"grid", placeItems:"center", color:"var(--muted)" }}><Icon name="edit" size={15} /></button>
           </div>
+          {/* history — resume any past conversation for this site */}
+          {showHist && (
+            <div className="scroll" style={{ maxHeight:180, overflowY:"auto", borderBottom:"1px solid var(--line-soft)", background:"var(--bg-2)", padding:"6px 8px" }}>
+              {convos.length===0 && <div style={{ fontSize:12, color:"var(--muted)", padding:"8px 6px" }}>No saved conversations yet — they appear here once you've chatted.</div>}
+              {convos.map(c=>(
+                <div key={c.id} onClick={()=>{ load(c.id); setShowHist(false); }}
+                  style={{ padding:"8px 10px", borderRadius:9, cursor:"pointer", background:c.id===convoId?"var(--t-100)":"transparent", display:"flex", gap:8, alignItems:"center" }}>
+                  <Icon name="doc" size={13} style={{ color:"var(--muted)", flexShrink:0 }} />
+                  <span style={{ flex:1, fontSize:12.5, fontWeight:c.id===convoId?700:600, color:"var(--ink-2)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{c.title||"Conversation"}</span>
+                  <span style={{ fontSize:10.5, color:"var(--faint)", flexShrink:0 }}>{c.updated_at?new Date(c.updated_at).toLocaleDateString():""}</span>
+                </div>
+              ))}
+            </div>
+          )}
           {/* messages */}
           <div ref={bodyRef} className="scroll" style={{ flex:1, padding:"16px 16px 8px", display:"flex", flexDirection:"column", gap:12 }}>
             {msgs.length===0 && (
