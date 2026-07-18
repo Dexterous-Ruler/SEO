@@ -132,22 +132,27 @@ export async function findOpportunities(siteId, { db: region, maxKeywords = 160,
 
   if (pool.size < 3) return { error: 'Not enough keyword data — connect Search Console or DataForSEO, and add competitors.', sources, clusters: [] };
 
-  // Rank the pool + cap for clustering (by volume).
-  let ranked = [...pool.values()].map((k) => ({ ...k, src: [...k.src] })).sort((a, b) => b.volume - a.volume).slice(0, maxKeywords);
-
-  // NICHE FILTER — the pool is fed by BROAD competitors and generic keyword ideas, so a
-  // specialist site was getting high-volume but irrelevant clusters (family law, power of
-  // attorney, "find a solicitor"). Filter the pool against this site's own service context
-  // BEFORE clustering, using the same geo_context filter the keyword-gap route uses.
-  // Fail-open, and never filter down to a stub.
-  if (site.geo_context && ranked.length) {
-    try {
-      const keep = await claude.filterKeywordsByNiche({ keywords: ranked.map((k) => k.keyword), niche: site.geo_context, siteName: site.name, siteId });
-      const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
-      const onNiche = ranked.filter((k) => keepSet.has(String(k.keyword).toLowerCase().trim()));
-      if (onNiche.length >= 8) { sources.offNicheFiltered = ranked.length - onNiche.length; ranked = onNiche; }
-    } catch (e) { /* fail-open: cluster the unfiltered pool */ }
+  // NICHE FILTER FIRST, *then* the volume cut. Order matters: the pool is fed by broad
+  // competitors and generic keyword ideas, and those score the HIGHEST volume ("find a
+  // solicitor", "divorce"). Cutting to top-N by volume first therefore discarded the site's
+  // real service keywords (lower volume, far higher intent) BEFORE they could be judged —
+  // so the plan was generic no matter how strict the filter got. Filter the whole pool in
+  // batches (the filter only inspects ~200 at a time), then rank what's left.
+  let poolArr = [...pool.values()].map((k) => ({ ...k, src: [...k.src] }));
+  if (site.geo_context && poolArr.length) {
+    const kept = [];
+    for (let i = 0; i < poolArr.length; i += 180) {
+      const batch = poolArr.slice(i, i + 180);
+      try {
+        const keep = await claude.filterKeywordsByNiche({ keywords: batch.map((k) => k.keyword), niche: site.geo_context, siteName: site.name, siteId });
+        const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
+        kept.push(...batch.filter((k) => keepSet.has(String(k.keyword).toLowerCase().trim())));
+      } catch (e) { kept.push(...batch); }   // fail-open for this batch only
+    }
+    if (kept.length >= 12) { sources.offNicheFiltered = poolArr.length - kept.length; poolArr = kept; }
   }
+  // Rank what survived + cap for clustering (by volume).
+  const ranked = poolArr.sort((a, b) => b.volume - a.volume).slice(0, maxKeywords);
 
   // Cluster with Claude (labels/intent/title only — metrics stay deterministic).
   // niche: there is NO `niche` column — the site's real niche/service context lives in
