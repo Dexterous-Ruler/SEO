@@ -281,7 +281,7 @@ export function mapGapBriefs(gaps, briefField) {
   return (gaps || []).map((g) => {
     if (!g || !g.keyword) return null;
     const kw = String(g.keyword).trim();
-    const title = kw.replace(/\b\w/g, (c) => c.toUpperCase());
+    const title = kw.replace(/(^|\s)([a-z])/g, (m, sp, c) => sp + c.toUpperCase());  // word-starts only — \b\w would give "Solicitor'S"
     const lines = [
       `Target keyword: ${kw}` + (g.volume ? ` (~${Number(g.volume).toLocaleString()} searches/mo)` : ''),
       g.competitor ? `Keyword gap vs competitor: ${g.competitor}` + (g.competitorPos ? ` (they rank #${g.competitorPos}` + (g.url ? ` with ${g.url}` : '') + ')' : '') : '',

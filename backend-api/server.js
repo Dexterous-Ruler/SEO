@@ -122,6 +122,7 @@ async function generateRewritePreview({ wp, found, page, site, siteId, brief }) 
     oldWords: rawText.split(/\s+/).filter(Boolean).length, newWords: clean.replace(/<[^>]+>/g, ' ').split(/\s+/).filter(Boolean).length };
 }
 const REWRITES = new Map();   // `${siteId}:${postId}` -> { status:'running'|'done'|'error', result?, error?, at }
+const _atRecCache = new Map();  // `${base}:${table}:${filter}` -> { all, exp } — 10s TTL absorbs the grid's poll bursts
 import { limiters, infraStats, withTimeout, HEAVY_MAX_QUEUE, Limiter, TTLCache } from './infra.js';
 import * as jobs from './jobs.js';
 import * as drift from './drift.js';
@@ -2436,9 +2437,21 @@ const routes = {
     const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=id,title,content`);
     const raw = String((post.content && (post.content.raw != null ? post.content.raw : post.content.rendered)) || '');
     if (!raw) return { error: 'Could not read the post content.' };
-    if (raw.includes(videoId)) return { ok: true, already: true, postId: found.id, videoId };
+    if (raw.includes(videoId)) {
+      // Repair pass: earlier embeds shipped with an unclosed <div> inside the figure
+      // (browsers auto-close so it LOOKED fine, but unclosed divs have broken this
+      // site's layout before). Close it in place; idempotent (fixed content no longer
+      // contains the broken sequence).
+      if (raw.includes('</iframe></figure>')) {
+        const fixed = raw.split('</iframe></figure>').join('</iframe></div></figure>');
+        await wp.request(`/${found.type}/${found.id}`, { method: 'POST', body: { content: fixed } });
+        if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: `Repaired video embed markup on post #${found.id}`, meta: 'closed unclosed <div>' }).catch(() => {});
+        return { ok: true, already: true, repaired: true, postId: found.id, videoId };
+      }
+      return { ok: true, already: true, postId: found.id, videoId };
+    }
     const safeTitle = String(body.title || 'Fast ILA — video guide').replace(/"/g, '&quot;');
-    const embed = `\n\n<figure class="yt-embed" style="margin:28px 0;"><div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:12px;"><iframe src="https://www.youtube-nocookie.com/embed/${videoId}" title="${safeTitle}" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy"></iframe></figure>\n\n`;
+    const embed = `\n\n<figure class="yt-embed" style="margin:28px 0;"><div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:12px;"><iframe src="https://www.youtube-nocookie.com/embed/${videoId}" title="${safeTitle}" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy"></iframe></div></figure>\n\n`;
     const h2 = raw.search(/<h2[\s>]/i);
     const content = h2 > 0 ? raw.slice(0, h2) + embed + raw.slice(h2) : raw + embed;
     await wp.request(`/${found.type}/${found.id}`, { method: 'POST', body: { content } });
@@ -2659,24 +2672,35 @@ const routes = {
         }
       }
       // NEWEST-FIRST: Airtable's default order is insertion order (oldest first), which
-      // buried fresh pushes behind "next 50 → next 50 → …". Pull up to 8 pages (800 rows),
-      // sort by createdTime desc, and page NUMERICALLY over the sorted list — recent rows
-      // are always on page one. (Legacy opaque Airtable offsets coerce to NaN → page 0.)
-      const all = [];
-      let atOffset; let pages = 0;
-      do {
-        const pg = await airtable.listRecords(pat, cfg.base_id, target.id, { pageSize: 100, offset: atOffset, filterByFormula });
-        for (const r of (pg.records || [])) all.push(r);
-        atOffset = pg.offset; pages++;
-      } while (atOffset && pages < 8);
-      all.sort((a, b) => String(b.createdTime || '').localeCompare(String(a.createdTime || '')));
+      // buried fresh pushes behind "next 50 → next 50 → …". Sweep the table (25-page /
+      // 2500-row safety cap), sort by createdTime desc, and page NUMERICALLY over the
+      // sorted list — recent rows are always on page one. (Legacy opaque Airtable offsets
+      // coerce to NaN → page 0.) A short server-side cache absorbs the browser's 12s poll
+      // + tab-wake bursts so the sweep costs ~1 run per TTL, not 8+ Airtable calls per tick
+      // (Airtable rate-limits at 5 req/s/base; a 429 there also breaks saves and n8n).
+      const cacheKey = `${cfg.base_id}:${target.id}:${filterByFormula || ''}`;
+      let all; const hit = _atRecCache.get(cacheKey);
+      if (hit && hit.exp > Date.now()) { all = hit.all; }
+      else {
+        all = [];
+        let atOffset; let pages = 0;
+        do {
+          const pg = await airtable.listRecords(pat, cfg.base_id, target.id, { pageSize: 100, offset: atOffset, filterByFormula });
+          for (const r of (pg.records || [])) all.push(r);
+          atOffset = pg.offset; pages++;
+        } while (atOffset && pages < 25);
+        all.sort((a, b) => String(b.createdTime || '').localeCompare(String(a.createdTime || '')));
+        all._truncated = !!atOffset;   // >2500 rows — the oldest tail beyond the cap wasn't fetched
+        _atRecCache.set(cacheKey, { all, exp: Date.now() + 10000 });
+        if (_atRecCache.size > 40) { for (const [k, v] of _atRecCache) if (v.exp < Date.now()) _atRecCache.delete(k); }
+      }
       const start = Math.max(0, Number(body.offset) || 0);
       const size = body.pageSize || 50;
       const page = { records: all.slice(start, start + size), offset: (start + size) < all.length ? String(start + size) : undefined };
       // Which table is the MASTER content list (the n8n-watched Article Writer)?
       const masterT = cfg.table_gaps ? tables.find((t) => t.id === cfg.table_gaps || t.name === cfg.table_gaps) : null;
       return {
-        total: all.length, truncatedAt: atOffset ? all.length : undefined,
+        total: all.length, truncated: all._truncated || undefined,
         masterTableId: (masterT && masterT.id) || null,
         fields: target.fields || [], tableName: target.name, tableId: target.id,
         records: page.records, offset: page.offset,
@@ -2896,8 +2920,10 @@ const routes = {
       const upsert = !!(opts && opts.upsert);
       const aw = await articleWriterTarget();
       if (!aw) return false;   // not resolvable → caller falls back to legacy behaviour
-      let r = (rows || []).filter(Boolean);
-      if (aw.fieldSet) r = r.map((row) => { const o = {}; for (const k of Object.keys(row)) if (aw.fieldSet.has(k)) o[k] = row[k]; return o; }).filter((o) => Object.keys(o).length);
+      // Carry the dedupe key from the ORIGINAL row — if the target table lacks the dedupe
+      // column, field-filtering would strip it and every push would duplicate silently.
+      let r = (rows || []).filter(Boolean).map((row) => ({ row, key: dedupeField ? String(row[dedupeField] || '').trim().toLowerCase() : '' }));
+      if (aw.fieldSet) r = r.map(({ row, key }) => { const o = {}; for (const k of Object.keys(row)) if (aw.fieldSet.has(k)) o[k] = row[k]; return { row: o, key }; }).filter(({ row }) => Object.keys(row).length);
       // Map existing dedupeField value → recordId (paginated), so we can either skip
       // dupes or (upsert) PATCH them to backfill new fields like Content Brief.
       const existing = new Map();
@@ -2913,8 +2939,7 @@ const routes = {
       }
       let created = 0, updated = 0, skipped = 0;
       const toCreate = [], batch = new Set();
-      for (const row of r) {
-        const key = dedupeField ? String(row[dedupeField] || '').trim().toLowerCase() : '';
+      for (const { row, key } of r) {
         if (key && existing.has(key)) {
           if (upsert) { try { await airtable.updateRecord(pat, baseId, aw.tableId, existing.get(key), row); updated++; } catch (e) { skipped++; } }
           else skipped++;

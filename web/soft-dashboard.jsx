@@ -5001,7 +5001,8 @@ function SemrushScreen({ ctx }) {
                       </div>
                     </div>
                     {(gaps.gaps||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No gap keywords found after filtering (all were competitor brand names, excluded terms or off-niche).</div>}
-                    {(gaps.gaps||[]).slice(0,40).map((g,i)=>{ const on=gapSel.has(g.keyword); return (
+                    {/* render EVERY gap (backend caps at 80) — a hidden tail under "Push all" meant pushing keywords the user never saw */}
+                    {(gaps.gaps||[]).map((g,i)=>{ const on=gapSel.has(g.keyword); return (
                       <div key={i} onClick={()=>setGapSel(p=>{ const n=new Set(p); if(n.has(g.keyword)) n.delete(g.keyword); else n.add(g.keyword); return n; })} style={{ display:"flex", alignItems:"center", padding:"9px 12px", borderRadius:"var(--r-md)", background:on?"var(--t-50)":"var(--bg)", boxShadow:on?"inset 0 0 0 1.5px var(--t-500)":"var(--neo-in)", cursor:"pointer", transition:"background .12s ease" }} title={on?"Click to unselect":"Click to select for push"}>
                         <span style={{ width:30, display:"grid", placeItems:"center" }}><span style={{ width:17, height:17, borderRadius:5, display:"grid", placeItems:"center", background:on?"var(--t-500)":"var(--bg-2)", boxShadow:on?"none":"var(--neo-in)", color:"#fff", fontSize:11, fontWeight:900 }}>{on?"✓":""}</span></span>
                         <span style={{ width:50 }}><span style={{ display:"inline-grid", placeItems:"center", minWidth:30, height:22, padding:"0 6px", borderRadius:7, background:TT[posTone(g.competitorPos)][1], color:TT[posTone(g.competitorPos)][0], fontSize:12, fontWeight:800 }}>#{g.competitorPos}</span></span>
@@ -5105,12 +5106,24 @@ function AirtableGrid({ ctx, siteId }) {
   const prevIds = useRef(null);      // record ids from the previous data load (to detect new arrivals)
   const flashed = useRef(new Set()); // ids already flashed once (so each row highlights at most once)
   const gridScroll = useRef(null);   // the grid's scroll container (to surface fresh rows at the top)
+  // Sequence guard: only the LATEST request may write state. Kills two races: a slow poll
+  // response replacing pages the user just loaded ("snap-back"), and a slow load-more from
+  // table A merging into table B after a tab switch (mixed-table corruption).
+  const seqRef = useRef(0);
   const load = (offset, silent, search)=>{
+    const mySeq = ++seqRef.current;
     if(!silent){ setLoading(true); setErr(null); }
     API.airtableRecords(siteId,{ offset, pageSize:50, table, search: search||undefined }).then(r=>{
+      if(seqRef.current!==mySeq) return;              // superseded by a newer request — discard
       if(r.error){ if(!silent) setErr(r.error); return; }
-      setD(prev=> (offset&&prev) ? { ...r, records:[...prev.records, ...r.records] } : r);
-    }).catch(e=>{ if(!silent) setErr(e.message); }).finally(()=>{ if(!silent) setLoading(false); });
+      setD(prev=>{
+        if(offset && prev && prev.tableId===r.tableId){
+          const seen=new Set(prev.records.map(x=>x.id));   // numeric paging over a live list can overlap at the boundary
+          return { ...r, records:[...prev.records, ...r.records.filter(x=>!seen.has(x.id))] };
+        }
+        return r;
+      });
+    }).catch(e=>{ if(seqRef.current===mySeq && !silent) setErr(e.message); }).finally(()=>{ if(seqRef.current===mySeq && !silent) setLoading(false); });
   };
   useEffect(()=>{ setD(null); setQ(""); setQActive(""); setExpanded(null); },[siteId]);  // blank on site switch (different base)
   useEffect(()=>{ const h=setTimeout(()=>setQActive(q.trim()), 350); return ()=>clearTimeout(h); },[q]);  // debounce the search box
@@ -5132,14 +5145,14 @@ function AirtableGrid({ ctx, siteId }) {
     };
     const tick=()=>{ if(canPoll()) load(undefined, true); };
     const iv = setInterval(tick, 12000);
-    // re-pull the instant the user returns to the tab/window (e.g. after editing in Airtable)
+    // re-pull the instant the user returns to the tab (e.g. after editing in Airtable).
+    // visibilitychange ONLY — binding focus too fired BOTH on tab return → two overlapping
+    // sweeps that could burst past Airtable's 5 req/s/base limit (30s 429 penalty breaks saves).
     const onWake=()=>{ if(typeof document==="undefined" || !document.hidden) tick(); };
     if(typeof document!=="undefined") document.addEventListener("visibilitychange", onWake);
-    if(typeof window!=="undefined") window.addEventListener("focus", onWake);
     return ()=>{
       clearInterval(iv);
       if(typeof document!=="undefined") document.removeEventListener("visibilitychange", onWake);
-      if(typeof window!=="undefined") window.removeEventListener("focus", onWake);
     };
   },[d, expanded, saving, qActive, table, siteId]);
   // Surface freshly-arrived rows — ones that appear via Add row / a chat or dashboard
@@ -5179,7 +5192,7 @@ function AirtableGrid({ ctx, siteId }) {
     API.airtableCreateRecord(siteId,{}, d&&d.tableId).then(r=>{ if(r.error){ ctx.toast("Add failed: "+r.error,"clay"); return; } setD(p=>({ ...p, records:[r.record, ...p.records] })); setExpanded(r.record); ctx.toast("Row added — fill it in","teal"); }).catch(e=>ctx.toast(e.message,"clay"));
   };
 
-  if(err) return <SoftCard hover={false}><ErrBanner msg={err} onRetry={()=>{ setErr(null); load(); }} /></SoftCard>;
+  if(err) return <SoftCard hover={false}><ErrBanner msg={err} onRetry={()=>{ setErr(null); load(undefined,false,qActive||undefined); }} /></SoftCard>;
   if(!d) return <SoftCard hover={false}><div style={{ padding:"14px 4px", color:"var(--muted)", fontSize:13.5, display:"flex", alignItems:"center", gap:10 }}><Icon name="cog" size={16} className="audit-spin" />Loading records…</div></SoftCard>;
   const fields = d.fields||[];
   // search runs server-side across the whole table (see qActive); here we just order what
@@ -5207,7 +5220,7 @@ function AirtableGrid({ ctx, siteId }) {
             <Icon name="search" size={13} style={{ position:"absolute", left:11, top:9, color:"var(--faint)" }} />
             <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search all records…" title="Searches the whole table (every record), not just the loaded page" style={{ padding:"7px 12px 7px 31px", borderRadius:"var(--r-pill)", border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5, color:"var(--ink)", outline:"none", width:170 }} />
           </div>
-          <NeoButton kind="soft" size="sm" icon="refresh" disabled={loading} onClick={()=>load()} title="Re-pull from Airtable now (also auto-syncs every few seconds)">Refresh</NeoButton>
+          <NeoButton kind="soft" size="sm" icon="refresh" disabled={loading} onClick={()=>load(undefined,false,qActive||undefined)} title="Re-pull from Airtable now (also auto-syncs every few seconds)">Refresh</NeoButton>
           <NeoButton kind="primary" size="sm" icon="plus" onClick={addRow}>Add row</NeoButton>
         </div>
       </div>
