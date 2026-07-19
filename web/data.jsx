@@ -253,6 +253,14 @@ Object.assign(window, {
       negative_keywords: r.negative_keywords || [],
       brand_constraints: r.brand_constraints || [],
       semrush_db: r.semrush_db || "uk",
+      // geo_context = the site's AI/brand context prompt. It was NOT copied here, so after
+      // any reload the Site Context box read undefined and rendered EMPTY — the operator saw
+      // it as "removed overnight" and kept re-pasting it, even though the row in Supabase was
+      // untouched the whole time. It is the input to every niche/relevance filter, so it must
+      // survive a refresh.
+      geo_context: r.geo_context || "",
+      // owner is passed straight back on createProposal/createAudit/logActivity writes.
+      owner: r.owner || null,
       openFindings: r.open_findings || 0,
       pendingProposals: 0,
     };
