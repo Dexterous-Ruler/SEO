@@ -498,8 +498,23 @@ async function getExecutionNodeData(baseUrl, apiKey, executionId, nodeName) {
   } catch (e) { return apiError(0, null, apiKey, e); }
 }
 
+// ===========================================================================
+// 8) setActive — activate/deactivate a workflow. REVERSIBLE by design: retiring a
+//    duplicate flow must never mean destroying it, so there is deliberately NO
+//    delete here. A deactivated workflow stops answering its webhook immediately
+//    and can be switched back on in one call (or one click in n8n).
+// ===========================================================================
+async function setActive(baseUrl, apiKey, id, active) {
+  try {
+    const action = active ? 'activate' : 'deactivate';
+    const { ok, status, data } = await api('POST', baseUrl, apiKey, `/workflows/${encodeURIComponent(id)}/${action}`);
+    if (!ok) return apiError(status, data, apiKey);
+    return { ok: true, id, active: !!(data && data.active), name: data && data.name };
+  } catch (e) { return apiError(0, null, apiKey, e); }
+}
+
 // Internal helper exported for offline unit testing of the path-setter.
 export { setByPath as _setByPath };
 
-export { listWorkflows, getWorkflowPrompts, updatePrompts, runWorkflow, getExecutions, getNodeParams, getExecutionNodeData };
-export default { listWorkflows, getWorkflowPrompts, updatePrompts, runWorkflow, getExecutions, getNodeParams, getExecutionNodeData };
+export { listWorkflows, getWorkflowPrompts, updatePrompts, runWorkflow, getExecutions, getNodeParams, getExecutionNodeData, setActive };
+export default { listWorkflows, getWorkflowPrompts, updatePrompts, runWorkflow, getExecutions, getNodeParams, getExecutionNodeData, setActive };

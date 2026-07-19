@@ -3272,8 +3272,37 @@ const routes = {
         await push('opportunities', cfg.table_opportunities, airtable.mapOpportunities(clusters, now), airtable.SCHEMAS.opportunities);
       }
     }
-    // 5) GEO opportunities — the "show up for these" uncited queries (de-duped by Query).
+    // 5) AI-visibility opportunities — queries where AI answers DON'T cite this site yet.
+    //    These are content to WRITE, so they belong in the master Article Writer alongside
+    //    every other opportunity — previously they only ever landed in the read-only
+    //    "AI Visibility Opportunities" tracking table, where nothing could be written from
+    //    them. Now: writer-ready rows (Title + Keyword + Content Brief), de-duped by Title;
+    //    the tracking table is still written too (it's the scan-history log), and remains
+    //    the fallback when no Article Writer table is configured.
     if (kinds.includes('geo_opportunities')) {
+      const opps = (body.geoOpportunities || []).filter((r) => r && r.prompt && !r.error);
+      const aw = await articleWriterTarget();
+      if (aw && opps.length) {
+        const rows = opps.map((r) => {
+          const q = String(r.prompt).trim();
+          const title = q.charAt(0).toUpperCase() + q.slice(1);
+          const cited = (r.citedDomains || []).join(', ');
+          const lines = [
+            `AI-visibility gap: AI assistants answer this query WITHOUT citing us.`,
+            `Query: ${q}`,
+            r.intent ? `Intent: ${r.intent}` : '',
+            cited ? `Currently cited instead: ${cited}` : '',
+            '',
+            'Write the definitive, directly-quotable answer to this query: lead with a crisp 2-3 sentence answer, then the supporting detail, so AI assistants can cite us for it.',
+          ].filter((l) => l !== '');
+          const row = { Title: title, Keyword: q, 'Primary Keyword': q, Category: 'Blog',
+            Description: `AI-visibility gap — AI answers this query without citing us${cited ? ` (cites ${cited})` : ''}. Answer it definitively and quotably.` };
+          if (aw.briefField) row[aw.briefField] = lines.join('\n');
+          return row;
+        });
+        await pushToArticleWriter('geo_opportunities', rows, 'Title', { upsert: true });
+      }
+      // Tracking table (scan history) — also the fallback when no Article Writer exists.
       let oppRows = airtable.mapGeoOpportunities(body.geoOpportunities || [], now);
       if (oppRows.length) {
         try {
@@ -3284,7 +3313,7 @@ const routes = {
           out.geoOppsSkipped = before - oppRows.length;
         } catch (e) { /* table may not exist yet → push all (ensureTable creates it) */ }
       }
-      await push('geo_opportunities', cfg.table_geo_opportunities, oppRows, airtable.SCHEMAS.geo_opportunities);
+      await push(aw ? 'geo_opportunities_log' : 'geo_opportunities', cfg.table_geo_opportunities, oppRows, airtable.SCHEMAS.geo_opportunities);
     }
 
     // 6) Content brief → the EXISTING "Article Writer" table (the n8n-watched table,
@@ -3893,6 +3922,16 @@ const routes = {
     if (!baseUrl || !apiKey) return { error: 'Connect n8n first (base URL + API key).' };
     if (!body.id) return { error: 'workflow id required' };
     return n8n.getExecutions(baseUrl, apiKey, body.id, { status: body.status });
+  },
+  // Activate / deactivate a workflow. Deliberately NOT a delete: retiring a duplicate or
+  // wrong-base flow stops it answering its webhook immediately, but stays one call away
+  // from being switched back on. Permanent deletion remains a manual step in n8n.
+  'POST /n8n-set-active': async (body) => {
+    const { baseUrl, apiKey } = await n8nCreds(body);
+    if (!baseUrl || !apiKey) return { error: 'Connect n8n first (base URL + API key).' };
+    if (!body.id) return { error: 'workflow id required' };
+    if (typeof body.active !== 'boolean') return { error: 'active (boolean) required' };
+    return n8n.setActive(baseUrl, apiKey, body.id, body.active);
   },
   // Read one node's RAW parameters (read-only) — inspect field-mapper nodes (Set etc.)
   // that the prompts view doesn't surface, e.g. to debug "Content Brief not fed".
