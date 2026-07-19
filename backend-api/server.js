@@ -3313,7 +3313,15 @@ const routes = {
           out.geoOppsSkipped = before - oppRows.length;
         } catch (e) { /* table may not exist yet → push all (ensureTable creates it) */ }
       }
-      await push(aw ? 'geo_opportunities_log' : 'geo_opportunities', cfg.table_geo_opportunities, oppRows, airtable.SCHEMAS.geo_opportunities);
+      // The tracking table is a SECONDARY scan log. When the writer push already succeeded,
+      // a missing/permission-blocked log table must not surface as the operation's error
+      // (it was reporting "Airtable 403" for a push that had in fact landed).
+      try {
+        await push(aw ? 'geo_opportunities_log' : 'geo_opportunities', cfg.table_geo_opportunities, oppRows, airtable.SCHEMAS.geo_opportunities);
+      } catch (e) {
+        if (!aw) throw e;   // no writer table → the log WAS the destination, so it's fatal
+        out.geo_opportunities_log = { pushed: 0, note: 'tracking table unavailable: ' + (e && e.message || e) };
+      }
     }
 
     // 6) Content brief → the EXISTING "Article Writer" table (the n8n-watched table,
