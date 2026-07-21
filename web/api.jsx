@@ -54,30 +54,47 @@
   }
 
   // ---- engine API helper ----------------------------------------------------
+  // EVERY call is time-bounded. Without this a single stalled socket left the promise
+  // unsettled forever, so callers that flip a "busy" flag (the audit is the worst case)
+  // never cleared it and the whole feature appeared permanently dead until a page reload.
+  const ENGINE_TIMEOUT_MS = 180000;   // > the server's own 95s cap, so the server's error wins when it has one
   async function engine(path, body) {
-    let res;
+    const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, ENGINE_TIMEOUT_MS) : null;
+    const timedOut = () => new Error("That request timed out after " + Math.round(ENGINE_TIMEOUT_MS / 1000) + "s — the server may be busy. Please try again.");
     try {
-      res = await fetch(ENGINE + path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body || {}),
-      });
-    } catch (e) {
-      throw new Error("Can't reach the server — check your connection and try again.");
+      let res;
+      try {
+        res = await fetch(ENGINE + path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body || {}),
+          signal: ctrl ? ctrl.signal : undefined,
+        });
+      } catch (e) {
+        if (e && e.name === "AbortError") throw timedOut();
+        throw new Error("Can't reach the server — check your connection and try again.");
+      }
+      // Read as text first so a non-JSON body (a gateway/proxy HTML error page returned
+      // while the service is busy/restarting/timing out) doesn't blow up as a raw
+      // "Unexpected token '<'" JSON-parse error — show a clean, actionable message instead.
+      // The abort timer stays armed across this read: a socket that delivers headers and
+      // then stalls mid-body would otherwise hang here forever.
+      let text;
+      try { text = await res.text(); }
+      catch (e) { throw (e && e.name === "AbortError") ? timedOut() : e; }
+      let data = null;
+      try { data = text ? JSON.parse(text) : {}; } catch (e) { data = null; }
+      if (data === null) {
+        if (res.status === 504 || res.status === 524) throw new Error("That request took too long and timed out — please try again in a moment.");
+        if (res.status === 502 || res.status === 503) throw new Error("The service is busy or restarting — please try again in a moment.");
+        throw new Error("Unexpected response from the server (" + res.status + ") — please try again.");
+      }
+      if (!res.ok) throw new Error(data.error || ("engine " + path + " → " + res.status));
+      return data;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
-    // Read as text first so a non-JSON body (a gateway/proxy HTML error page returned
-    // while the service is busy/restarting/timing out) doesn't blow up as a raw
-    // "Unexpected token '<'" JSON-parse error — show a clean, actionable message instead.
-    const text = await res.text();
-    let data = null;
-    try { data = text ? JSON.parse(text) : {}; } catch (e) { data = null; }
-    if (data === null) {
-      if (res.status === 504 || res.status === 524) throw new Error("That request took too long and timed out — please try again in a moment.");
-      if (res.status === 502 || res.status === 503) throw new Error("The service is busy or restarting — please try again in a moment.");
-      throw new Error("Unexpected response from the server (" + res.status + ") — please try again.");
-    }
-    if (!res.ok) throw new Error(data.error || ("engine " + path + " → " + res.status));
-    return data;
   }
 
   // ---- reachability ---------------------------------------------------------

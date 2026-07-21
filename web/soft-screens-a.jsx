@@ -248,15 +248,21 @@ function RunAuditModal({ ctx }) {
   const [phase,setPhase] = useState(-1);
   const PHASES = ["Crawling & sampling pages","Running Lighthouse / PSI","Pulling Core Web Vitals field data","Scanning SEO & structured data","Checking accessibility (WCAG)","Prioritizing by traffic × gap"];
   const [prog,setProg] = useState(0);
+  const [elapsed,setElapsed] = useState(0);
   const sawRunning = useRef(false);
+  const failed = !!ctx.auditError && phase>=0;
   // Kick off the REAL audit (shared handler on ctx) and enter the progress view.
-  const start = ()=>{ sawRunning.current=false; setPhase(0); ctx.runAudit(); };
-  // Walk the step checklist while the audit runs — but HOLD on the final step until
-  // the real audit clears ctx.auditing (completion is driven by real state, not a timer).
-  useEffect(()=>{ if(phase<0||phase>=99||phase>=PHASES.length-1) return; const t=setTimeout(()=>setPhase(phase+1),650); return ()=>clearTimeout(t); },[phase]);
+  const start = ()=>{ sawRunning.current=false; setPhase(0); setElapsed(0); ctx.runAudit(); };
+  // Step checklist. The steps are indicative (the server does not stream per-step events),
+  // so they advance on a cadence CLOSE to real audit timing rather than racing to the end in
+  // 3s and then freezing — the old 650ms walk hit the last step almost immediately and sat
+  // at a hardcoded 92% for the entire real runtime, which read as "stuck".
+  useEffect(()=>{ if(phase<0||phase>=99||phase>=PHASES.length-1) return; const t=setTimeout(()=>setPhase(phase+1),4200); return ()=>clearTimeout(t); },[phase]);
   // Real completion: once the audit has been observed running, its finish marks done.
   useEffect(()=>{ if(phase<0||phase>=99) return; if(ctx.auditing){ sawRunning.current=true; return; } if(sawRunning.current) setPhase(99); },[ctx.auditing,phase]);
-  useEffect(()=>{ if(phase<0){setProg(0);return;} if(phase>=99){setProg(100);return;} setProg(Math.min(92,Math.round(((phase+1)/PHASES.length)*100))); },[phase]);
+  // Live elapsed seconds — proof it is still working even while a step sits on screen.
+  useEffect(()=>{ if(phase<0||phase>=99) return; const t=setInterval(()=>setElapsed(e=>e+1),1000); return ()=>clearInterval(t); },[phase]);
+  useEffect(()=>{ if(phase<0){setProg(0);return;} if(phase>=99){setProg(100);return;} setProg(Math.min(95,Math.round(((phase+1)/PHASES.length)*100))); },[phase]);
   const scopes=[{v:"single",t:"Single page",d:"Audit one URL — fastest"},{v:"key",t:"Key pages",d:"Home, top templates & money pages"},{v:"full",t:"Full-site (sampled)",d:"Crawl & sample up to 500 URLs"}];
   return (
     <SoftModal open onClose={phase<0||phase>=99?ctx.closeRunAudit:undefined} w={560}>
@@ -279,9 +285,10 @@ function RunAuditModal({ ctx }) {
         {phase>=0 && (
           <div className="rise" style={{ padding:"6px 0" }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:8 }}>
-              <span style={{ fontSize:13, fontWeight:700 }}>{phase>=99?"Audit complete":"Auditing…"}</span>
-              <span style={{ fontSize:22, fontWeight:800, color:"var(--t-700)" }}>{prog}%</span>
+              <span style={{ fontSize:13, fontWeight:700, color:failed?"var(--clay)":undefined }}>{failed?"Audit failed":phase>=99?"Audit complete":"Auditing…"}</span>
+              <span style={{ fontSize:22, fontWeight:800, color:failed?"var(--clay)":"var(--t-700)" }}>{failed?"—":prog+"%"}</span>
             </div>
+            {!failed && phase<99 && <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:8 }}>{elapsed}s elapsed · a full Lighthouse pass typically takes 25-60s</div>}
             <div style={{ height:10, borderRadius:99, background:"var(--bg)", boxShadow:"var(--neo-in)", overflow:"hidden" }}>
               <div style={{ width:prog+"%", height:"100%", borderRadius:99, background:"linear-gradient(90deg,var(--t-500),var(--t-700))", transition:"width .5s" }} />
             </div>
@@ -293,7 +300,15 @@ function RunAuditModal({ ctx }) {
                 </div>
               ); })}
             </div>
-            {phase>=99 && (
+            {/* A failed audit must SAY so — it used to render the success panel with
+                "0 findings · 0 fix proposals", presenting a failure as a clean result. */}
+            {failed && (
+              <div style={{ marginTop:18, padding:"14px 16px", background:"var(--bg)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", display:"flex", alignItems:"flex-start", gap:12 }}>
+                <div style={{ width:38, height:38, borderRadius:99, background:"var(--clay)", color:"#F3EFE4", display:"grid", placeItems:"center", flexShrink:0 }}><Icon name="alert" size={20} sw={2.4} /></div>
+                <div><div style={{ fontSize:14, fontWeight:700, color:"var(--clay)" }}>The audit didn't finish</div><div style={{ fontSize:12.5, color:"var(--ink-2)", lineHeight:1.5, marginTop:2 }}>{ctx.auditError}</div><div style={{ fontSize:12, color:"var(--muted)", marginTop:6 }}>Nothing was written to your site. Press <b>Try again</b> — this is usually a slow PageSpeed response.</div></div>
+              </div>
+            )}
+            {!failed && phase>=99 && (
               <div style={{ marginTop:18, padding:"14px 16px", background:"var(--t-50)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-xs)", display:"flex", alignItems:"center", gap:12 }}>
                 <div style={{ width:38, height:38, borderRadius:99, background:"var(--t-600)", color:"#F3EFE4", display:"grid", placeItems:"center" }}><Icon name="check" size={20} sw={2.4} /></div>
                 <div><div style={{ fontSize:14, fontWeight:700 }}>{(ctx.findings||[]).length} finding{(ctx.findings||[]).length===1?"":"s"} · {(ctx.proposals||[]).length} fix proposal{(ctx.proposals||[]).length===1?"":"s"} in review queue</div><div style={{ fontSize:12.5, color:"var(--muted)" }}>Prioritized by traffic × score gap.</div></div>
@@ -304,8 +319,9 @@ function RunAuditModal({ ctx }) {
       </div>
       <div style={{ display:"flex", justifyContent:"flex-end", gap:10, padding:"16px 22px", borderTop:"1px solid var(--line-soft)", background:"var(--canvas)" }}>
         {phase<0 && <><NeoButton kind="soft" onClick={ctx.closeRunAudit}>Cancel</NeoButton><NeoButton icon="radar" onClick={start}>Start audit</NeoButton></>}
-        {phase>=0 && phase<99 && <NeoButton kind="soft" onClick={ctx.closeRunAudit}>Run in background</NeoButton>}
-        {phase>=99 && <><NeoButton kind="soft" onClick={ctx.closeRunAudit}>Close</NeoButton><NeoButton icon="list" onClick={()=>{ctx.closeRunAudit();ctx.goto("review");}}>Review proposals</NeoButton></>}
+        {failed && <><NeoButton kind="soft" onClick={ctx.closeRunAudit}>Close</NeoButton><NeoButton icon="radar" onClick={start}>Try again</NeoButton></>}
+        {!failed && phase>=0 && phase<99 && <NeoButton kind="soft" onClick={ctx.closeRunAudit}>Run in background</NeoButton>}
+        {!failed && phase>=99 && <><NeoButton kind="soft" onClick={ctx.closeRunAudit}>Close</NeoButton><NeoButton icon="list" onClick={()=>{ctx.closeRunAudit();ctx.goto("review");}}>Review proposals</NeoButton></>}
       </div>
     </SoftModal>
   );

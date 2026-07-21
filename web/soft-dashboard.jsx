@@ -6058,6 +6058,8 @@ function App() {
   const [killSwitch, setKillSwitch] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [auditing, setAuditing] = useState(false);
+  const auditStartRef = useRef(0);          // when the current audit began (stuck-flag recovery)
+  const [auditError, setAuditError] = useState(null);   // surfaced by the modal instead of a false "complete"
   const [addSiteOpen, setAddSiteOpen] = useState(false);
   const [addSiteFor, setAddSiteFor] = useState(null);
   const [runAuditOpen, setRunAuditOpen] = useState(false);
@@ -6118,7 +6120,7 @@ function App() {
   useEffect(()=>{ try{ window.FINDINGS = (findingsState.siteId===siteId?findingsState.items:[])||[]; }catch(e){} },[findingsState,siteId]);
 
   const ctx = {
-    screen, navTab, goto, site, sites, proposals, killSwitch, toast, auditing, addSiteFor,
+    screen, navTab, goto, site, sites, proposals, killSwitch, toast, auditing, auditError, addSiteFor,
     notifOpen, setNotifOpen, searchQuery, setSearchQuery,
     history, historyLoading, reloadHistory:()=>loadHistory(siteId),
     findings: findingsState.siteId===siteId ? (findingsState.items||[]) : [],
@@ -6190,24 +6192,31 @@ function App() {
     },
     switchSite:(id)=>{ const x=sites.find(s=>s.id===id); if(x.status!=="connected"){ setAddSiteFor(x); setAddSiteOpen(true); return; } setSiteId(id); setProposals([]); if(isLive()){ API.listProposals(id).then(rows=>{ window.PROPOSALS=(rows||[]).map(window.mapProposalRow||(y=>y)); setProposals(window.PROPOSALS); }).catch(()=>{}); } toast("Switched to "+x.name,"teal"); },
     runAudit:()=>{
-      if(auditing) return;
-      setAuditing(true);
+      // A stuck `auditing` flag used to make every later click a SILENT no-op — the modal
+      // sat at 92% forever and the operator concluded "audits don't work". Now a run that
+      // has clearly overrun is reclaimable, and a genuine in-flight run says so out loud
+      // instead of ignoring the click.
+      if(auditing){
+        const startedAt = auditStartRef.current || 0;
+        if(Date.now() - startedAt < 300000){ toast("An audit is already running — give it a moment.","gold"); return; }
+        toast("Previous audit never finished — starting a fresh one.","gold");
+      }
+      auditStartRef.current = Date.now();
+      setAuditing(true); setAuditError(null);
       toast("Read-only audit running…","teal");
       // LIVE: full audit (scores + findings + draft proposals) via the engine.
       if(isLive()){
         const url = site._rawUrl.replace(/\/$/,"")+"/";
         API.auditFull(url, null, true).then(async (res)=>{
           if(res&&res.scores){
-            // Median-of-N PSI in parallel → stabler scores + IQR noise band (credibility).
-            let variance=null, medScores=null;
-            try{
-              const mr=await API.psiMedian([url],"mobile",3);
-              const m=(mr&&mr.results&&mr.results[0])||null;
-              if(m&&m.scores&&!m.error){ medScores=m.scores; variance={iqr:m.scoresIqr,n:m.runs}; }
-            }catch(e){}
+            // NOTE: this used to chain a psi-median run (THREE more full PageSpeed passes,
+            // strictly serial) straight after the audit's own Lighthouse run — roughly
+            // doubling wall-clock (measured 25s + 28s) for a ±5pt noise refinement, all of
+            // it displayed as a frozen 92%. The audit's own scores are used directly now;
+            // the median tool is still available on the Page Fixes screen when wanted.
+            let variance=null;
             const cwv=res.cwv||{};
-            // Prefer the median when available — single runs carry ±5-10pt noise.
-            const sc=medScores?{...res.scores,...medScores}:res.scores;
+            const sc=res.scores;
             const cwvUi={ lcp:{v:cwv.lcp?(cwv.lcp/1000).toFixed(1)+"s":"—",state:cwv.lcp<2500?"good":cwv.lcp<4000?"ni":"poor"},
               inp:{v:cwv.tbt!=null?Math.round(cwv.tbt)+"ms":"—",state:"good"},
               cls:{v:cwv.cls!=null?cwv.cls.toFixed(2):"—",state:(cwv.cls||0)<0.1?"good":"ni"} };
@@ -6246,7 +6255,7 @@ function App() {
           }
           loadHistory(siteId); // refresh the saved-audit history
           setAuditing(false); toast("Audit complete — "+((res.findings||[]).length)+" findings, "+((res.proposals||[]).length)+" proposals ✓","teal");
-        }).catch(e=>{ setAuditing(false); toast("Audit failed: "+e.message,"clay"); });
+        }).catch(e=>{ setAuditing(false); setAuditError(e.message||"Audit failed"); toast("Audit failed: "+e.message,"clay"); });
         return;
       }
       // MOCK fallback (design preview)
