@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.21.1
+ * Version:     1.21.2
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.21.1';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.21.2';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -105,7 +105,12 @@ class SEO_Agent_Optimize {
         $k = (string) $meta_key;
         if (strpos($k, '_seoagent_') !== 0 && strpos($k, 'rank_math_') !== 0) return;
         if (function_exists('clean_post_cache')) clean_post_cache($post_id);
-        if (function_exists('rocket_clean_post')) { rocket_clean_post($post_id); return; }
+        if (function_exists('rocket_clean_post')) rocket_clean_post($post_id);
+        // Server-level LSCache: purge just this URL rather than the whole vhost — a
+        // 40-page repair would otherwise cold-start the entire site forty times over.
+        $u = get_permalink($post_id);
+        $path = $u ? parse_url($u, PHP_URL_PATH) : '';
+        if ($path && !headers_sent()) { @header('X-LiteSpeed-Purge: ' . $path); return; }
         $this->purge();
     }
 
@@ -473,7 +478,14 @@ class SEO_Agent_Optimize {
         if (function_exists('rocket_clean_domain')) rocket_clean_domain();
         if (function_exists('rocket_clean_minify')) rocket_clean_minify();
         if (function_exists('w3tc_flush_all')) w3tc_flush_all();
-        if (has_action('litespeed_purge_all')) do_action('litespeed_purge_all');
+        /* LiteSpeed comes in two flavours and we need both. The LSCWP PLUGIN listens on
+           this action (unconditional do_action — harmless when nothing is listening; the
+           old has_action() guard silently did nothing). Hostinger instead runs LSCache at
+           the SERVER level with no plugin, where the only way to purge from PHP is this
+           response header — verified on goodfor.app, whose cached pages survived a full
+           purge-all and kept serving a <head> built before the upgrade. */
+        do_action('litespeed_purge_all');
+        if (!headers_sent()) @header('X-LiteSpeed-Purge: *');
         if (function_exists('wp_cache_flush')) wp_cache_flush();
     }
 
