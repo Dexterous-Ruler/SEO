@@ -479,7 +479,15 @@ Be STRICT: a short, precise list is far more valuable than a broad one. High sea
     model: 'claude-haiku-4-5-20251001',   // fast — a filtering task; keeps the gap route under the edge timeout
     maxTokens: 6000,   // 200 echoed keywords can exceed 3000 output tokens — truncation broke the JSON and silently disabled the filter
     temperature: 0,
-    messages: [{ role: 'user', content: `SITE: ${siteName || ''}\n\nNICHE / CONTEXT (what this site is about + offers):\n${String(niche).slice(0, 1800)}\n\nKEYWORDS:\n${list.join('\n')}\n\nReturn the JSON array of only the relevant keywords.` }],
+    // TARGET MARKET first: it's appended to the END of long geo_contexts by callers, so a
+    // tail-slice used to silently cut it off and the market rule never reached the model.
+    messages: [{ role: 'user', content: (() => {
+      const s = String(niche);
+      const mi = s.indexOf('TARGET MARKET:');
+      const market = mi >= 0 ? s.slice(mi).split('\n').slice(0, 2).join('\n') : '';
+      const ctxBody = (mi >= 0 ? s.slice(0, mi) : s).slice(0, 1700);
+      return `SITE: ${siteName || ''}\n${market ? market + '\n' : ''}\nNICHE / CONTEXT (what this site is about + offers):\n${ctxBody}\n\nKEYWORDS:\n${list.join('\n')}\n\nReturn the JSON array of only the relevant keywords.`;
+    })() }],
   });
   try {
     const arr = JSON.parse(txt.slice(txt.indexOf('['), txt.lastIndexOf(']') + 1));

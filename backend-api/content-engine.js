@@ -77,7 +77,11 @@ function makeOpp(siteId, { source, sourceRef, title, primaryKeyword, intent, act
     intent: intent || 'informational',
     actionType: actionType || 'article',
     clusterKey: clusterKey || null,
-    dedupeKey: dedupeKey(t || primaryKeyword || ''),
+    // Key on the KEYWORD first: titles are AI-regenerated per run ("UK Business
+    // Structures: Sole Trader vs Limited Company" vs "…Explained: Sole Trader vs…"),
+    // so a title-derived key re-admitted the same topic every weekly refresh. The
+    // primary keyword is stable across runs.
+    dedupeKey: dedupeKey(primaryKeyword || t || ''),
     score: score != null ? score : 0,
     scoreBreakdown: scoreBreakdown || {},
     evidence: Array.isArray(evidence) ? evidence : [],
@@ -680,9 +684,10 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids } = {}) {
     items = (wl.items || []).filter((it) => idSet.has(it.id)).slice(0, 50);
     if (!items.length) return { drafted: 0, skipped: true, reason: 'selected opportunity not found' };
   } else {
-    // 1) Top-N SCORED opportunities (highest score first). worklist() surfaces
-    //    notProvisioned / errors, which we pass straight through.
-    const wl = await worklist(siteId, { status: 'scored', actionType, limit: n });
+    // 1) Top SCORED opportunities (highest score first). Over-fetch (n×4) BEFORE the
+    //    article-only filter — slicing to n first meant answer_block/geo rows consumed
+    //    the batch and could shrink an "auto-draft top 5" to 2 or 0 articles.
+    const wl = await worklist(siteId, { status: 'scored', actionType, limit: n * 4 });
     if (wl && wl.notProvisioned) return { ...NOT_PROVISIONED, drafted: 0 };
     if (wl && wl.error && !(wl.items && wl.items.length)) return { error: wl.error, drafted: 0 };
     // Article path only: never push an answer_block/geo item to the Article Writer,
@@ -732,15 +737,19 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids } = {}) {
     } while (offset);
   } catch (e) { /* read failed → treat as none existing */ }
 
-  const toCreate = [], draftedIds = [], seen = new Set();
+  const toCreate = [], draftedIds = [], dupIds = [], seen = new Set();
   let skippedDup = 0;
   for (const [id, { row, keyword }] of rowById) {
-    if (keyword && (existing.has(keyword) || seen.has(keyword))) { skippedDup++; continue; }
+    if (keyword && (existing.has(keyword) || seen.has(keyword))) { skippedDup++; dupIds.push(id); continue; }
     if (keyword) seen.add(keyword);
     toCreate.push(row);
     draftedIds.push(id);
   }
-  if (!toCreate.length) return { drafted: 0, skipped: true, reason: 'all candidates already in Article Writer table', candidates: items.length, skippedDup };
+  // A duplicate IS in the writer already — flip it to 'queued' so it stops squatting
+  // in the scored top-N window. (Previously it stayed 'scored' forever, and once the
+  // top N were all dups, auto-draft never drafted anything again — the auto-pilot wedge.)
+  for (const id of dupIds) await setStatus(id, 'queued').catch(() => null);
+  if (!toCreate.length) return { drafted: 0, skipped: true, reason: 'all candidates already in Article Writer table (now marked queued)', candidates: items.length, skippedDup };
 
   // 4) Push to the n8n-watched table, then flip the drafted opportunities → 'queued'.
   let pushed = 0;

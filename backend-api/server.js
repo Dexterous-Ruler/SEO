@@ -1249,13 +1249,17 @@ const routes = {
     if (units != null && units < 40) {
       return { error: `DataForSEO API units too low (${units} left) for a keyword-gap analysis — top up your DataForSEO plan.`, noUnits: true, unitsRemaining: units, gaps: [] };
     }
-    // Run the gap for each competitor, merge + dedupe (keep highest volume).
+    // Run the gap for the TOP competitors in PARALLEL, merge + dedupe (keep highest
+    // volume). Capped at 4: fast-ila has 12 saved competitors and the old unbounded
+    // SERIAL loop could not fit inside the 95s request budget.
+    const gapComps = competitors.slice(0, 4);
     const map = new Map(); let unitsErr = false;
-    for (const c of competitors) {
-      try {
-        const r = await semrush.keywordGap(t, c, { db: body.db || 'uk', limit: 120, negatives, extraBrands: competitors.filter((x) => x !== c) });
-        for (const g of r.gaps) { const k = g.keyword.toLowerCase(); if (!map.has(k) || map.get(k).volume < g.volume) map.set(k, { ...g, competitor: c }); }
-      } catch (e) { if (e.code === 'NO_UNITS') { unitsErr = true; break; } }
+    const settled = await Promise.all(gapComps.map((c) =>
+      semrush.keywordGap(t, c, { db: body.db || 'uk', limit: 120, negatives, extraBrands: competitors.filter((x) => x !== c) })
+        .then((r) => ({ c, r }), (e) => ({ c, e }))));
+    for (const { c, r, e } of settled) {
+      if (e) { if (e.code === 'NO_UNITS') unitsErr = true; continue; }
+      for (const g of r.gaps) { const k = g.keyword.toLowerCase(); if (!map.has(k) || map.get(k).volume < g.volume) map.set(k, { ...g, competitor: c }); }
     }
     if (unitsErr && map.size === 0) { const u = await semrush.apiUnits(); return { error: `DataForSEO API units exhausted (${u} left).`, noUnits: true, unitsRemaining: u, gaps: [] }; }
     let gaps = [...map.values()].sort((a, b) => b.volume - a.volume);
@@ -3078,7 +3082,13 @@ const routes = {
     if (!body.recordId) return { error: 'recordId required' };
     const tbl = body.table || cfg.table_gaps;  // edit the table the grid is viewing
     if (!tbl) return { error: 'Not configured' };
-    try { return { record: await airtable.updateRecord(pat, cfg.base_id, tbl, body.recordId, body.fields || {}) }; }
+    try {
+      const record = await airtable.updateRecord(pat, cfg.base_id, tbl, body.recordId, body.fields || {});
+      // Invalidate the records cache for this base — an edit/Status-flip used to visually
+      // REVERT for up to 10s because the next poll served the pre-write cached sweep.
+      for (const k of _atRecCache.keys()) if (k.startsWith(cfg.base_id + ':')) _atRecCache.delete(k);
+      return { record };
+    }
     catch (e) { return { error: e.message }; }
   },
   // Add a new row.
@@ -3089,7 +3099,11 @@ const routes = {
     if (!cfg || !cfg.base_id) return { error: 'Not configured' };
     const tbl = body.table || cfg.table_gaps;
     if (!tbl) return { error: 'Not configured' };
-    try { return { record: await airtable.createRecord(pat, cfg.base_id, tbl, body.fields || {}) }; }
+    try {
+      const record = await airtable.createRecord(pat, cfg.base_id, tbl, body.fields || {});
+      for (const k of _atRecCache.keys()) if (k.startsWith(cfg.base_id + ':')) _atRecCache.delete(k);
+      return { record };
+    }
     catch (e) { return { error: e.message }; }
   },
 
@@ -3333,9 +3347,12 @@ const routes = {
       const done = await pushToArticleWriter('gaps', rows, 'Keyword');
       if (!done) await push('gaps', cfg.table_gaps, airtable.mapGaps(gaps || [], 'DataForSEO', now), airtable.SCHEMAS.gaps);
     }
-    // 2) Content suggestions (passed from the UI's content-intel result)
+    // 2) Content suggestions (passed from the UI's content-intel result).
+    //    NOTE: cfg.table_content stores the KEYWORD FIELD name (see /airtable-config), not
+    //    a table — passing it as a table name created/wrote a table literally named after
+    //    the field. Suggestions always go to the default 'Content Suggestions' table.
     if (kinds.includes('content')) {
-      await push('content', cfg.table_content, airtable.mapContent(body.suggestions || [], now), airtable.SCHEMAS.content);
+      await push('content', null, airtable.mapContent(body.suggestions || [], now), airtable.SCHEMAS.content);
     }
     // 3) GEO citation results (passed from the UI's last GEO run).
     //    De-dupe against prompts already in the table so re-scans don't pile up

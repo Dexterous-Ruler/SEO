@@ -265,10 +265,15 @@ function isRelevantKeyword(kw, { brands = [], negatives = [] } = {}) {
 // Keyword gap: keywords the competitor ranks for that the target doesn't.
 export async function keywordGap(targetDomain, competitorDomain, { db = 'uk', limit = 60, negatives = [], extraBrands = [], rows = 200 } = {}) {
   const perPull = Math.max(40, Math.floor(rows / 2));
+  // Distinguish "target pull FAILED" from "target genuinely ranks for nothing": when the
+  // target fetch errors but the competitor's succeeds, the subtraction makes EVERYTHING
+  // the competitor ranks for look like a gap — fabricated results. Fail loudly instead.
+  let mineFailed = false;
   const [mine, theirs] = await Promise.all([
-    organicKeywords(targetDomain, { db, limit: perPull }).catch(() => []),
+    organicKeywords(targetDomain, { db, limit: perPull }).catch(() => { mineFailed = true; return []; }),
     organicKeywords(competitorDomain, { db, limit: perPull }).catch(() => []),
   ]);
+  if (mineFailed && theirs.length) { const e = new Error(`Could not read ${targetDomain}'s own keywords — gap results would be fabricated. Retry shortly.`); e.code = 'TARGET_PULL_FAILED'; throw e; }
   if (!theirs.length && !mine.length) { const e = new Error('No DataForSEO data for these domains'); e.code = 'NO_DATA'; throw e; }
   const mineSet = new Set(mine.map((r) => (r.keyword || '').toLowerCase()));
   const brands = [...brandTokens(competitorDomain), ...extraBrands.flatMap(brandTokens)];

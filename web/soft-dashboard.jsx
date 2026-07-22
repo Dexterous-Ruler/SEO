@@ -5622,10 +5622,14 @@ function useChat(siteId) {
     finally{ if(fresh()){ setBusy(false); abortRef.current=null; } }
   };
   const reset = ()=>{ invalidate(); setMsgs([]); applyHistory([]); setConvoId(null); };
-  // resume a saved conversation (abort any in-flight stream first so it can't clobber the load)
+  // resume a saved conversation (abort any in-flight stream first so it can't clobber the
+  // load — and gen-check the RESPONSE too, so a slow load finishing after a site switch
+  // can't inject another site's history into the current one)
   const load = (id)=>{
     invalidate();
+    const myGen=genRef.current;
     API.chatLoad(id).then(r=>{
+      if(genRef.current!==myGen) return;   // context changed while loading — discard
       const c=r.conversation; if(!c) return;
       setMsgs(c.messages||[]); applyHistory(c.api_history||[]); setConvoId(c.id);
     }).catch(()=>{});

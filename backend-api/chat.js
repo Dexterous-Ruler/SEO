@@ -19,6 +19,7 @@ import { findOpportunities } from './content-opportunities.js';
 import * as airtable from './airtable.js';
 import { P } from './prompts.js';
 import { discoverUrls } from '../src/lib/crawler.js';
+import { marketFor } from './market.js';
 
 const API = 'https://api.anthropic.com/v1/messages';
 const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
@@ -93,9 +94,12 @@ async function fetchHtmlBounded(url, { timeoutMs = 15000, maxChars = 1_500_000 }
 }
 
 async function fetchPageText(url) {
-  let html;
-  try { ({ html } = await fetchHtmlBounded(url)); }
+  let html, ok, status;
+  try { ({ html, ok, status } = await fetchHtmlBounded(url)); }
   catch (e) { return { title: '', text: '', url, error: e.name === 'AbortError' ? 'timed out after 15s' : e.message }; }
+  // An HTTP error page is NOT the page: a 404/410/500 body used to be extracted and
+  // returned as a successful read, becoming false provenance a brief could cite.
+  if (!ok) return { title: '', text: '', url, error: `HTTP ${status}` };
   const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || '';
   // Strip non-content chrome (nav/header/footer/aside/forms/svg/comments) BEFORE the tag
   // strip, and keep a generous window. On heavy Elementor pages the article body sits ~50%
@@ -219,27 +223,36 @@ async function firecrawlScrape(url, timeoutMs = 20000) {
 }
 async function readPage(url, siteId) {
   // 1) own-site via WP REST — read-only creds (a READ must not require write-armed).
+  //    12s bound: WordPressClient.request has no AbortSignal and retries up to 4×, so a
+  //    hanging origin could otherwise burn the whole request budget inside this tier.
   if (siteId) {
     try {
-      const creds = await credsForSite(siteId).catch(() => null);
-      const siteUrl = creds && (creds.baseUrl || (creds.site && creds.site.url));
-      if (creds && creds.baseUrl && siteUrl && sameHost(url, siteUrl)) {
-        const wp = new WordPressClient({ baseUrl: creds.baseUrl, username: creds.username, appPassword: creds.appPassword });
-        let found = await resolvePostId(wp, url);
-        if (!found) {
-          // Also handle default permalinks (?p=<id> / ?page_id=<id>) which carry no slug.
-          const m = url.match(/[?&](?:p|page_id)=(\d+)/);
-          if (m) for (const type of ['posts', 'pages']) { const chk = await wp.request(`/${type}/${m[1]}?_fields=id`).catch(() => null); if (chk && chk.id) { found = { postId: m[1], objectType: type }; break; } }
-        }
-        if (found) {
-          const post = await wp.request(`/${found.objectType}/${found.postId}?_fields=title,content`).catch(() => null);
-          const rendered = post && post.content && post.content.rendered;
-          if (rendered) {
-            const text = htmlToText(rendered);
-            if (text.length > 200) return { title: (post.title && post.title.rendered) || '', text: text.slice(0, 24000), url, via: 'wp-rest' };
+      const tier1 = await Promise.race([
+        (async () => {
+          const creds = await credsForSite(siteId).catch(() => null);
+          const siteUrl = creds && (creds.baseUrl || (creds.site && creds.site.url));
+          if (creds && creds.baseUrl && siteUrl && sameHost(url, siteUrl)) {
+            const wp = new WordPressClient({ baseUrl: creds.baseUrl, username: creds.username, appPassword: creds.appPassword });
+            let found = await resolvePostId(wp, url);
+            if (!found) {
+              // Also handle default permalinks (?p=<id> / ?page_id=<id>) which carry no slug.
+              const m = url.match(/[?&](?:p|page_id)=(\d+)/);
+              if (m) for (const type of ['posts', 'pages']) { const chk = await wp.request(`/${type}/${m[1]}?_fields=id`).catch(() => null); if (chk && chk.id) { found = { postId: m[1], objectType: type }; break; } }
+            }
+            if (found) {
+              const post = await wp.request(`/${found.objectType}/${found.postId}?_fields=title,content`).catch(() => null);
+              const rendered = post && post.content && post.content.rendered;
+              if (rendered) {
+                const text = htmlToText(rendered);
+                if (text.length > 200) return { title: (post.title && post.title.rendered) || '', text: text.slice(0, 24000), url, via: 'wp-rest' };
+              }
+            }
           }
-        }
-      }
+          return null;
+        })(),
+        new Promise((resolve) => setTimeout(() => resolve(null), 12000)),
+      ]);
+      if (tier1) return tier1;
     } catch (e) { /* fall through to fetch */ }
   }
   // 2) direct browser-UA fetch + extraction (fast, free — the common case).
@@ -359,7 +372,9 @@ async function runTool(name, input, siteId, turn) {
       const titles = posts.map((p) => (p.title?.rendered || '').replace(/&[a-z]+;/g, ' ').trim()).filter(Boolean);
       const stride = Math.max(1, Math.floor(titles.length / 80));
       const sample = titles.filter((_, i) => i % stride === 0).slice(0, 80);
-      const intel = await claudeMod.contentIntelligence({ siteName: site.name, niche: site.stack?.type, titles: sample, siteId });
+      // niche = the site's REAL service context (stack.type is literally "WordPress");
+      // market from the site's configured DB, not a hardcoded UK.
+      const intel = await claudeMod.contentIntelligence({ siteName: site.name, niche: (site.geo_context && String(site.geo_context).slice(0, 1500)) || site.stack?.type, titles: sample, siteId, market: marketFor(site.semrush_db) });
       return JSON.stringify({ clusters: intel.clusters, gaps: intel.gaps, suggestions: intel.suggestions });
     }
     if (name === 'get_geo_visibility') {
@@ -400,13 +415,13 @@ async function runTool(name, input, siteId, turn) {
       return JSON.stringify({ analyzed: r.analyzed, count: r.count, suggestions: r.suggestions.slice(0, 20) });
     }
     if (name === 'extract_citable_facts') {
-      let fetched;
-      try { fetched = await fetchHtmlBounded(input.url); }
-      catch (e) { return `Could not fetch that page — ${e.name === 'AbortError' ? 'timed out after 15s' : e.message}.`; }
-      const html = fetched.html;
-      const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || '';
-      const text = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-      const facts = await claudeMod.extractCitableFacts({ url: input.url, title, text, niche: site.stack?.type, siteId });
+      // Same guaranteed tiered reader as fetch_url (status checks, bot-wall detection,
+      // Firecrawl/jina fallback) — this handler used to do its own raw fetch and would
+      // happily extract "facts" from a 403 challenge page.
+      const p = await readPage(input.url, siteId);
+      if (p.error || !p.text) return `READ FAILED for ${input.url}${p.blocked ? ' (bot-wall / requires JavaScript)' : ''} — cannot extract facts from a page that was not read.`;
+      if (turn) turn.reads.set(normUrl(input.url), { ok: true, via: p.via || 'direct', chars: p.text.length, title: p.title || '' });
+      const facts = await claudeMod.extractCitableFacts({ url: input.url, title: p.title, text: p.text, niche: (site.geo_context && String(site.geo_context).slice(0, 800)) || site.stack?.type, siteId });
       return JSON.stringify(facts);
     }
     if (name === 'get_prioritized_worklist') {
@@ -599,7 +614,7 @@ ${s.stack ? 'Stack: ' + [s.stack.builder, s.stack.seo, s.stack.cache].filter(Boo
 ${s.scale ? `Scale: ${s.scale.posts || 0} posts, ${s.scale.pages || 0} pages.` : ''}
 ${s.scores ? `Latest scores — Perf ${s.scores.performance}, A11y ${s.scores.accessibility}, SEO ${s.scores.seo}.` : ''}
 ${s.competitors && s.competitors.length ? 'Tracked competitors: ' + s.competitors.join(', ') + '.' : ''}
-
+${s.geo_context ? `\n=== THIS SITE'S NICHE & SERVICES (author strictly for this — do not drift generic) ===\n${String(s.geo_context).slice(0, 2500)}\n` : ''}
 ${P('chat.assistant', siteId)}`;
 }
 
@@ -613,6 +628,39 @@ function buildUserContent(userText, images) {
   }
   if (userText) blocks.push({ type: 'text', text: userText });
   return blocks;
+}
+
+// Seed a turn's read-provenance from PRIOR history: earlier turns' fetch_url /
+// extract_citable_facts results record which URLs were genuinely read (or failed).
+// Without this the guard was per-turn only — "read X" one turn, "push the brief"
+// the next, and the push had no provenance to check against.
+function seedReadsFromHistory(messages) {
+  const reads = new Map();
+  for (const m of (messages || [])) {
+    if (m.role !== 'user' || !Array.isArray(m.content)) continue;
+    for (const b of m.content) {
+      if (b.type !== 'tool_result') continue;
+      const txt = typeof b.content === 'string' ? b.content : (Array.isArray(b.content) ? b.content.map((x) => x.text || '').join('') : '');
+      let mm = txt.match(/^Title: [^\n]*\nURL: (\S+)/);
+      if (mm) { reads.set(normUrl(mm[1]), { ok: true, via: 'history', chars: txt.length, title: '' }); continue; }
+      mm = txt.match(/^READ FAILED for (\S+)/);
+      if (mm) { const k = normUrl(mm[1]); if (!reads.has(k)) reads.set(k, { ok: false }); }
+    }
+  }
+  return reads;
+}
+
+// Cap the conversation sent to Claude (and persisted): api_history grew unbounded —
+// every turn re-uploaded and re-wrote the ENTIRE history (100KB+ jsonb), slowing every
+// exchange and ballooning cost. Keep the most recent window, always starting at a
+// 'user' message so tool_use/tool_result pairs stay intact.
+const MAX_HISTORY_MSGS = 40;
+function windowHistory(messages) {
+  const arr = messages || [];
+  if (arr.length <= MAX_HISTORY_MSGS) return arr;
+  let start = arr.length - MAX_HISTORY_MSGS;
+  while (start < arr.length && !(arr[start].role === 'user' && (typeof arr[start].content === 'string' || (Array.isArray(arr[start].content) && arr[start].content.some((b) => b.type === 'text' || b.type === 'image'))))) start++;
+  return start >= arr.length ? arr.slice(-MAX_HISTORY_MSGS) : arr.slice(start);
 }
 
 // When the agentic loop exhausts its tool-step budget with work still pending, make ONE final
@@ -635,15 +683,15 @@ export async function chat({ messages = [], userText, images = [], siteId, siteC
   let ctx = siteCtx || {};
   if (siteId) {
     const s = await db.getSite(siteId).catch(() => null);
-    if (s) ctx = { name: s.name, url: s.url, stack: s.stack, scale: s.scale, scores: s.scores, competitors: s.competitors };
+    if (s) ctx = { name: s.name, url: s.url, stack: s.stack, scale: s.scale, scores: s.scores, competitors: s.competitors, geo_context: s.geo_context };
   }
   const system = buildSystem(ctx, siteId);
 
-  const convo = [...messages];
+  const convo = windowHistory([...messages]);
   const userContent = buildUserContent(userText, images);
   if (userContent) convo.push({ role: 'user', content: userContent });
 
-  const turn = { reads: new Map() };   // per-turn read provenance (grounds push_article_brief)
+  const turn = { reads: seedReadsFromHistory(convo) };   // provenance across the WHOLE conversation (grounds push_article_brief)
   const MAX_STEPS = 8;  // non-stream must land inside the ~100s edge cap → keep tighter than the stream path
   let guard = 0;
   while (guard++ < MAX_STEPS) {
@@ -703,15 +751,15 @@ export async function chatStream({ messages = [], userText, images = [], siteId,
   let ctx = {};
   if (siteId) {
     const s = await db.getSite(siteId).catch(() => null);
-    if (s) ctx = { name: s.name, url: s.url, stack: s.stack, scale: s.scale, scores: s.scores, competitors: s.competitors };
+    if (s) ctx = { name: s.name, url: s.url, stack: s.stack, scale: s.scale, scores: s.scores, competitors: s.competitors, geo_context: s.geo_context };
   }
   const system = buildSystem(ctx, siteId);
-  const convo = [...messages];
+  const convo = windowHistory([...messages]);
   const userContent = buildUserContent(userText, images);
   if (userContent) convo.push({ role: 'user', content: userContent });
 
   const toolsUsed = [];
-  const turn = { reads: new Map() };   // per-turn read provenance (grounds push_article_brief)
+  const turn = { reads: seedReadsFromHistory(convo) };   // provenance across the WHOLE conversation (grounds push_article_brief)
   const MAX_STEPS = 12;  // was 8 — heavy briefs (fetch + several research tools + write) need headroom
   let guard = 0;
   while (guard++ < MAX_STEPS) {

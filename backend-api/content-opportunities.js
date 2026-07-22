@@ -126,8 +126,12 @@ export async function findOpportunities(siteId, { db: region, maxKeywords = 160,
   // 4) TRENDING — keyword ideas seeded from the site's strongest topics.
   if (includeTrending && dfs.hasKey()) {
     const seeds = [...pool.values()].sort((a, b) => b.volume - a.volume).slice(0, 5).map((k) => k.keyword);
-    const seedTerms = seeds.length ? seeds : [domain.split('.')[0]];
-    try { const ideas = await dfs.keywordIdeas(seedTerms, { db: dbRegion, limit: 120 }); ideas.forEach((k) => add(k, 'trending')); sources.trending = ideas.length; } catch (e) { sources.trendingError = String(e.message || e); }
+    // No pool seeds → SKIP trending rather than seeding with the domain/brand token
+    // ("fast-ila"), which pulled brand-adjacent junk ideas.
+    if (!seeds.length) { sources.trending = 0; sources.trendingSkipped = 'no on-site seed keywords yet'; }
+    else {
+      try { const ideas = await dfs.keywordIdeas(seeds, { db: dbRegion, limit: 120 }); ideas.forEach((k) => add(k, 'trending')); sources.trending = ideas.length; } catch (e) { sources.trendingError = String(e.message || e); }
+    }
   }
 
   if (pool.size < 3) return { error: 'Not enough keyword data — connect Search Console or DataForSEO, and add competitors.', sources, clusters: [] };
@@ -146,15 +150,28 @@ export async function findOpportunities(siteId, { db: region, maxKeywords = 160,
   let poolArr = [...pool.values()].map((k) => ({ ...k, src: [...k.src] }));
   if (site.geo_context && poolArr.length) {
     const kept = [];
+    let failedBatches = 0;
     for (let i = 0; i < poolArr.length; i += 180) {
       const batch = poolArr.slice(i, i + 180);
-      try {
-        const keep = await claude.filterKeywordsByNiche({ keywords: batch.map((k) => k.keyword), niche: nicheCtx, siteName: site.name, siteId });
-        const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
-        kept.push(...batch.filter((k) => keepSet.has(String(k.keyword).toLowerCase().trim())));
-      } catch (e) { kept.push(...batch); }   // fail-open for this batch only
+      let done = false;
+      // Retry once, then DROP the batch: passing a failed batch through unfiltered used to
+      // flood the volume-sorted top with exactly the generic terms the filter exists to
+      // remove (generic keywords dominate on volume, so fail-open = fail-wrong).
+      for (let attempt = 0; attempt < 2 && !done; attempt++) {
+        try {
+          const keep = await claude.filterKeywordsByNiche({ keywords: batch.map((k) => k.keyword), niche: nicheCtx, siteName: site.name, siteId });
+          const keepSet = new Set(keep.map((k) => String(k).toLowerCase().trim()));
+          kept.push(...batch.filter((k) => keepSet.has(String(k.keyword).toLowerCase().trim())));
+          done = true;
+        } catch (e) { if (attempt === 1) failedBatches++; }
+      }
     }
-    if (kept.length >= 12) { sources.offNicheFiltered = poolArr.length - kept.length; poolArr = kept; }
+    if (failedBatches) sources.filterBatchesDropped = failedBatches;
+    // Floor of 4 (was 12): thin-context sites (goodfor.app, 356 chars) legitimately keep
+    // few keywords — the high floor discarded the whole verdict and let ALL junk through,
+    // the worst outcome for exactly the sites that most need filtering.
+    if (kept.length >= 4) { sources.offNicheFiltered = poolArr.length - kept.length; poolArr = kept; }
+    else if (kept.length) sources.filterBypassed = `kept only ${kept.length} — verdict not applied`;
   }
   // Rank what survived + cap for clustering (by volume).
   const ranked = poolArr.sort((a, b) => b.volume - a.volume).slice(0, maxKeywords);

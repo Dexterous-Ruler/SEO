@@ -178,6 +178,18 @@ async function jobAutoDraft(site) {
   } catch (e) { /* next week retries */ }
 }
 
+// ── Job: close the published loop (daily) ───────────────────────────────────
+// autoDraft flips opportunities → 'queued', n8n publishes and back-writes the row,
+// but NOTHING advanced queued → published without a manual "Sync published" click —
+// so items stranded as queued indefinitely. syncPublished matches completed writer
+// rows back to open opportunities and advances them (+ drift baseline capture).
+async function jobSyncPublished(site) {
+  try {
+    const r = await engine.syncPublished(site.id);
+    if (r && r.published) await note(site.id, `Published-loop sync: ${r.published} article(s) advanced to published`);
+  } catch (e) { /* next day retries */ }
+}
+
 // ── Job: static UX crawl of top ranking pages (weekly, NO consent) ──────────
 // The consent-free counterpart to the RUM beacon: fetches each site's top GSC
 // pages and files HTTP-verified breakage (broken links / CTAs / images / scripts
@@ -322,6 +334,7 @@ const JOBS = [
   { name: 'keyword-push', every: 7 * DAY, run: jobKeywordPush },
   { name: 'engine-refresh', every: 7 * DAY, run: jobEngineRefresh },
   { name: 'auto-draft', every: 7 * DAY, run: jobAutoDraft },   // opt-in via site.auto_content_pilot
+  { name: 'sync-published', every: DAY, run: jobSyncPublished }, // close the queued→published loop daily
   { name: 'ux-crawl', every: 7 * DAY, run: jobUxCrawl },
   { name: 'image-optimize', every: 7 * DAY, run: jobAutoOptimizeImages },
   { name: 'apply-css', every: 7 * DAY, run: jobAutoApplyCss },
