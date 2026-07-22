@@ -2362,7 +2362,16 @@ const routes = {
       // 3) Meta description — generate only when genuinely missing or too short to rank.
       if (curDesc.length < 70) {
         try {
-          const desc = String(await claude.metaDescription({ url: it.url, title: curTitle || it.title, headings, excerpt, siteId: body.siteId })).replace(/^["']|["']$/g, '').trim();
+          let desc = String(await claude.metaDescription({ url: it.url, title: curTitle || it.title, headings, excerpt, siteId: body.siteId })).replace(/^["']|["']$/g, '').trim();
+          // Never publish a mid-word truncation: the generator's token ceiling can cut the
+          // last sentence ("…get expert legal advice toda"). Trim back to the last complete
+          // sentence, else the last whole word, and keep it inside Google's ~160 display.
+          if (desc.length > 160) {
+            const cut = desc.slice(0, 160);
+            const lastStop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '));
+            desc = lastStop > 90 ? cut.slice(0, lastStop + 1) : cut.slice(0, cut.lastIndexOf(' ')).replace(/[,;:\-–—]$/, '') + '.';
+          }
+          desc = desc.replace(/\s+/g, ' ').trim();
           rec.desc = desc;
           if (!body.dryRun && desc) {
             const r = await wp.updateMetaVerified(it.type, it.id, FIELD.meta_description, desc, { force: true });
