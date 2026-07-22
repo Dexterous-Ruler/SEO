@@ -164,6 +164,20 @@ async function jobEngineRefresh(site) {
   } catch (e) { /* transient source/units error — next week retries */ }
 }
 
+// ── Job: AUTO-PILOT — auto-draft the top scored worklist items (weekly, opt-in) ──
+// The worklist scored items but nothing ACTIONED them without a human clicking
+// "Auto-draft top 5". With site.auto_content_pilot=true (off by default, toggled on
+// the Content Engine screen), the top 5 are pushed into the Article Writer weekly.
+// autoDraft de-dupes by keyword and does NOT set Status="Write Article" — generation
+// still starts only when the operator flips it (or their Airtable automation does).
+async function jobAutoDraft(site) {
+  if (!site.auto_content_pilot) return;   // strictly opt-in per site
+  try {
+    const r = await engine.autoDraft(site.id, { topN: 5 });
+    if (r && r.drafted) await note(site.id, `Auto-pilot: drafted ${r.drafted} top opportunity(ies) → Article Writer` + (r.skippedDup ? ` (${r.skippedDup} already there)` : ''));
+  } catch (e) { /* next week retries */ }
+}
+
 // ── Job: static UX crawl of top ranking pages (weekly, NO consent) ──────────
 // The consent-free counterpart to the RUM beacon: fetches each site's top GSC
 // pages and files HTTP-verified breakage (broken links / CTAs / images / scripts
@@ -307,6 +321,7 @@ const JOBS = [
   { name: 'gsc-health', every: DAY, run: jobGscHealth },
   { name: 'keyword-push', every: 7 * DAY, run: jobKeywordPush },
   { name: 'engine-refresh', every: 7 * DAY, run: jobEngineRefresh },
+  { name: 'auto-draft', every: 7 * DAY, run: jobAutoDraft },   // opt-in via site.auto_content_pilot
   { name: 'ux-crawl', every: 7 * DAY, run: jobUxCrawl },
   { name: 'image-optimize', every: 7 * DAY, run: jobAutoOptimizeImages },
   { name: 'apply-css', every: 7 * DAY, run: jobAutoApplyCss },

@@ -1898,8 +1898,26 @@ function ContentEngineScreen({ ctx }) {
       </PageHead>
 
       {live && !notProv && (
-        <div style={{ fontSize:12, color:"var(--muted)", lineHeight:1.5, margin:"-2px 4px 2px" }}>
-          Auto-draft moves top items into your Article Writer → they come back in Approve Changes for you to approve before publish.
+        <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap", margin:"-2px 4px 2px" }}>
+          <span style={{ fontSize:12, color:"var(--muted)", lineHeight:1.5 }}>
+            Auto-draft moves top items into your Article Writer → they come back in Approve Changes for you to approve before publish.
+          </span>
+          {/* AUTO-PILOT: hands-off weekly actioning of the worklist (top 5 → Article Writer). */}
+          <button onClick={()=>{
+              const next=!s.auto_content_pilot;
+              API.updateSite(s.id,{auto_content_pilot:next}).then(r=>{
+                if(r&&r.error){ ctx.toast("Couldn't save: "+r.error,"clay"); return; }
+                s.auto_content_pilot=next;
+                ctx.toast(next?"Auto-pilot ON — top 5 scored items auto-draft to the Article Writer weekly (generation still starts only when Status is flipped)":"Auto-pilot off — items wait for you to push them","teal");
+              }).catch(e=>ctx.toast(e.message,"clay"));
+            }}
+            className="neo-btn" title="When ON, the scheduler auto-drafts the top 5 scored opportunities into the Article Writer every week — nothing publishes without the usual Status flip."
+            style={{ display:"inline-flex", alignItems:"center", gap:8, padding:"6px 12px", borderRadius:"var(--r-pill)", border:"none", cursor:"pointer", background:s.auto_content_pilot?"var(--t-100)":"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12, fontWeight:700, color:s.auto_content_pilot?"var(--t-700)":"var(--muted)" }}>
+            <span style={{ width:26, height:15, borderRadius:9, position:"relative", background:s.auto_content_pilot?"var(--t-500)":"var(--line)", transition:"background .15s" }}>
+              <span style={{ position:"absolute", top:2, left:s.auto_content_pilot?13:2, width:11, height:11, borderRadius:"50%", background:"#fff", transition:"left .15s" }} />
+            </span>
+            Auto-pilot{s.auto_content_pilot?" ON":""}
+          </button>
         </div>
       )}
 
@@ -6078,6 +6096,23 @@ function App() {
   const [, forceTick] = useState(0);
   const [notifOpen, setNotifOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  // Update detection: an SPA tab left open for days keeps running OLD code after every
+  // deploy — fixes look like they "didn't work" until a manual reload. Poll /status's
+  // buildId (bundle mtime) every 5 min; on change, show a fixed Reload banner.
+  const [staleBuild, setStaleBuild] = useState(false);
+  useEffect(()=>{
+    const cfg = window.SENTINEL_CONFIG||{};
+    const base = cfg.engineApi!=null?cfg.engineApi:"";
+    let initial=null, stop=false;
+    const check=()=>fetch(base+"/status").then(r=>r.json()).then(s=>{
+      if(stop||!s||!s.buildId) return;
+      if(initial===null){ initial=s.buildId; return; }
+      if(s.buildId!==initial) setStaleBuild(true);
+    }).catch(()=>{});
+    check();
+    const iv=setInterval(check, 300000);
+    return ()=>{ stop=true; clearInterval(iv); };
+  },[]);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
   const scrollRef = useRef(null);
@@ -6480,6 +6515,14 @@ function App() {
       {addSiteOpen && <AddSiteModal ctx={ctx} />}
       {runAuditOpen && <RunAuditModal ctx={ctx} />}
       {applyOpen && <ApplyModal ctx={ctx} />}
+      {/* stale-tab banner — a deploy happened since this tab loaded; old code = "broken" fixes */}
+      {staleBuild && (
+        <div style={{ position:"fixed", top:0, left:0, right:0, zIndex:400, display:"flex", alignItems:"center", justifyContent:"center", gap:14, padding:"10px 18px", background:"var(--t-700)", color:"#F3EFE4", boxShadow:"0 4px 18px rgba(0,0,0,.25)" }}>
+          <Icon name="sparkles" size={16} />
+          <span style={{ fontSize:13.5, fontWeight:700 }}>Sentinel was updated — this tab is running an older version.</span>
+          <button onClick={()=>{ try{ window.location.reload(); }catch(e){} }} className="neo-btn" style={{ padding:"7px 16px", borderRadius:10, background:"#F3EFE4", color:"var(--t-700)", fontSize:13, fontWeight:800, border:"none", cursor:"pointer" }}>Reload now</button>
+        </div>
+      )}
       <ChartModal open={guideOpen} onClose={()=>setGuideOpen(false)} title="Security-plugin allowlist guide" sub="If a security plugin blocks the agent's REST/auth requests">
         <div className="md" style={{ fontSize:13.5, lineHeight:1.6 }} dangerouslySetInnerHTML={{ __html: (window.SentinelHelpers&&window.SentinelHelpers.renderMarkdown(
 `Some security plugins (Wordfence, MalCare, Sucuri) can block the agent's REST API or Application-Password auth, causing **401/403** errors. To allowlist the agent:

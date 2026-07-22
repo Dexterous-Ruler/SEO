@@ -259,6 +259,7 @@ Object.assign(window, {
       // untouched the whole time. It is the input to every niche/relevance filter, so it must
       // survive a refresh.
       geo_context: r.geo_context || "",
+      auto_content_pilot: !!r.auto_content_pilot,
       // owner is passed straight back on createProposal/createAudit/logActivity writes.
       owner: r.owner || null,
       openFindings: r.open_findings || 0,

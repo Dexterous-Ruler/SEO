@@ -27,6 +27,7 @@ import { db, credsForSite } from './supabase.js';
 import * as claude from './claude.js';
 import { detectLiveCms } from './site-health.js';
 import { marketFor } from './market.js';
+import selftest from './selftest.js';
 import * as geo from './geo.js';
 // Keyword/competitor data now comes from DataForSEO (pay-as-you-go) instead of
 // SEMrush. The `semrush` alias is kept so existing call sites are unchanged;
@@ -159,6 +160,13 @@ const PORT = Number(process.env.PORT || process.env.API_PORT || 8787);
 const WEB_SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'web');
 const WEB_DIST = join(WEB_SRC, 'dist');
 const WEB_DIR = existsSync(join(WEB_DIST, 'index.html')) ? WEB_DIST : WEB_SRC;
+// BUILD_ID identifies the RUNNING build (bundle mtime at process start). The SPA compares it
+// against /status on a slow poll and shows a "Reload" banner on mismatch — an open tab could
+// otherwise run week-old code forever, making every fix look like it "didn't work".
+const BUILD_ID = (() => {
+  try { return String(Math.round(statSync(join(WEB_DIR, 'soft-dashboard.js')).mtimeMs)); }
+  catch (e) { try { return String(Math.round(statSync(join(WEB_DIR, 'index.html')).mtimeMs)); } catch (e2) { return String(Date.now()); } }
+})();
 
 // Canonical mu-plugin shipped in the container — read by /push-mu-update to self-update
 // sites. Cached after first read (immutable per deploy).
@@ -427,7 +435,12 @@ const routes = {
     };
   },
   // Observability: live load, provider limiter/breaker state, cache hit rates.
-  'GET /status': async () => ({ ok: true, version: '2.0', uptimeSec: Math.round(process.uptime()), inFlight: INFLIGHT, infra: infraStats(), jobs: jobs.stats(), ux: { enabled: process.env.RUM_ENABLED === 'true', ...uxStats } }),
+  'GET /status': async () => ({ ok: true, version: '2.0', buildId: BUILD_ID, uptimeSec: Math.round(process.uptime()), inFlight: INFLIGHT, infra: infraStats(), jobs: jobs.stats(), ux: { enabled: process.env.RUM_ENABLED === 'true', ...uxStats } }),
+
+  // FULL-SYSTEM SELF-TEST — every subsystem × every site, entirely backend-side (read-only;
+  // each check individually timeout-bounded). `siteId` optional to test one site.
+  // curl -X POST <base>/selftest-full  → pass/warn/fail matrix. The no-frontend test rig.
+  'POST /selftest-full': async (body) => selftest.runSelftest({ siteId: body.siteId }),
 
   // ── Durable job queue ──────────────────────────────────────────────────────
   // Enqueue a registered background job → returns the job (poll /jobs/get).
@@ -3992,7 +4005,7 @@ const HEAVY_ROUTES = new Set([
   'POST /apply-local-schema', 'POST /engine-autodraft', 'POST /engine-sync-published',
   'POST /n8n-run',
   'POST /ux-crawl',
-  'POST /fix-contact-tokens', 'POST /embed-video', 'POST /remove-video-embed', 'POST /strip-internal-labels', 'POST /fix-broken-embeds',   // WP read+write loops over posts
+  'POST /fix-contact-tokens', 'POST /embed-video', 'POST /remove-video-embed', 'POST /strip-internal-labels', 'POST /fix-broken-embeds', 'POST /selftest-full',   // WP read+write loops over posts (selftest: many vendor probes)
   // Added: renamed/omitted routes that genuinely call Claude / DataForSEO / GSC / PSI / crawl.
   'POST /content-opportunities',            // renamed from the phantom /generate-opportunities (DataForSEO + clustering + Claude)
   'POST /audit-full',                       // full page crawl + PSI + on-page SEO read
