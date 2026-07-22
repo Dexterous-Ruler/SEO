@@ -126,6 +126,10 @@ async function generateRewritePreview({ wp, found, page, site, siteId, brief }) 
 const REWRITES = new Map();   // `${siteId}:${postId}` -> { status:'running'|'done'|'error', result?, error?, at }
 const _atRecCache = new Map();  // `${base}:${table}:${filter}` -> { all, exp } — 10s TTL absorbs the grid's poll bursts
 const OPP_RUNS = new Map();     // siteId -> { status:'running'|'done'|'error', result?, error?, at } — content-opportunities background job
+// Values that must NEVER reach a live <title>/description. SAL's /about/ shipped with a
+// literal "(generated on approval)" as BOTH its title and og:title — written by an early
+// apply before any guard existed, and invisible to length-based checks because it is short.
+const PLACEHOLDER_RE = /agent-drafted fix|review before apply|generated on approval|generated on publish|to be generated|placeholder|lorem ipsum|\{\{|\bTBD\b|\[insert |^\(.*\)$/i;
 const META_RUNS = new Map();   // siteId -> metadata-repair background job
 const AUDIT_RUNS = new Map();  // siteId -> { status, progress?, result?, error?, at } — scope-aware audit background job
 // The site's niche context PLUS its target market, for claude.filterKeywordsByNiche. Without
@@ -2409,15 +2413,26 @@ const routes = {
           } else rec.descStatus = 'dry-run';
         } catch (e) { rec.descStatus = 'failed: ' + String(e.message || e).slice(0, 80); }
       } else rec.descStatus = 'ok (already set)';
-      // 4) Title — opt-in (fixTitles), only when it would truncate in the SERP.
-      if (body.fixTitles && curTitle.length > 62) {
+      // 4) Title — opt-in (fixTitles). Rewrite when it would truncate in the SERP OR when
+      //    it is a leftover placeholder (short, so no length check would ever catch it).
+      const titleIsPlaceholder = !curTitle || PLACEHOLDER_RE.test(curTitle);
+      if (titleIsPlaceholder) rec.titlePlaceholder = curTitle || '(empty)';
+      if (body.fixTitles && (curTitle.length > 62 || titleIsPlaceholder)) {
         try {
-          const t = String(await claude.titleRewrite({ url: it.url, currentTitle: curTitle, brand: (site && site.name) || '', siteId: body.siteId })).replace(/^["']|["']$/g, '').trim();
+          let t = String(await claude.titleRewrite({ url: it.url, currentTitle: curTitle, brand: (site && site.name) || '', siteId: body.siteId })).replace(/^["']|["']$/g, '').trim();
+          // A slightly-long rewrite is still far better than the 100-char original it
+          // replaces: drop the trailing brand/qualifier segment rather than abandoning
+          // the fix (one page kept a 102-char title because its rewrite was 65).
+          if (t.length > 65) {
+            const cut = t.slice(0, 65);
+            const sep = Math.max(cut.lastIndexOf(' | '), cut.lastIndexOf(' - '), cut.lastIndexOf(' – '), cut.lastIndexOf(': '));
+            t = (sep > 24 ? cut.slice(0, sep) : cut.slice(0, cut.lastIndexOf(' '))).trim();
+          }
           rec.title = t;
-          if (!body.dryRun && t && t.length <= 62) {
+          if (!body.dryRun && t && t.length <= 65) {
             const r = await wp.updateMetaVerified(it.type, it.id, FIELD.title, t, { force: true });
             rec.titleStatus = r.status;
-          } else rec.titleStatus = body.dryRun ? 'dry-run' : 'skipped (rewrite still too long)';
+          } else rec.titleStatus = body.dryRun ? 'dry-run' : 'skipped (could not shorten safely)';
         } catch (e) { rec.titleStatus = 'failed: ' + String(e.message || e).slice(0, 80); }
       }
       out.push(rec);
@@ -3832,7 +3847,7 @@ const routes = {
     // catch-all field 'metadata') used to be written VERBATIM to the live page.
     {
       const v = String(body.value || '');
-      const placeholder = !v.trim() || /agent-drafted fix|review before apply|\{\{|\bTBD\b|\[insert /i.test(v) || String(body.field) === 'metadata';
+      const placeholder = !v.trim() || PLACEHOLDER_RE.test(v) || String(body.field) === 'metadata';
       if (placeholder) return { status: 'needs-edit', reason: 'This proposal has no concrete value to write yet — edit the “after” text (or use Propose fix to draft one) before applying.' };
     }
     const r = await wp.updateMetaVerified(objectType, postId, body.field, body.value, { force: true });
