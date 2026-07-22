@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.19.0
+ * Version:     1.20.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.18.1';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.20.0';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -37,6 +37,7 @@ class SEO_Agent_Optimize {
         add_action('wp_head', [$this, 'meta_buffer_start'], 0);
         add_action('wp_head', [$this, 'output_jsonld'], 99);
         add_action('wp_head', [$this, 'output_css'], 100);
+        add_action('wp_footer', [$this, 'output_a11y_js'], 5);
         add_action('wp_head', [$this, 'meta_buffer_end'], 999);
         add_action('rest_api_init', [$this, 'routes']);
         add_action('init', [$this, 'register_geo_settings']);
@@ -273,6 +274,18 @@ class SEO_Agent_Optimize {
         }
     }
 
+    /* ── Accessibility JS — DOM repairs CSS cannot express ──────────────────
+       Printed in the FOOTER so the DOM it repairs already exists. Same escaping
+       rule as output_css: inside a raw-text <script>, only a literal "</script"
+       can break out. Absent option = prints nothing (inert). */
+    public function output_a11y_js() {
+        $js = (string) get_option('seoagent_a11y_js', '');
+        if ($js !== '') {
+            $js = str_ireplace('</script', '<\\/script', $js);
+            echo "\n<script id=\"seoagent-a11y\">" . $js . "</script>\n";
+        }
+    }
+
     /* ── UX beacon (RUM) loader — INERT BY DEFAULT ───────────────────────────
        Consent-gated real-user-monitoring loader. Config lives in the
        'seoagent_ux_beacon' option as a JSON string:
@@ -444,6 +457,30 @@ class SEO_Agent_Optimize {
                 update_option('seoagent_custom_css', (string) ($p['css'] ?? ''));
                 $this->purge();
                 return ['ok' => true, 'bytes' => strlen((string) ($p['css'] ?? ''))];
+            },
+        ]);
+
+        // Accessibility JS — the DOM-level counterpart to /css. Several WCAG failures
+        // (missing skip link, unnamed links, unlabeled inputs, missing <main> landmark,
+        // prohibited ARIA on role-less nodes) cannot be expressed in CSS at all, so they
+        // were stranded as "needs manual action" forever. This stores a generated,
+        // idempotent script that repairs them in the DOM at load.
+        register_rest_route('seoagent/v1', '/a11y-js', [
+            'methods'  => 'POST',
+            'permission_callback' => $permAdmin,
+            'callback' => function ($req) {
+                $p = $req->get_json_params();
+                update_option('seoagent_a11y_js', (string) ($p['js'] ?? ''));
+                $this->purge();
+                return ['ok' => true, 'bytes' => strlen((string) ($p['js'] ?? ''))];
+            },
+        ]);
+        register_rest_route('seoagent/v1', '/a11y-js', [
+            'methods'  => 'GET',
+            'permission_callback' => $permAdmin,
+            'callback' => function () {
+                $js = (string) get_option('seoagent_a11y_js', '');
+                return ['ok' => true, 'bytes' => strlen($js), 'js' => $js];
             },
         ]);
 

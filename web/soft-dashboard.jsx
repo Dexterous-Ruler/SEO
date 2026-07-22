@@ -6471,7 +6471,21 @@ function App() {
                   if(r && !r.manual) coveredProps.push({p, rule:r});
                   else uncovered.push(p);
                 }
-                uncovered.forEach(()=>manual++);
+                // Whatever CSS can't express (skip-link, link-name, label, landmark,
+                // aria-*, image-alt, button-name…) now goes to the a11y DOM-fix channel
+                // instead of being counted "manual · nothing was written" forever.
+                if(uncovered.length){
+                  try{
+                    const af=await API.applyA11yFixes(siteId, uncovered.map(p=>({ auditId:String(p.findingId||"").split("::")[0] })));
+                    const done=new Set((af&&af.applied)||[]);
+                    for(const p of uncovered){
+                      const aid=String(p.findingId||"").split("::")[0];
+                      if(af&&af.ok&&done.has(aid)){ applied++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"verified"}:x)); await markApplied(p,"verified"); }
+                      else if(af&&af.status==="blocked"){ blocked++; }
+                      else manual++;
+                    }
+                  }catch(e){ uncovered.forEach(()=>manual++); }
+                }
                 if(coveredProps.length){
                   // Accumulating apply: rules PERSIST server-side per proposal, and the live
                   // bundle is rebuilt as the union — a new batch can't wipe earlier fixes.
@@ -6481,7 +6495,21 @@ function App() {
                   else if(w && w.status==="blocked"){ coveredProps.forEach(()=>blocked++); }
                   else { for(const {p} of coveredProps){ failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); await markApplied(p,"failed"); } }
                 }
-              } else { cssProps.forEach(()=>manual++); }   // nothing CSS-expressible → still manual
+              } else {
+                // No CSS rule matched ANY of them → try the a11y DOM channel for the lot
+                // before declaring manual (this is the common SAL case: skip-link +
+                // link-name + label have no CSS expression at all).
+                try{
+                  const af=await API.applyA11yFixes(siteId, cssProps.map(p=>({ auditId:String(p.findingId||"").split("::")[0] })));
+                  const done=new Set((af&&af.applied)||[]);
+                  for(const p of cssProps){
+                    const aid=String(p.findingId||"").split("::")[0];
+                    if(af&&af.ok&&done.has(aid)){ applied++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"verified"}:x)); await markApplied(p,"verified"); }
+                    else if(af&&af.status==="blocked"){ blocked++; }
+                    else manual++;
+                  }
+                }catch(e){ cssProps.forEach(()=>manual++); }
+              }
             }catch(e){ cssProps.forEach(()=>failed++); }
           }
           if(killSwitch){ toast("Kill switch on — "+approved.length+" simulated, nothing written","gold"); }

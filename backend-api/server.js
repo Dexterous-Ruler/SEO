@@ -46,6 +46,7 @@ import { suggestForSite as suggestInternalLinks, editablePageContent, insertable
 import { generatePageSchema, validateSchema, schemaForAnswerBlock, localSchemaForSite, localReadiness } from './schema-gen.js';
 import { scoreContent, verifyClaims, humanize } from './content-quality.js';
 import { generateCssFixes } from './css-fixes.js';
+import { generateA11yFixes } from './a11y-fixes.js';
 import { findOpportunities } from './content-opportunities.js';
 import * as research from './research.js';
 import * as imageOpt from './image-optimize.js';
@@ -2312,6 +2313,44 @@ const routes = {
       await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: `Applied ${items.length} CSS fix(es) — bundle now ${rows.length} rule group(s)`, meta: (r && r.bytes) ? r.bytes + ' bytes' : '' }).catch(() => {});
       return { ok: true, applied: items.map((i) => i.proposalId).filter(Boolean), ruleGroups: rows.length, ...r };
     } catch (e) { return { error: 'Apply failed — is the seo-agent-optimize mu-plugin installed? ' + e.message }; }
+  },
+
+  // ACCESSIBILITY DOM FIXES — the channel that never existed. Audits like skip-link,
+  // link-name, label, landmark-one-main and aria-* cannot be fixed in CSS, so every one
+  // of them approved into "needs manual action · nothing was written" forever. This
+  // generates an idempotent repair script (+ any paired CSS), stores it via the
+  // mu-plugin, and read-back verifies. body: { siteId, findings:[{auditId|_auditId}] }.
+  'POST /apply-a11y-fixes': async (body) => {
+    const { creds, site } = await resolveCreds(body);
+    if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'site is read-only (write not armed)' };
+    let findings = Array.isArray(body.findings) ? body.findings : null;
+    if (!findings && body.siteId) {
+      try {
+        const rows = await fetch(`${process.env.SUPABASE_URL}/rest/v1/audits?site_id=eq.${body.siteId}&select=findings&order=created_at.desc&limit=1`, { headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE } }).then((r) => r.json()).catch(() => []);
+        findings = (rows && rows[0] && rows[0].findings) || [];
+      } catch (e) { findings = []; }
+    }
+    const gen = generateA11yFixes(findings || []);
+    if (!gen.fixableCount) return { ok: false, applied: [], rules: [], reason: 'No DOM-fixable accessibility findings in this set.' };
+    const wp = clientFrom(creds);
+    try {
+      const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/a11y-js`, { method: 'POST', body: { js: gen.js } });
+      // Paired CSS (e.g. the skip-link's visually-hidden styling) rides the accumulating
+      // CSS store so it survives later CSS applies.
+      if (gen.css) {
+        await db.upsertCssFix(site.id, { auditId: 'a11y-support', note: 'Support styles for the accessibility DOM fixes', css: gen.css });
+        const rows = await db.listCssFixes(site.id);
+        const bundle = `/* seo-agent accumulated CSS fixes — ${rows.length} rule group(s) */\n` + rows.map((x) => `\n/* [${x.audit_id || x.proposal_id || 'rule'}]${x.note ? ' ' + x.note : ''} */\n${x.css}`).join('\n');
+        await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/css`, { method: 'POST', body: { css: bundle } }).catch(() => {});
+      }
+      // Read back: the stored script must actually be there.
+      const back = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/a11y-js`, { method: 'GET' }).catch(() => null);
+      const verified = !!(back && back.bytes > 0);
+      await db.logActivity({ site_id: site.id, type: verified ? 'verified' : 'warning', actor: 'Agent', icon: 'check', text: `Applied ${gen.fixableCount} accessibility DOM fix(es) to the live site`, meta: gen.rules.map((x) => x.auditId).join(', ') }).catch(() => {});
+      return { ok: true, verified, bytes: (r && r.bytes) || gen.js.length, rules: gen.rules, applied: gen.rules.map((x) => x.auditId) };
+    } catch (e) {
+      return { error: 'Apply failed — needs seo-agent-optimize mu-plugin v1.20.0+ (Sites → update plugin). ' + e.message };
+    }
   },
 
   // Per-proposal CSS rollback: remove that rule from the store, re-apply the remaining
