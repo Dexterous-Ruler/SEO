@@ -225,11 +225,47 @@ function send(res, status, body) {
   const data = JSON.stringify(body);
   res.writeHead(status, {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-site-creds',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    // CORS deliberately NOT wildcard: the dashboard is served same-origin by this very
+    // process, so browsers need no CORS at all. Reflecting only localhost (dev) closes
+    // the drive-by hole where any web page could fire authenticated-looking writes.
+    ...corsHeaders(res.req),
   });
   res.end(data);
+}
+function corsHeaders(req) {
+  const origin = (req && req.headers && req.headers.origin) || '';
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+    return { 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-site-creds, x-sentinel-key', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' };
+  }
+  return {};
+}
+
+// ── API AUTH ──────────────────────────────────────────────────────────────────
+// When SENTINEL_DASHBOARD_KEY is set, EVERY mutating/API POST must carry it in the
+// x-sentinel-key header. Anyone could previously POST /apply-meta etc. straight at
+// the public Koyeb URL. The dashboard stores the key locally after a one-time
+// prompt. Unset env = auth off (deploy-safe until the operator sets the secret).
+const DASH_KEY = process.env.SENTINEL_DASHBOARD_KEY || '';
+const AUTH_EXEMPT = new Set(['POST /ux-beacon']);   // public beacon; GETs are read-only status/static
+function authOk(req) {
+  if (!DASH_KEY) return true;
+  const got = String(req.headers['x-sentinel-key'] || '');
+  if (got.length !== DASH_KEY.length) return false;
+  try { return timingSafeEqual(Buffer.from(got), Buffer.from(DASH_KEY)); } catch (e) { return false; }
+}
+
+// ── SERVER-SIDE KILL SWITCH ───────────────────────────────────────────────────
+// The dashboard's kill switch was per-tab React state — another tab (or the API)
+// happily kept writing. Now it's persisted (app_secrets) and enforced HERE, at the
+// dispatcher, for every route that can mutate WordPress/Airtable/n8n. 10s cache.
+const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
+let _kill = { v: false, exp: 0 };
+async function killSwitchOn() {
+  if (Date.now() < _kill.exp) return _kill.v;
+  let v = false;
+  try { v = (await db.getAppSecret('kill_switch')) === '1'; } catch (e) { v = _kill.v; }
+  _kill = { v, exp: Date.now() + 10000 };
+  return v;
 }
 
 // ── Google OAuth helpers (interactive "Connect with Google" flow) ──────────
@@ -441,6 +477,16 @@ const routes = {
   // each check individually timeout-bounded). `siteId` optional to test one site.
   // curl -X POST <base>/selftest-full  → pass/warn/fail matrix. The no-frontend test rig.
   'POST /selftest-full': async (body) => selftest.runSelftest({ siteId: body.siteId }),
+
+  // Persisted, SERVER-enforced kill switch (see dispatcher). {on:boolean} to set; no body reads.
+  'POST /kill-switch': async (body) => {
+    if (typeof body.on === 'boolean') {
+      await db.setAppSecret('kill_switch', body.on ? '1' : '');
+      _kill = { v: body.on, exp: Date.now() + 10000 };
+      await db.logActivity({ type: 'config', actor: 'You', icon: 'alert', text: body.on ? 'KILL SWITCH ENGAGED — all live writes paused (server-enforced)' : 'Kill switch released — writes re-enabled', meta: 'server-side' }).catch(() => {});
+    }
+    return { on: await killSwitchOn() };
+  },
 
   // ── Durable job queue ──────────────────────────────────────────────────────
   // Enqueue a registered background job → returns the job (poll /jobs/get).
@@ -4149,6 +4195,17 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const key = `${req.method} ${url.pathname}`;
 
+  // API auth — every POST (incl. /chat-stream) except the public beacon. 401 carries a
+  // distinct code so the dashboard can prompt for the key once and retry.
+  if (req.method === 'POST' && !AUTH_EXEMPT.has(key) && !authOk(req)) {
+    return send(res, 401, { error: 'This dashboard is locked. Enter the access key to continue.', code: 'auth_required' });
+  }
+  // Server-enforced kill switch: blocks every mutating route regardless of which tab
+  // (or API client) is calling. Toggled via POST /kill-switch.
+  if (WRITE_ROUTE_RE.test(key) && await killSwitchOn()) {
+    return send(res, 423, { status: 'blocked', error: 'Kill switch is engaged — all live writes are paused.', code: 'kill_switch' });
+  }
+
   // ── Google OAuth: one-click "Connect with Google" (redirect flow) ──────────
   // GET /gsc-oauth-start → bounce the user to Google's consent screen.
   if (key === 'GET /gsc-oauth-start') {
@@ -4198,7 +4255,7 @@ setTimeout(function(){try{window.close();}catch(e){} if(!window.closed){location
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
+      ...corsHeaders(req),
     });
     const sse = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     // Heartbeat: the agentic loop has long idle gaps (Claude "thinking" before the

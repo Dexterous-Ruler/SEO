@@ -5591,7 +5591,7 @@ function useChat(siteId) {
     const apply=(fn)=>{ if(!fresh()) return; setMsgs(m=>{ const a=[...m]; const last=a[a.length-1]; if(last&&last.role==="assistant") a[a.length-1]=fn(last); return a; }); };
     try{
       const res=await fetch((cfg.engineApi!=null?cfg.engineApi:"http://localhost:8787")+"/chat-stream",{
-        method:"POST", headers:{"Content-Type":"application/json"}, signal:ctrl.signal,
+        method:"POST", headers:{"Content-Type":"application/json", ...(window.sentinelKeyHeaders?window.sentinelKeyHeaders():{})}, signal:ctrl.signal,
         body:JSON.stringify({ siteId, text:t, images:imgs.map(i=>i.url), apiHistory:historyRef.current, displayMessages:nextDisplay, conversationId:convoId }),
       });
       const reader=res.body.getReader(); const dec=new TextDecoder(); let buf="";
@@ -6111,6 +6111,8 @@ function App() {
     }).catch(()=>{});
     check();
     const iv=setInterval(check, 300000);
+    // hydrate the persisted (server-side) kill switch so every tab shows the truth
+    if(window.SentinelAPI&&window.SentinelAPI.killSwitch) window.SentinelAPI.killSwitch().then(r=>{ if(r&&typeof r.on==="boolean") setKillSwitch(r.on); }).catch(()=>{});
     return ()=>{ stop=true; clearInterval(iv); };
   },[]);
   const [assistantOpen, setAssistantOpen] = useState(false);
@@ -6481,7 +6483,14 @@ function App() {
           .catch(e=>toast("Remove failed: "+e.message,"clay"));
       } else toast("Account removed (demo)","clay");
     },
-    toggleKill:()=>{ setKillSwitch(k=>{ toast(!k?"Kill switch ON — all writes disabled":"Kill switch released", !k?"clay":"teal"); return !k; }); },
+    // SERVER-enforced: persists via /kill-switch so every tab AND every API caller is
+    // blocked at the dispatcher — not just this tab's React state.
+    toggleKill:()=>{ setKillSwitch(k=>{
+      const next=!k;
+      if(isLive()&&API.killSwitch) API.killSwitch(next).then(r=>{ if(r&&r.error) toast("Kill switch server sync failed: "+r.error,"clay"); }).catch(e=>toast("Kill switch server sync failed: "+e.message,"clay"));
+      toast(next?"Kill switch ON — all writes blocked server-side":"Kill switch released", next?"clay":"teal");
+      return next;
+    }); },
     openAllowlistGuide:()=>setGuideOpen(true),
     addBrandConstraint:()=>{
       const v=window.prompt("Add a brand constraint the agent must NEVER change (e.g. a locked color #1A2B3C, a font name, or a tagline):");

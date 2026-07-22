@@ -58,7 +58,12 @@
   // unsettled forever, so callers that flip a "busy" flag (the audit is the worst case)
   // never cleared it and the whole feature appeared permanently dead until a page reload.
   const ENGINE_TIMEOUT_MS = 180000;   // > the server's own 95s cap, so the server's error wins when it has one
-  async function engine(path, body) {
+  // Access key (when the server sets SENTINEL_DASHBOARD_KEY): stored locally after a
+  // one-time prompt, attached to EVERY API call. Shared with the chat-stream fetch via
+  // window.sentinelKeyHeaders so SSE rides the same lock.
+  function dashKey() { try { return localStorage.getItem("sentinel-dash-key") || ""; } catch (e) { return ""; } }
+  window.sentinelKeyHeaders = () => { const k = dashKey(); return k ? { "x-sentinel-key": k } : {}; };
+  async function engine(path, body, _retried) {
     const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
     const timer = ctrl ? setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, ENGINE_TIMEOUT_MS) : null;
     const timedOut = () => new Error("That request timed out after " + Math.round(ENGINE_TIMEOUT_MS / 1000) + "s — the server may be busy. Please try again.");
@@ -67,13 +72,20 @@
       try {
         res = await fetch(ENGINE + path, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...window.sentinelKeyHeaders() },
           body: JSON.stringify(body || {}),
           signal: ctrl ? ctrl.signal : undefined,
         });
       } catch (e) {
         if (e && e.name === "AbortError") throw timedOut();
         throw new Error("Can't reach the server — check your connection and try again.");
+      }
+      // Locked server → ask for the access key ONCE, store, retry this same call.
+      if (res.status === 401 && !_retried) {
+        let k = "";
+        try { k = window.prompt("This dashboard is locked.\nEnter the access key:") || ""; } catch (e) {}
+        if (k.trim()) { try { localStorage.setItem("sentinel-dash-key", k.trim()); } catch (e) {} return engine(path, body, true); }
+        throw new Error("Locked — access key required.");
       }
       // Read as text first so a non-JSON body (a gateway/proxy HTML error page returned
       // while the service is busy/restarting/timing out) doesn't blow up as a raw
@@ -147,6 +159,8 @@
     n8nUpdatePrompts(baseUrl, apiKey, id, edits) { return engine("/n8n-update-prompts", { baseUrl, apiKey, id, edits }); },
     n8nRun(baseUrl, apiKey, id, payload) { return engine("/n8n-run", { baseUrl, apiKey, id, payload }); },
     n8nExecutions(baseUrl, apiKey, id, status) { return engine("/n8n-executions", { baseUrl, apiKey, id, status }); },
+    killSwitch(on) { return engine("/kill-switch", { on }); },
+    selftestFull(siteId) { return engine("/selftest-full", siteId ? { siteId } : {}); },
     n8nPromptHistory(id) { return engine("/n8n-prompt-history", { id }); },
     n8nPromptRollback(baseUrl, apiKey, id, historyId) { return engine("/n8n-prompt-rollback", { baseUrl, apiKey, id, historyId }); },
     // Auto-draft: push the top-N scored opportunities into the existing Airtable Article Writer
