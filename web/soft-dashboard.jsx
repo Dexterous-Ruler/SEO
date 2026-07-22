@@ -6082,6 +6082,7 @@ function App() {
   const [auditing, setAuditing] = useState(false);
   const auditStartRef = useRef(0);          // when the current audit began (stuck-flag recovery)
   const [auditError, setAuditError] = useState(null);   // surfaced by the modal instead of a false "complete"
+  const [auditPages, setAuditPages] = useState(null);   // multi-page audit progress {done,total,current}
   const [addSiteOpen, setAddSiteOpen] = useState(false);
   const [addSiteFor, setAddSiteFor] = useState(null);
   const [runAuditOpen, setRunAuditOpen] = useState(false);
@@ -6161,7 +6162,7 @@ function App() {
   useEffect(()=>{ try{ window.FINDINGS = (findingsState.siteId===siteId?findingsState.items:[])||[]; }catch(e){} },[findingsState,siteId]);
 
   const ctx = {
-    screen, navTab, goto, site, sites, proposals, killSwitch, toast, auditing, auditError, addSiteFor,
+    screen, navTab, goto, site, sites, proposals, killSwitch, toast, auditing, auditError, auditPages, addSiteFor,
     notifOpen, setNotifOpen, searchQuery, setSearchQuery,
     history, historyLoading, reloadHistory:()=>loadHistory(siteId),
     findings: findingsState.siteId===siteId ? (findingsState.items||[]) : [],
@@ -6232,7 +6233,7 @@ function App() {
       toast(ok?"Activity trail exported (CSV)":"Nothing to export yet","teal");
     },
     switchSite:(id)=>{ const x=sites.find(s=>s.id===id); if(x.status!=="connected"){ setAddSiteFor(x); setAddSiteOpen(true); return; } setSiteId(id); setProposals([]); if(isLive()){ API.listProposals(id).then(rows=>{ window.PROPOSALS=(rows||[]).map(window.mapProposalRow||(y=>y)); setProposals(window.PROPOSALS); }).catch(()=>{}); } toast("Switched to "+x.name,"teal"); },
-    runAudit:()=>{
+    runAudit:(scope)=>{
       // A stuck `auditing` flag used to make every later click a SILENT no-op — the modal
       // sat at 92% forever and the operator concluded "audits don't work". Now a run that
       // has clearly overrun is reclaimable, and a genuine in-flight run says so out loud
@@ -6242,13 +6243,16 @@ function App() {
         if(Date.now() - startedAt < 300000){ toast("An audit is already running — give it a moment.","gold"); return; }
         toast("Previous audit never finished — starting a fresh one.","gold");
       }
+      const sc0 = (scope==="key"||scope==="full")?scope:"single";
       auditStartRef.current = Date.now();
-      setAuditing(true); setAuditError(null);
-      toast("Read-only audit running…","teal");
+      setAuditing(true); setAuditError(null); setAuditPages(null);
+      toast(sc0==="single"?"Read-only audit running…":("Read-only "+(sc0==="key"?"key-pages":"sampled full-site")+" audit running…"),"teal");
       // LIVE: full audit (scores + findings + draft proposals) via the engine.
       if(isLive()){
         const url = site._rawUrl.replace(/\/$/,"")+"/";
-        API.auditFull(url, null, true).then(async (res)=>{
+        // Shared post-processing for BOTH paths (single call + multi-page background job) —
+        // the scope selector used to be entirely dead: every choice audited one URL.
+        const finish = async (res)=>{
           if(res&&res.scores){
             // NOTE: this used to chain a psi-median run (THREE more full PageSpeed passes,
             // strictly serial) straight after the audit's own Lighthouse run — roughly
@@ -6267,7 +6271,7 @@ function App() {
             setFindingsState({ siteId, items: res.findings||[] });
             // Persist scores + audit + activity.
             try{ await API.updateSite(siteId,{scores:sc,prev_scores:site.scores,last_audit:new Date().toISOString(),open_findings:(res.findings||[]).length}); }catch(e){}
-            try{ await API.createAudit({site_id:siteId,owner:site.owner,scope:"single",scores:sc,cwv:res.cwv,findings:res.findings,summary:variance?{variance}:null}); }catch(e){}
+            try{ await API.createAudit({site_id:siteId,owner:site.owner,scope:sc0,scores:sc,cwv:res.cwv,findings:res.findings,summary:variance?{variance}:null}); }catch(e){}
             try{ await API.logActivity({site_id:siteId,owner:site.owner,type:"audit",actor:"Agent",icon:"radar",text:(res.findings||[]).length+" findings · "+site.name,meta:"Perf "+sc.performance+" · SEO "+sc.seo}); }catch(e){}
             // Create draft proposals in Supabase — DE-DUPED against what's already queued.
             // Without this, every audit re-filed each finding as a fresh "proposed" row, so
@@ -6295,8 +6299,27 @@ function App() {
             }catch(e){}
           }
           loadHistory(siteId); // refresh the saved-audit history
-          setAuditing(false); toast("Audit complete — "+((res.findings||[]).length)+" findings, "+((res.proposals||[]).length)+" proposals ✓","teal");
-        }).catch(e=>{ setAuditing(false); setAuditError(e.message||"Audit failed"); toast("Audit failed: "+e.message,"clay"); });
+          setAuditing(false); setAuditPages(null);
+          toast("Audit complete — "+((res.findings||[]).length)+" findings, "+((res.proposals||[]).length)+" proposals ✓"+(res.pagesAudited?(" · "+res.pagesAudited+" page(s)"):""),"teal");
+        };
+        if(sc0==="single"){
+          API.auditFull(url, null, true).then(finish)
+            .catch(e=>{ setAuditing(false); setAuditError(e.message||"Audit failed"); toast("Audit failed: "+e.message,"clay"); });
+        } else {
+          // Multi-page: background job + poll (each page is a full ~25s PSI pass).
+          API.auditScopeStart(siteId, url, sc0).then(r=>{
+            if(r&&r.error){ setAuditing(false); setAuditError(r.error); toast("Audit failed: "+r.error,"clay"); return; }
+            const poll=()=>{
+              API.auditScopeStatus(siteId).then(st=>{
+                if(st.status==="running"){ setAuditPages(st.progress||null); setTimeout(poll,5000); return; }
+                if(st.status==="error"||st.error){ setAuditing(false); setAuditPages(null); setAuditError(st.error||"Audit failed"); toast("Audit failed: "+(st.error||"unknown"),"clay"); return; }
+                if(st.status==="unknown"){ setAuditing(false); setAuditPages(null); setAuditError("The audit run was lost (server restart) — run it again."); return; }
+                finish(st);
+              }).catch(e=>{ setAuditing(false); setAuditPages(null); setAuditError(e.message); });
+            };
+            setTimeout(poll,4000);
+          }).catch(e=>{ setAuditing(false); setAuditError(e.message||"Audit failed"); toast("Audit failed: "+e.message,"clay"); });
+        }
         return;
       }
       // MOCK fallback (design preview)

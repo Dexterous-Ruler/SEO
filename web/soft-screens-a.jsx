@@ -252,7 +252,9 @@ function RunAuditModal({ ctx }) {
   const sawRunning = useRef(false);
   const failed = !!ctx.auditError && phase>=0;
   // Kick off the REAL audit (shared handler on ctx) and enter the progress view.
-  const start = ()=>{ sawRunning.current=false; setPhase(0); setElapsed(0); ctx.runAudit(); };
+  // The chosen SCOPE is now actually passed — Single/Key/Full-site all audited only the
+  // homepage before; key/full run a multi-page background job with real page progress.
+  const start = ()=>{ sawRunning.current=false; setPhase(0); setElapsed(0); ctx.runAudit(scope); };
   // Step checklist. The steps are indicative (the server does not stream per-step events),
   // so they advance on a cadence CLOSE to real audit timing rather than racing to the end in
   // 3s and then freezing — the old 650ms walk hit the last step almost immediately and sat
@@ -288,7 +290,9 @@ function RunAuditModal({ ctx }) {
               <span style={{ fontSize:13, fontWeight:700, color:failed?"var(--clay)":undefined }}>{failed?"Audit failed":phase>=99?"Audit complete":"Auditing…"}</span>
               <span style={{ fontSize:22, fontWeight:800, color:failed?"var(--clay)":"var(--t-700)" }}>{failed?"—":prog+"%"}</span>
             </div>
-            {!failed && phase<99 && <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:8 }}>{elapsed}s elapsed · a full Lighthouse pass typically takes 25-60s</div>}
+            {!failed && phase<99 && (ctx.auditPages && ctx.auditPages.total>1
+              ? <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:8 }}>{elapsed}s elapsed · page {Math.min((ctx.auditPages.done||0)+1,ctx.auditPages.total)} of {ctx.auditPages.total}{ctx.auditPages.current?(" — "+String(ctx.auditPages.current).replace(/^https?:\/\/[^/]+/,"")):""} · ~25s per page</div>
+              : <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:8 }}>{elapsed}s elapsed · a full Lighthouse pass typically takes 25-60s</div>)}
             <div style={{ height:10, borderRadius:99, background:"var(--bg)", boxShadow:"var(--neo-in)", overflow:"hidden" }}>
               <div style={{ width:prog+"%", height:"100%", borderRadius:99, background:"linear-gradient(90deg,var(--t-500),var(--t-700))", transition:"width .5s" }} />
             </div>

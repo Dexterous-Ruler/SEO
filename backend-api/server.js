@@ -125,6 +125,7 @@ async function generateRewritePreview({ wp, found, page, site, siteId, brief }) 
 const REWRITES = new Map();   // `${siteId}:${postId}` -> { status:'running'|'done'|'error', result?, error?, at }
 const _atRecCache = new Map();  // `${base}:${table}:${filter}` -> { all, exp } — 10s TTL absorbs the grid's poll bursts
 const OPP_RUNS = new Map();     // siteId -> { status:'running'|'done'|'error', result?, error?, at } — content-opportunities background job
+const AUDIT_RUNS = new Map();  // siteId -> { status, progress?, result?, error?, at } — scope-aware audit background job
 // The site's niche context PLUS its target market, for claude.filterKeywordsByNiche. Without
 // the market, another country's terms survive the service test (a UK visa firm was seeded
 // with "visa go australia" and got a whole PAA set about Australian visas).
@@ -600,6 +601,78 @@ const routes = {
   // Single finding → one draft proposal (the "Propose fix" button)
   'POST /propose-fix': async (body) => {
     return { proposal: proposeFromFinding(body.finding || {}) };
+  },
+
+  // SCOPE-AWARE AUDIT (background job): the modal's Single/Key/Full-site selector was
+  // dead — every choice audited only the homepage. Key = home + top pages from the
+  // sitemap; Full = home + a sample across the sitemap. Runs page-by-page in the
+  // background (each page is a full PSI pass, ~25s) with real progress; results merge
+  // into one report (scores averaged, findings/proposals concatenated per page).
+  'POST /audit-scope-start': async (body) => {
+    if (!body.siteId || !body.url) return { error: 'siteId + url required' };
+    const cur = AUDIT_RUNS.get(body.siteId);
+    if (cur && cur.status === 'running') return { status: 'running', progress: cur.progress };
+    const scope = body.scope === 'full' ? 'full' : body.scope === 'key' ? 'key' : 'single';
+    const site = await db.getSite(body.siteId).catch(() => null);
+    const seoPlugin = (site && site.stack && site.stack.seo) || null;
+    const home = String(body.url).replace(/\/$/, '') + '/';
+    // Enumerate target URLs up front so progress has a real total.
+    let urls = [home];
+    if (scope !== 'single') {
+      try {
+        const found = await discoverUrls({ baseUrl: home.replace(/\/$/, ''), max: 500 });
+        const list = (found && (found.urls || found)) || [];
+        const others = list.map(String).filter((u) => u.replace(/\/$/, '') !== home.replace(/\/$/, ''));
+        if (scope === 'key') {
+          // "Key pages" = the shallowest paths (top-level templates & money pages).
+          others.sort((a, b) => (a.split('/').filter(Boolean).length - b.split('/').filter(Boolean).length) || (a.length - b.length));
+          urls = [home, ...others.slice(0, 4)];
+        } else {
+          // "Full (sampled)" = an even sample across the whole sitemap, 12 pages max.
+          const stride = Math.max(1, Math.floor(others.length / 11));
+          urls = [home, ...others.filter((_, i) => i % stride === 0).slice(0, 11)];
+        }
+      } catch (e) { /* sitemap unreachable → single-page fallback, reported in result */ }
+    }
+    AUDIT_RUNS.set(body.siteId, { status: 'running', progress: { done: 0, total: urls.length, current: urls[0] }, at: Date.now() });
+    (async () => {
+      const pages = [];
+      for (let i = 0; i < urls.length; i++) {
+        const u = urls[i];
+        const run = AUDIT_RUNS.get(body.siteId);
+        if (!run || run.status !== 'running') return;   // superseded
+        run.progress = { done: i, total: urls.length, current: u };
+        try {
+          // withContent (Claude-drafted metadata) only for the homepage — per-page Claude
+          // drafting across 12 pages would be slow and costly for marginal gain.
+          const r = await auditPage(u, { creds: body.creds, withContent: i === 0 && !!body.withContent, siteId: body.siteId, seoPlugin });
+          pages.push({ url: u, ...r });
+        } catch (e) { pages.push({ url: u, error: String(e && e.message || e).slice(0, 200) }); }
+      }
+      const okPages = pages.filter((p) => !p.error && p.scores);
+      if (!okPages.length) { AUDIT_RUNS.set(body.siteId, { status: 'error', error: 'Every page audit failed — ' + (pages[0] && pages[0].error || 'unknown'), at: Date.now() }); return; }
+      // Merge: average category scores (homepage ×2 weight), concat findings/proposals.
+      const scores = {};
+      for (const k of ['performance', 'accessibility', 'bestPractices', 'seo']) {
+        let sum = 0, w = 0;
+        okPages.forEach((p, idx) => { const v = p.scores && p.scores[k]; if (v != null) { const wt = idx === 0 ? 2 : 1; sum += v * wt; w += wt; } });
+        scores[k] = w ? Math.round(sum / w) : null;
+      }
+      const findings = okPages.flatMap((p) => p.findings || []);
+      const proposals = okPages.flatMap((p) => p.proposals || []);
+      const result = { scores, findings, proposals, cwv: okPages[0].cwv || null, scope, pagesAudited: okPages.length, pagesFailed: pages.length - okPages.length, urls: pages.map((p) => ({ url: p.url, error: p.error || null })) };
+      AUDIT_RUNS.set(body.siteId, { status: 'done', result, at: Date.now() });
+    })();
+    return { status: 'running', progress: { done: 0, total: urls.length, current: urls[0] } };
+  },
+  'POST /audit-scope-status': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    const r = AUDIT_RUNS.get(body.siteId);
+    if (!r) return { status: 'unknown', reason: 'no active audit — it may have been lost to a restart; re-run' };
+    if (Date.now() - r.at > 20 * 60 * 1000) { AUDIT_RUNS.delete(body.siteId); return { status: 'unknown', reason: 'expired — re-run' }; }
+    if (r.status === 'done') return { status: 'done', ...r.result };
+    if (r.status === 'error') return { status: 'error', error: r.error };
+    return { status: 'running', progress: r.progress };
   },
 
   // PSI scoring for a set of URLs (defaults to the provided list)

@@ -161,6 +161,8 @@
     n8nExecutions(baseUrl, apiKey, id, status) { return engine("/n8n-executions", { baseUrl, apiKey, id, status }); },
     killSwitch(on) { return engine("/kill-switch", { on }); },
     applyCssFixes(siteId, items) { return engine("/apply-css-fixes", { siteId, items }); },
+    auditScopeStart(siteId, url, scope) { return engine("/audit-scope-start", { siteId, url, scope, withContent: true }); },
+    auditScopeStatus(siteId) { return engine("/audit-scope-status", { siteId }); },
     rollbackCss(siteId, proposalId) { return engine("/rollback-css", { siteId, proposalId }); },
     selftestFull(siteId) { return engine("/selftest-full", siteId ? { siteId } : {}); },
     n8nPromptHistory(id) { return engine("/n8n-prompt-history", { id }); },
