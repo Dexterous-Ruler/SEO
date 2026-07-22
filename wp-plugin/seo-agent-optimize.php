@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.20.2
+ * Version:     1.20.3
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.20.2';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.20.3';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -31,17 +31,16 @@ class SEO_Agent_Optimize {
 
     public function __construct() {
         add_action('init', [$this, 'register_meta_keys']);
+        add_action('template_redirect', [$this, 'gen_buf_start'], 0);
         add_action('template_redirect', [$this, 'start_webp_buffer'], 1);
         // Wrap wp_head in a buffer (priority 0 → 999) so we can inject a missing
         // <title>/description/canonical from our meta without ever duplicating one
         // the theme or an SEO plugin already printed.
-        add_action('wp_head', [$this, 'gen_buf_start'], -100);
         add_action('wp_head', [$this, 'meta_buffer_start'], 0);
         add_action('wp_head', [$this, 'output_jsonld'], 99);
         add_action('wp_head', [$this, 'output_css'], 100);
         add_action('wp_footer', [$this, 'output_a11y_js'], 5);
         add_action('wp_head', [$this, 'meta_buffer_end'], 999);
-        add_action('wp_head', [$this, 'gen_buf_end'], 1000);
         add_action('rest_api_init', [$this, 'routes']);
         add_action('init', [$this, 'register_geo_settings']);
         add_action('parse_request', [$this, 'serve_llms_txt'], 1);
@@ -162,23 +161,22 @@ class SEO_Agent_Optimize {
     /* Buffer callback: inject our meta into the captured wp_head HTML, but only a
        tag that isn't already present (no duplicates). Title replaces the theme's
        <title> inner text; description/canonical are appended if missing. */
-    /* ── Generator-meta strip — its OWN buffer, deliberately unconditional ──────
-       remove_action('wp_head','wp_generator') only suppresses CORE's tag; these sites
-       print a HARDCODED (and false) "Drupal 11" generator from the theme. It cannot ride
-       the meta buffer: that one is skipped entirely on non-singular views AND whenever an
-       SEO plugin owns the head — which is exactly when it was still leaking. This wraps
-       the whole of wp_head (priority -100 → 1000) so it nests cleanly outside the meta
-       buffer and runs on every front-end request. */
+    /* ── Generator-meta strip — FULL-PAGE buffer ────────────────────────────────
+       These sites print a HARDCODED (and false) "Drupal 11" generator meta. Verified
+       live that it is NOT emitted through wp_head at all — it sits in the theme
+       template — so neither remove_action('wp_head','wp_generator') (core only) nor a
+       wp_head buffer can reach it. This buffers the whole response (same technique the
+       WebP rewriter already uses) and strips any generator meta wherever it was printed.
+       PHP applies the callback and flushes at request end, so no explicit end hook. */
     public function gen_buf_start() {
         if (is_admin() || is_feed()) return;
+        if ($this->gen_buf) return;
         $this->gen_buf = true;
         ob_start([$this, 'strip_generator']);
     }
-    public function gen_buf_end() {
-        if ($this->gen_buf) { $this->gen_buf = false; @ob_end_flush(); }
-    }
-    public function strip_generator($head) {
-        return preg_replace('/\s*<meta[^>]+name=["\']generator["\'][^>]*>\s*/i', "\n", $head);
+    public function strip_generator($html) {
+        if (!$html || strlen($html) < 50) return $html;
+        return preg_replace('/\s*<meta[^>]+name=["\']generator["\'][^>]*>\s*/i', "\n", $html);
     }
 
     public function render_meta($head) {
