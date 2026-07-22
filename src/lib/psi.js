@@ -133,7 +133,10 @@ export function hasKey() {
 // Full audit detail for one URL+category — returns the raw audits map plus a
 // distilled view (opportunities, failing diagnostics, failing-element items).
 // Retries on PSI "lite" responses (the API sometimes omits audits under load).
-export async function runPsiDetailed(url, { strategy = 'mobile', categories = ['performance'], key = process.env.PSI_KEY, retries = 5, backoffMs = 8000 } = {}) {
+// retries 5→2, backoff 8s→4s: the old worst case (~5 calls + 32s of sleeps ≈ 150-200s)
+// STRUCTURALLY exceeded the 95s request budget — the route 504'd while retries kept
+// burning PSI quota behind the abandoned request.
+export async function runPsiDetailed(url, { strategy = 'mobile', categories = ['performance'], key = process.env.PSI_KEY, retries = 2, backoffMs = 4000 } = {}) {
   const params = new URLSearchParams({ url, strategy });
   for (const c of categories) params.append('category', c);
   if (key) params.set('key', key);
@@ -158,11 +161,19 @@ export async function runPsiDetailed(url, { strategy = 'mobile', categories = ['
   }
   opportunities.sort((x, y) => y.ms - x.ms);
 
+  // Lighthouse itself says which category each audit belongs to (auditRefs) — use that as
+  // authoritative rather than guessing from the audit id downstream.
+  const auditCategory = {};
+  try {
+    for (const [catKey, catObj] of Object.entries(lr.categories || {})) {
+      for (const ref of (catObj.auditRefs || [])) if (!auditCategory[ref.id]) auditCategory[ref.id] = catKey;
+    }
+  } catch (e) { /* best-effort */ }
   const failing = [];
   for (const id in A) {
     const a = A[id];
     if (a && a.score !== null && a.score < 0.9 && a.scoreDisplayMode !== 'informative') {
-      failing.push({ id, title: a.title, score: a.score, displayValue: a.displayValue || null, items: a.details?.items?.length || 0 });
+      failing.push({ id, title: a.title, score: a.score, displayValue: a.displayValue || null, items: a.details?.items?.length || 0, category: auditCategory[id] || null });
     }
   }
 

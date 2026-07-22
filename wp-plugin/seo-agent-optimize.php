@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.18.1
+ * Version:     1.19.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -42,6 +42,11 @@ class SEO_Agent_Optimize {
         add_action('init', [$this, 'register_geo_settings']);
         add_action('parse_request', [$this, 'serve_llms_txt'], 1);
         add_filter('robots_txt', [$this, 'append_ai_robots'], 20, 2);
+        // Kill generator meta: some themes here ship a STALE fake "Drupal 11" generator tag
+        // (confuses crawlers + auditors about the actual CMS) — and hiding the real version
+        // is standard hardening anyway.
+        remove_action('wp_head', 'wp_generator');
+        add_filter('the_generator', '__return_empty_string');
         // UX beacon (RUM) — INERT by default: prints nothing unless the
         // seoagent_ux_beacon option is present AND armed===true (see output_ux_beacon).
         add_action('wp_footer', [$this, 'output_ux_beacon'], 20);
@@ -526,7 +531,9 @@ class SEO_Agent_Optimize {
                 $post = get_post($id);
                 if ($post && trim((string) $post->post_content) !== '') {
                     list($nc, $changed, $why) = seoagent_insert_into_html($post->post_content, $anchor, $href);
-                    if ($changed) { wp_update_post(['ID' => $id, 'post_content' => $nc]); $this->purge(); return ['ok' => true, 'mode' => 'content', 'post_id' => $id]; }
+                    // wp_slash: wp_update_post unslashes its input, so raw HTML with
+                    // backslashes (inline JSON/CSS) was being silently corrupted.
+                    if ($changed) { wp_update_post(wp_slash(['ID' => $id, 'post_content' => $nc])); $this->purge(); return ['ok' => true, 'mode' => 'content', 'post_id' => $id]; }
                     if ($why === 'exists') return ['ok' => true, 'mode' => 'exists', 'post_id' => $id];
                 }
                 return ['ok' => false, 'mode' => 'not_found', 'reason' => 'Anchor text not found in the page content.'];
@@ -634,7 +641,7 @@ class SEO_Agent_Optimize {
                 $had = (bool) preg_match($re, $content);
                 $content = preg_replace($re, '', $content);
                 if (!$remove) $content = $marked . "\n" . $content;
-                if ($had || !$remove) { wp_update_post(['ID' => $id, 'post_content' => $content]); }   // write only on change
+                if ($had || !$remove) { wp_update_post(wp_slash(['ID' => $id, 'post_content' => $content])); }   // write only on change (wp_slash: core unslashes input)
                 elseif (!empty($p['touch'])) { wp_update_post(['ID' => $id]); }                        // else bump modified if asked
                 if ($had || !$remove || !empty($p['touch'])) $this->purge();
                 return ['ok' => true, 'mode' => 'content', 'post_id' => $id, 'replaced' => $had, 'removed' => $remove];

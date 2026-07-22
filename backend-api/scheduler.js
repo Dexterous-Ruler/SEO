@@ -161,7 +161,12 @@ async function jobEngineRefresh(site) {
   try {
     const r = await engine.run(site.id, { includeTrending: true, includePaa: true, includeGeo: false });
     if (r && r.count) await note(site.id, `Content Engine refreshed — ${r.count} opportunity(ies) in the worklist`);
-  } catch (e) { /* transient source/units error — next week retries */ }
+    // A refresh that produced NOTHING is a signal, not a success — a producer (DataForSEO
+    // units, GSC access, Claude) can otherwise fail silently for weeks.
+    else await alertWeekly(site.id, 'engine-refresh-empty', 'Weekly Content Engine refresh produced 0 opportunities — check DataForSEO credit, GSC access and the site\'s competitors/context.' + (r && r.error ? ` (${String(r.error).slice(0, 120)})` : ''));
+  } catch (e) {
+    await alertWeekly(site.id, 'engine-refresh-failed', 'Weekly Content Engine refresh FAILED: ' + String(e && e.message || e).slice(0, 140)).catch(() => {});
+  }
 }
 
 // ── Job: AUTO-PILOT — auto-draft the top scored worklist items (weekly, opt-in) ──

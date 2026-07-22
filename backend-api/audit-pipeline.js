@@ -15,8 +15,13 @@ const SEO_IDS = new Set(['link-text', 'crawlable-anchors', 'meta-description', '
 // Everything else Lighthouse flags under perf/best-practices that's about speed/bytes/main-thread → performance.
 const PERF_HINTS = /(server-response|render-block|unused-|unminified|byte-weight|dom-size|cache-ttl|text-compression|legacy-javascript|reflow|speed-index|lcp|fcp|tbt|interactive|mainthread|bootup|network|critical-request|third-party|redirects|preload|font-display)/i;
 
-function discFor(id) {
+function discFor(id, category) {
   if (IMG_IDS.has(id)) return 'image';
+  // Lighthouse's own auditRefs category is authoritative — the id-set guessing
+  // misclassified a11y/best-practices audits outside the hardcoded sets as 'performance'.
+  if (category === 'accessibility') return 'accessibility';
+  if (category === 'seo') return 'seo';
+  if (category === 'best-practices') return 'performance';
   if (A11Y_IDS.has(id)) return 'accessibility';
   if (SEO_IDS.has(id)) return 'seo';
   if (PERF_HINTS.test(id)) return 'performance';
@@ -147,7 +152,7 @@ export async function auditPage(url, { creds, withContent = false, siteId = null
 
   // From PSI failing audits → findings
   for (const f of psi.failing || []) {
-    const disc = discFor(f.id);
+    const disc = discFor(f.id, f.category);
     const savingsMs = 0;
     findings.push({
       id: `f${++fi}`,
