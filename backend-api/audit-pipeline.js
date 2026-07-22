@@ -110,6 +110,51 @@ export function metaFieldMap(seoPlugin) {
   return { title: '_seoagent_meta_title', meta_description: '_seoagent_meta_description', canonical: '_seoagent_canonical' };
 }
 
+// The Sentinel-owned key for a logical field — always writable over REST because the
+// mu-plugin registers it itself.
+export function sentinelMetaKey(field) {
+  return { title: '_seoagent_meta_title', meta_description: '_seoagent_meta_description', canonical: '_seoagent_canonical' }[field] || null;
+}
+
+/* Write one meta field, surviving the two ways a WP meta write fails in practice:
+    • SILENT REFUSAL — Rank Math registers rank_math_* without REST write access on
+      some installs, so the POST returns 200 and the value never lands (seen live on
+      Go Legal AI: 3 pages, "returned OK but did NOT stick"). We retry on the
+      Sentinel-owned key, which the mu-plugin bridges straight into Rank Math's own
+      rank_math/frontend/* filters — so it renders identically.
+    • TRANSIENT 5xx — one go-visa page lost its description to a bare 503.
+   Returns the updateMetaVerified result, plus `viaFallback` when the second key won. */
+export async function writeMetaResilient(wp, type, id, key, value, field) {
+  const attempt = (k) => wp.updateMetaVerified(type, id, k, value, { force: true });
+  let err;
+  try { return await attempt(key); } catch (e) { err = e; }
+
+  const msg = String(err && err.message || err);
+  if (/\b5\d\d\b|ECONNRESET|ETIMEDOUT|socket hang up|fetch failed/i.test(msg)) {
+    await new Promise((r) => setTimeout(r, 2500));
+    try { return await attempt(key); } catch (e) { err = e; }
+  }
+
+  const fb = sentinelMetaKey(field);
+  if (fb && fb !== key && /did NOT stick|silent-failure/i.test(String(err && err.message || err))) {
+    const r = await attempt(fb);
+    return { ...r, viaFallback: fb };
+  }
+  throw err;
+}
+
+/* A URL that renders a post-type/taxonomy ARCHIVE is not the Page whose ID we hold.
+   Meta written to that page verifies (it really is stored) but can never appear in
+   <head>, because the mu-plugin bridge only fires on is_singular(). go-legal's /team/
+   and /glossary/ are exactly this. Detect it so the repair reports "not applicable"
+   instead of a verified write nobody will ever see. */
+export function rendersAsArchive(html) {
+  const cls = (String(html || '').match(/<body[^>]*\bclass=["']([^"']+)/i) || [])[1] || '';
+  if (!cls) return false;
+  if (/\bpage-id-\d+/.test(cls)) return false;          // a real singular Page
+  return /\bpost-type-archive\b|\bcategory\b|\btax-\S+|\bdate\b|\bauthor\b/.test(cls);
+}
+
 // Build findings + draft proposals for one URL.
 export async function auditPage(url, { creds, withContent = false, siteId = null, seoPlugin = null } = {}) {
   // 1) Detailed PSI across all four categories

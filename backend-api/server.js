@@ -22,7 +22,7 @@ import { prioritize } from '../src/lib/prioritize.js';
 import { prioritizeFindings } from './prioritization.js';
 import { auditHtml } from '../src/phases/04-seo.js';
 import { detectStack } from './detect.js';
-import { auditPage, proposeFromFinding, metaFieldMap } from './audit-pipeline.js';
+import { auditPage, proposeFromFinding, metaFieldMap, writeMetaResilient, rendersAsArchive } from './audit-pipeline.js';
 import { db, credsForSite } from './supabase.js';
 import * as claude from './claude.js';
 import { detectLiveCms } from './site-health.js';
@@ -2388,6 +2388,15 @@ const routes = {
       const curDesc = ((head.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)/i) || [])[1] || '').trim();
       const curTitle = ((head.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '').replace(/&[a-z#0-9]+;/gi, ' ').trim();
       rec.hadDesc = curDesc.length; rec.hadTitle = curTitle.length;
+      // This URL may be served by a post-type archive rather than the Page we hold an
+      // ID for. Writing that page's meta verifies but can never render (bridge is
+      // is_singular()-only), so skip it honestly instead of banking a fake win.
+      if (html && rendersAsArchive(html)) {
+        rec.descStatus = 'not-applicable (URL renders a post-type archive, not this page)';
+        rec.archive = true;
+        out.push(rec);
+        continue;
+      }
       // Body signal for the generator: headings + first real prose.
       const headings = (html.match(/<h[12][^>]*>[\s\S]*?<\/h[12]>/gi) || []).map((x) => x.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 8);
       const excerpt = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -2408,8 +2417,8 @@ const routes = {
           desc = desc.replace(/\s+/g, ' ').trim();
           rec.desc = desc;
           if (!body.dryRun && desc) {
-            const r = await wp.updateMetaVerified(it.type, it.id, FIELD.meta_description, desc, { force: true });
-            rec.descStatus = r.status;
+            const r = await writeMetaResilient(wp, it.type, it.id, FIELD.meta_description, desc, 'meta_description');
+            rec.descStatus = r.status; if (r.viaFallback) rec.descVia = r.viaFallback;
           } else rec.descStatus = 'dry-run';
         } catch (e) { rec.descStatus = 'failed: ' + String(e.message || e).slice(0, 80); }
       } else rec.descStatus = 'ok (already set)';
@@ -2430,8 +2439,8 @@ const routes = {
           }
           rec.title = t;
           if (!body.dryRun && t && t.length <= 65) {
-            const r = await wp.updateMetaVerified(it.type, it.id, FIELD.title, t, { force: true });
-            rec.titleStatus = r.status;
+            const r = await writeMetaResilient(wp, it.type, it.id, FIELD.title, t, 'title');
+            rec.titleStatus = r.status; if (r.viaFallback) rec.titleVia = r.viaFallback;
           } else rec.titleStatus = body.dryRun ? 'dry-run' : 'skipped (could not shorten safely)';
         } catch (e) { rec.titleStatus = 'failed: ' + String(e.message || e).slice(0, 80); }
       }

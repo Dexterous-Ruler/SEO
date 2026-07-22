@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.20.3
+ * Version:     1.21.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.20.3';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.21.0';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -188,6 +188,23 @@ class SEO_Agent_Optimize {
         $add = '';
         if ($desc !== '' && !preg_match('/<meta[^>]+name=["\']description["\']/i', $head)) {
             $add .= "\n<meta name=\"description\" content=\"" . esc_attr($desc) . "\" data-seoagent=\"1\">";
+        }
+        /* Social card. On sites with no SEO plugin nothing emits og:* at all, so an
+           approved description shows in Google but a shared link still renders bare
+           (verified live on goodfor.app: 9/9 pages had og:description missing). Only
+           added when absent, so a theme's or plugin's own tags always win. */
+        if ($desc !== '' && !preg_match('/<meta[^>]+property=["\']og:description["\']/i', $head)) {
+            $add .= "\n<meta property=\"og:description\" content=\"" . esc_attr($desc) . "\" data-seoagent=\"1\">";
+            $add .= "\n<meta name=\"twitter:description\" content=\"" . esc_attr($desc) . "\" data-seoagent=\"1\">";
+        }
+        $ogt = $title !== '' ? $title : trim((string) get_the_title($id));
+        if ($ogt !== '' && !preg_match('/<meta[^>]+property=["\']og:title["\']/i', $head)) {
+            $add .= "\n<meta property=\"og:title\" content=\"" . esc_attr($ogt) . "\" data-seoagent=\"1\">";
+            $add .= "\n<meta name=\"twitter:card\" content=\"summary_large_image\" data-seoagent=\"1\">";
+        }
+        if (!preg_match('/<meta[^>]+property=["\']og:url["\']/i', $head)) {
+            $u = $canon !== '' ? $canon : get_permalink($id);
+            if ($u) $add .= "\n<meta property=\"og:url\" content=\"" . esc_url($u) . "\" data-seoagent=\"1\">";
         }
         if ($canon !== '' && !preg_match('/<link[^>]+rel=["\']canonical["\']/i', $head)) {
             $add .= "\n<link rel=\"canonical\" href=\"" . esc_url($canon) . "\" data-seoagent=\"1\">";
