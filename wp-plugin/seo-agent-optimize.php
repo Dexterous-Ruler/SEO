@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.20.0
+ * Version:     1.20.1
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.20.0';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.20.1';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -160,6 +160,11 @@ class SEO_Agent_Optimize {
        tag that isn't already present (no duplicates). Title replaces the theme's
        <title> inner text; description/canonical are appended if missing. */
     public function render_meta($head) {
+        // Strip generator meta from the captured head. remove_action('wp_head','wp_generator')
+        // only kills CORE's tag — these sites carry a HARDCODED, and factually wrong,
+        // "Drupal 11" generator printed by the theme, which misleads crawlers/auditors
+        // about the actual CMS. Buffer-level removal catches it wherever it came from.
+        $head = preg_replace('/\s*<meta[^>]+name=["\']generator["\'][^>]*>\s*/i', "\n", $head);
         $id = get_queried_object_id();
         if (!$id) return $head;
         $desc  = trim((string) get_post_meta($id, '_seoagent_meta_description', true));
