@@ -22,7 +22,7 @@ import { prioritize } from '../src/lib/prioritize.js';
 import { prioritizeFindings } from './prioritization.js';
 import { auditHtml } from '../src/phases/04-seo.js';
 import { detectStack } from './detect.js';
-import { auditPage, proposeFromFinding } from './audit-pipeline.js';
+import { auditPage, proposeFromFinding, metaFieldMap } from './audit-pipeline.js';
 import { db, credsForSite } from './supabase.js';
 import * as claude from './claude.js';
 import { detectLiveCms } from './site-health.js';
@@ -2315,6 +2315,79 @@ const routes = {
     } catch (e) { return { error: 'Apply failed — is the seo-agent-optimize mu-plugin installed? ' + e.message }; }
   },
 
+  // BULK ON-PAGE METADATA REPAIR — the substantive SEO fix.
+  // The audit only ever surfaced technical debris (broken links, a11y) because it audited
+  // ONE page; site-wide, the real gap is metadata: on SAL 13 of 14 pages shipped with NO
+  // meta description and 13 titles overflowed the SERP. This walks the site's real pages,
+  // generates what's missing with the site's own niche context, writes via the SAME
+  // verified meta path (read-back confirmed), and reports per page.
+  // body: { siteId, limit?, dryRun?, fixTitles?, types? } → { pages:[{url,desc,title,status}] }
+  'POST /fix-page-metadata': async (body) => {
+    const { creds, site } = await resolveCreds(body);
+    if (!body.dryRun && site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'site is read-only (write not armed)' };
+    const wp = clientFrom(creds);
+    const seoPlugin = (site && site.stack && site.stack.seo) || null;
+    const FIELD = metaFieldMap(seoPlugin);
+    const limit = Math.min(Math.max(Number(body.limit) || 25, 1), 100);
+    const types = Array.isArray(body.types) && body.types.length ? body.types : ['pages', 'posts'];
+    // 1) Enumerate real published content.
+    const items = [];
+    for (const t of types) {
+      try {
+        const rows = await wp.request(`/${t}?per_page=${limit}&status=publish&_fields=id,link,title`);
+        for (const r of (rows || [])) items.push({ id: r.id, type: t, url: r.link, title: (r.title && r.title.rendered || '').replace(/&[a-z#0-9]+;/gi, ' ').trim() });
+      } catch (e) { /* type unavailable on this site */ }
+    }
+    if (!items.length) return { error: 'No published pages/posts found to check.' };
+    const out = [];
+    for (const it of items.slice(0, limit)) {
+      const rec = { url: it.url, id: it.id, type: it.type };
+      // 2) Read what the page ACTUALLY renders today (authoritative — covers whatever
+      //    SEO plugin owns the head), bounded so one slow page can't stall the batch.
+      let html = '';
+      try {
+        const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 12000);
+        try { const r = await fetch(it.url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' }, signal: ctrl.signal }); if (r.ok) html = await r.text(); }
+        finally { clearTimeout(timer); }
+      } catch (e) { /* fall through — treat as missing */ }
+      const head = html ? html.slice(0, Math.max(html.indexOf('</head>'), 60000)) : '';
+      const curDesc = ((head.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)/i) || [])[1] || '').trim();
+      const curTitle = ((head.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '').replace(/&[a-z#0-9]+;/gi, ' ').trim();
+      rec.hadDesc = curDesc.length; rec.hadTitle = curTitle.length;
+      // Body signal for the generator: headings + first real prose.
+      const headings = (html.match(/<h[12][^>]*>[\s\S]*?<\/h[12]>/gi) || []).map((x) => x.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 8);
+      const excerpt = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<(nav|header|footer|aside|form|noscript|svg)\b[\s\S]*?<\/\1>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim().slice(0, 1200);
+      // 3) Meta description — generate only when genuinely missing or too short to rank.
+      if (curDesc.length < 70) {
+        try {
+          const desc = String(await claude.metaDescription({ url: it.url, title: curTitle || it.title, headings, excerpt, siteId: body.siteId })).replace(/^["']|["']$/g, '').trim();
+          rec.desc = desc;
+          if (!body.dryRun && desc) {
+            const r = await wp.updateMetaVerified(it.type, it.id, FIELD.meta_description, desc, { force: true });
+            rec.descStatus = r.status;
+          } else rec.descStatus = 'dry-run';
+        } catch (e) { rec.descStatus = 'failed: ' + String(e.message || e).slice(0, 80); }
+      } else rec.descStatus = 'ok (already set)';
+      // 4) Title — opt-in (fixTitles), only when it would truncate in the SERP.
+      if (body.fixTitles && curTitle.length > 62) {
+        try {
+          const t = String(await claude.titleRewrite({ url: it.url, currentTitle: curTitle, brand: (site && site.name) || '', siteId: body.siteId })).replace(/^["']|["']$/g, '').trim();
+          rec.title = t;
+          if (!body.dryRun && t && t.length <= 62) {
+            const r = await wp.updateMetaVerified(it.type, it.id, FIELD.title, t, { force: true });
+            rec.titleStatus = r.status;
+          } else rec.titleStatus = body.dryRun ? 'dry-run' : 'skipped (rewrite still too long)';
+        } catch (e) { rec.titleStatus = 'failed: ' + String(e.message || e).slice(0, 80); }
+      }
+      out.push(rec);
+    }
+    const wrote = out.filter((r) => r.descStatus === 'verified' || r.titleStatus === 'verified').length;
+    if (site && !body.dryRun) await db.logActivity({ site_id: site.id, type: wrote ? 'verified' : 'warning', actor: 'Agent', icon: 'check', text: `On-page metadata repair — ${wrote} page(s) updated`, meta: `${out.length} checked` }).catch(() => {});
+    return { ok: true, checked: out.length, wrote, pages: out };
+  },
+
   // ACCESSIBILITY DOM FIXES — the channel that never existed. Audits like skip-link,
   // link-name, label, landmark-one-main and aria-* cannot be fixed in CSS, so every one
   // of them approved into "needs manual action · nothing was written" forever. This
@@ -4231,7 +4304,7 @@ const HEAVY_ROUTES = new Set([
   'POST /apply-local-schema', 'POST /engine-autodraft', 'POST /engine-sync-published',
   'POST /n8n-run',
   'POST /ux-crawl',
-  'POST /fix-contact-tokens', 'POST /embed-video', 'POST /remove-video-embed', 'POST /strip-internal-labels', 'POST /fix-broken-embeds', 'POST /selftest-full',   // WP read+write loops over posts (selftest: many vendor probes)
+  'POST /fix-page-metadata', 'POST /apply-a11y-fixes', 'POST /fix-contact-tokens', 'POST /embed-video', 'POST /remove-video-embed', 'POST /strip-internal-labels', 'POST /fix-broken-embeds', 'POST /selftest-full',   // WP read+write loops over posts (selftest: many vendor probes)
   // Added: renamed/omitted routes that genuinely call Claude / DataForSEO / GSC / PSI / crawl.
   'POST /content-opportunities',            // renamed from the phantom /generate-opportunities (DataForSEO + clustering + Claude)
   'POST /audit-full',                       // full page crawl + PSI + on-page SEO read
