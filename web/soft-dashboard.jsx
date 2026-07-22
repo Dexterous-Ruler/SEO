@@ -6432,11 +6432,28 @@ function App() {
             try{
               const findings=cssProps.map(p=>({ auditId:String(p.findingId||"").split("::")[0]||undefined, title:p.title }));
               const g=await API.generateCss(siteId, findings);
-              if(g && !g.error && g.css){
-                const w=await API.applyCss(siteId, g.css);
-                if(w && w.ok){ for(const p of cssProps){ applied++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"verified"}:x)); await markApplied(p,"verified"); } }
-                else if(w && w.status==="blocked"){ cssProps.forEach(()=>blocked++); }
-                else { for(const p of cssProps){ failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); await markApplied(p,"failed"); } }
+              if(g && !g.error && (g.rules||[]).length){
+                // Per-rule accounting: only proposals whose auditId produced a REAL
+                // (non-manual) rule get applied+verified; template rules that need human
+                // values, and findings with no rule at all, are honestly counted manual.
+                const ruleByAudit={}; (g.rules||[]).forEach(r=>{ ruleByAudit[r.auditId]=r; });
+                const coveredProps=[], uncovered=[];
+                for(const p of cssProps){
+                  const aid=String(p.findingId||"").split("::")[0];
+                  const r=ruleByAudit[aid];
+                  if(r && !r.manual) coveredProps.push({p, rule:r});
+                  else uncovered.push(p);
+                }
+                uncovered.forEach(()=>manual++);
+                if(coveredProps.length){
+                  // Accumulating apply: rules PERSIST server-side per proposal, and the live
+                  // bundle is rebuilt as the union — a new batch can't wipe earlier fixes.
+                  const items=coveredProps.map(({p,rule})=>({ proposalId:p.id, auditId:rule.auditId, note:rule.note, css:rule.css }));
+                  const w=await API.applyCssFixes(siteId, items);
+                  if(w && w.ok){ for(const {p} of coveredProps){ applied++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"verified"}:x)); await markApplied(p,"verified"); } }
+                  else if(w && w.status==="blocked"){ coveredProps.forEach(()=>blocked++); }
+                  else { for(const {p} of coveredProps){ failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); await markApplied(p,"failed"); } }
+                }
               } else { cssProps.forEach(()=>manual++); }   // nothing CSS-expressible → still manual
             }catch(e){ cssProps.forEach(()=>failed++); }
           }
@@ -6452,9 +6469,25 @@ function App() {
     },
     rollback:(id)=>{
       const p=proposals.find(x=>x.id===id);
+      if(killSwitch){ toast("Kill switch is on — rollbacks are writes too. Release it first.","gold"); return; }
       if(isLive() && p){
+        // CHANNEL-AWARE: css proposals roll back via the accumulated-CSS store (remove the
+        // rule, re-apply the remaining bundle) — the old path attempted a bogus META write
+        // for a change that never touched post meta. Schema has no rollback implementation:
+        // say so instead of pretending.
+        if(p.channel==="theme/css"){
+          API.rollbackCss(siteId,id).then(r=>{
+            if(r&&r.error){ toast("CSS rollback failed: "+r.error,"clay"); return; }
+            if(r&&r.status==="blocked"){ toast("Site is read-only — arm writes first.","clay"); return; }
+            setProposals(ps=>ps.map(x=>x.id===id?{...x,status:"rolled-back"}:x));
+            toast("CSS fix removed — bundle rebuilt with "+(r.ruleGroups||0)+" remaining rule group(s)","gold");
+          }).catch(e=>toast("CSS rollback failed: "+e.message,"clay"));
+          return;
+        }
+        if(p.channel==="schema"){ toast("Schema changes have no one-click rollback yet — remove the JSON-LD block from the page, or re-apply a corrected version.","gold"); return; }
         API.rollbackMeta(siteId,{proposalId:id,objectType:p._objectType,postId:p._postId,url:p.page,field:p.field,oldValue:p._oldValue||p.before}).then((r)=>{
           if(r&&r.error){ toast("Rollback failed: "+r.error,"clay"); return; }
+          if(r&&r.status==="blocked"){ toast("Site is read-only — arm writes first.","clay"); return; }
           API.updateProposal(id,{status:"rolled-back"}).catch(()=>{});
           API.logActivity({site_id:siteId,owner:site.owner,type:"rolled-back",actor:"You",icon:"undo",text:"Rolled back "+p.title,meta:"restored old value"}).catch(()=>{});
           setProposals(ps=>ps.map(x=>x.id===id?{...x,status:"rolled-back"}:x)); toast("Change rolled back — value restored","gold");

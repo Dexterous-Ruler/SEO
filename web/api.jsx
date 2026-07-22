@@ -160,6 +160,8 @@
     n8nRun(baseUrl, apiKey, id, payload) { return engine("/n8n-run", { baseUrl, apiKey, id, payload }); },
     n8nExecutions(baseUrl, apiKey, id, status) { return engine("/n8n-executions", { baseUrl, apiKey, id, status }); },
     killSwitch(on) { return engine("/kill-switch", { on }); },
+    applyCssFixes(siteId, items) { return engine("/apply-css-fixes", { siteId, items }); },
+    rollbackCss(siteId, proposalId) { return engine("/rollback-css", { siteId, proposalId }); },
     selftestFull(siteId) { return engine("/selftest-full", siteId ? { siteId } : {}); },
     n8nPromptHistory(id) { return engine("/n8n-prompt-history", { id }); },
     n8nPromptRollback(baseUrl, apiKey, id, historyId) { return engine("/n8n-prompt-rollback", { baseUrl, apiKey, id, historyId }); },

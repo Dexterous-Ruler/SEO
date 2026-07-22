@@ -2216,6 +2216,47 @@ const routes = {
     } catch (e) { return { error: 'Apply failed — is the seo-agent-optimize mu-plugin installed? ' + e.message }; }
   },
 
+  // ACCUMULATING CSS apply: each rule is persisted per-proposal in css_fixes and the live
+  // bundle is rebuilt as the UNION of every stored rule — so applying a new batch can no
+  // longer wipe previously applied fixes, and per-proposal rollback is possible.
+  // body: { siteId, items:[{proposalId, auditId, note, css}] } → { ok, applied:[proposalId], bytes }.
+  'POST /apply-css-fixes': async (body) => {
+    const { creds, site } = await resolveCreds(body);
+    if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'site is read-only (write not armed)' };
+    const items = (body.items || []).filter((i) => i && i.css && String(i.css).trim());
+    if (!items.length) return { error: 'No CSS rules to apply.' };
+    const wp = clientFrom(creds);
+    for (const i of items) await db.upsertCssFix(site.id, { proposalId: i.proposalId, auditId: i.auditId, note: i.note, css: i.css });
+    const rows = await db.listCssFixes(site.id);
+    const bundle = `/* seo-agent accumulated CSS fixes — ${rows.length} rule group(s), rebuilt ${new Date().toISOString().slice(0, 10)} */\n`
+      + rows.map((r) => `\n/* [${r.audit_id || r.proposal_id || 'rule'}]${r.note ? ' ' + r.note : ''} */\n${r.css}`).join('\n');
+    try {
+      const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/css`, { method: 'POST', body: { css: bundle } });
+      await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: `Applied ${items.length} CSS fix(es) — bundle now ${rows.length} rule group(s)`, meta: (r && r.bytes) ? r.bytes + ' bytes' : '' }).catch(() => {});
+      return { ok: true, applied: items.map((i) => i.proposalId).filter(Boolean), ruleGroups: rows.length, ...r };
+    } catch (e) { return { error: 'Apply failed — is the seo-agent-optimize mu-plugin installed? ' + e.message }; }
+  },
+
+  // Per-proposal CSS rollback: remove that rule from the store, re-apply the remaining
+  // bundle. The previously-bogus "rollback = meta write" path for css proposals is gone.
+  'POST /rollback-css': async (body) => {
+    const { creds, site } = await resolveCreds(body);
+    if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'site is read-only (write not armed)' };
+    if (!body.proposalId) return { error: 'proposalId required' };
+    await db.deleteCssFix(site.id, body.proposalId);
+    const rows = await db.listCssFixes(site.id);
+    const bundle = rows.length
+      ? `/* seo-agent accumulated CSS fixes — ${rows.length} rule group(s), rebuilt ${new Date().toISOString().slice(0, 10)} */\n` + rows.map((r) => `\n/* [${r.audit_id || r.proposal_id || 'rule'}]${r.note ? ' ' + r.note : ''} */\n${r.css}`).join('\n')
+      : `/* seo-agent CSS fixes — none active */\n`;
+    const wp = clientFrom(creds);
+    try {
+      await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/css`, { method: 'POST', body: { css: bundle } });
+      await db.updateProposal(body.proposalId, { status: 'rolled-back' }).catch(() => {});
+      await db.logActivity({ site_id: site.id, type: 'rolled-back', actor: 'You', icon: 'undo', text: 'Rolled back a CSS fix', meta: `${rows.length} rule group(s) remain` }).catch(() => {});
+      return { ok: true, ruleGroups: rows.length };
+    } catch (e) { return { error: 'Rollback failed: ' + e.message }; }
+  },
+
   // AI-SEO fact extraction: surface citable facts + FAQ from a page to improve
   // LLM/answer-engine citation; returns a ready FAQPage schema too.
   'POST /ai-seo-facts': async (body) => {
@@ -3545,6 +3586,14 @@ const routes = {
     if (body.dryRun) {
       return { status: 'dry-run', wouldWrite: { id: postId, field: body.field, value: body.value } };
     }
+    // Refuse placeholder/no-op writes: proposals whose `after` was never concretely drafted
+    // ("Agent-drafted fix (review before apply)", template braces, or the un-writable
+    // catch-all field 'metadata') used to be written VERBATIM to the live page.
+    {
+      const v = String(body.value || '');
+      const placeholder = !v.trim() || /agent-drafted fix|review before apply|\{\{|\bTBD\b|\[insert /i.test(v) || String(body.field) === 'metadata';
+      if (placeholder) return { status: 'needs-edit', reason: 'This proposal has no concrete value to write yet — edit the “after” text (or use Propose fix to draft one) before applying.' };
+    }
     const r = await wp.updateMetaVerified(objectType, postId, body.field, body.value, { force: true });
     if (body.proposalId) {
       await db.updateProposal(body.proposalId, { status: r.status === 'verified' ? 'verified' : 'failed', old_value: r.old, post_id: postId, object_type: objectType, applied_at: new Date().toISOString() }).catch(() => {});
@@ -3556,6 +3605,8 @@ const routes = {
   // Roll back a meta change to a prior value (siteId or creds).
   'POST /rollback-meta': async (body) => {
     const { creds, site } = await resolveCreds(body);
+    // Same write gate as every other mutating route — a rollback is still a live write.
+    if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'site is read-only (write not armed)' };
     const wp = clientFrom(creds);
     let objectType = body.objectType || 'posts';
     let postId = body.postId;

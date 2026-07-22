@@ -270,6 +270,22 @@ export const db = {
     return rest(`chat_conversations?id=eq.${id}`, { method: 'DELETE' });
   },
 
+  // ---- accumulated CSS fixes (per-site rule store → the live bundle is ALWAYS the
+  // union of these rows, so a new apply can't wipe earlier fixes and a rollback is
+  // "delete the row + re-apply the rest") ----
+  async listCssFixes(siteId) {
+    return rest(`css_fixes?site_id=eq.${siteId}&select=*&order=created_at.asc`).catch(() => []);
+  },
+  async upsertCssFix(siteId, { proposalId, auditId, note, css }) {
+    if (proposalId) await rest(`css_fixes?site_id=eq.${siteId}&proposal_id=eq.${proposalId}`, { method: 'DELETE' }).catch(() => {});
+    else if (auditId) await rest(`css_fixes?site_id=eq.${siteId}&audit_id=eq.${encodeURIComponent(auditId)}&proposal_id=is.null`, { method: 'DELETE' }).catch(() => {});
+    const o = await rest('css_fixes', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ site_id: siteId, proposal_id: proposalId || null, audit_id: auditId || null, note: note || null, css }) });
+    return Array.isArray(o) ? o[0] : o;
+  },
+  async deleteCssFix(siteId, proposalId) {
+    return rest(`css_fixes?site_id=eq.${siteId}&proposal_id=eq.${proposalId}`, { method: 'DELETE' });
+  },
+
   // ---- n8n prompt-edit history (undo/rollback — last 10 entries per workflow) ----
   // edits jsonb = [{nodeId,nodeName,path,before,after}] captured at save time.
   async addN8nPromptHistory(row) {

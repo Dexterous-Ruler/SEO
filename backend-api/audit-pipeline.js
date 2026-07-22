@@ -34,7 +34,10 @@ export const RECIPES = {
   'aria-prohibited-attr': { disc: 'accessibility', risk: 'low', channel: 'theme/css', title: 'Fix Elementor tab ARIA roles', impact: '+A11y', target: 'staging', field: 'child-theme · seo-agent-a11y.js', before: 'aria-label on role-less div', after: 'role="tablist" added' },
   'link-name': { disc: 'seo', risk: 'low', channel: 'theme/css', title: 'Name the popup links (a11y + SEO)', impact: '+A11y +SEO', target: 'staging', field: 'child-theme · seo-agent-a11y.js', before: 'Links with no accessible text', after: 'Descriptive aria-label injected' },
   'link-text': { disc: 'seo', risk: 'low', channel: 'theme/css', title: 'Add descriptive link text', impact: '+SEO', target: 'staging', field: 'theme · link text', before: 'Non-descriptive anchors', after: 'Descriptive, crawlable text' },
-  'image-alt': { disc: 'accessibility', risk: 'low', channel: 'rest-write', title: 'Generate alt text for images', impact: '+A11y +SEO', target: 'staging', field: 'media alt', before: '(empty alt)', after: 'AI-drafted, human-reviewable alt text' },
+  // NOTE: channel 'manual' — 'media alt' is a display label, not a writable post-meta key;
+  // routing it through /apply-meta guaranteed a silent-failure write. Alt text is applied
+  // per-attachment via the media/image-optimize flow instead.
+  'image-alt': { disc: 'accessibility', risk: 'low', channel: 'manual', title: 'Generate alt text for images', impact: '+A11y +SEO', target: 'staging', field: 'media alt (via Images screen)', before: '(empty alt)', after: 'Use Page Fixes → image optimisation, which writes real per-attachment alt text' },
 };
 
 // Stable, content-derived key for a finding (and the proposal that fixes it), so
@@ -54,19 +57,24 @@ function keyForFinding(finding) {
 // Falls back to a generic manual proposal when there's no specific recipe.
 export function proposeFromFinding(finding) {
   const id = finding._auditId || finding.id;
-  const recipe = RECIPES[id] || RECIPES[finding.field];
+  // Pipeline findings store the metadata field as `_field` (not `field`) — the old
+  // `RECIPES[finding.field]` arm could never match anything.
+  const recipe = RECIPES[id] || RECIPES[finding._field || finding.field];
   const fk = keyForFinding(finding);
   if (recipe) {
     return { findingId: fk, status: 'proposed', page: finding.page || '/', ...recipe };
   }
-  // Generic fallback — surfaces as a manual proposal for human handling.
+  // Generic fallback — ALWAYS a manual proposal. It used to inherit channel
+  // 'rest-write' with the un-writable catch-all field 'metadata' and a placeholder
+  // value, so "approve → apply" attempted a literal junk meta write that could only
+  // fail. Without a concrete writable field+value there is nothing to auto-apply.
   return {
     findingId: fk, status: 'proposed', page: finding.page || '/',
     disc: finding.disc || 'performance', risk: 'medium',
-    channel: finding.channel || 'manual',
+    channel: 'manual',
     title: 'Fix: ' + finding.title, impact: '+' + (finding.gapPts || 3) + ' pts',
-    target: 'staging', field: finding.channel === 'rest-write' ? 'metadata' : 'manual review',
-    before: finding.detail || finding.title, after: 'Agent-drafted fix (review before apply)',
+    target: 'staging', field: 'manual review',
+    before: finding.detail || finding.title, after: 'Needs a human (or a Propose-fix draft) — no safe auto-write exists for this finding.',
   };
 }
 function channelFor(disc) {
@@ -106,16 +114,32 @@ export async function auditPage(url, { creds, withContent = false, siteId = null
     key: process.env.PSI_KEY,
   });
 
-  // 2) On-page SEO read (HTML) for metadata-level findings + writable proposals
-  let seoFindings = [], seoProposals = [], head = {}, html = '';
+  // 2) On-page SEO read (HTML) for metadata-level findings + writable proposals.
+  //    15s bound + res.ok check: a bot-wall 403 (Hostinger hcdn on go-legal/settlement)
+  //    used to have its CHALLENGE PAGE parsed as the site — producing false "missing
+  //    meta description/canonical" findings whose proposals would then write metadata
+  //    drafted from CAPTCHA content to the real page.
+  let seoFindings = [], seoProposals = [], head = {}, html = '', fetchBlocked = null;
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } });
-    html = await res.text();
-    head = parseHead(html);
-    const a = auditHtml(url, html);
-    seoFindings = a.findings;
-    seoProposals = a.proposals;
-  } catch (e) { /* page fetch failed; PSI still gives findings */ }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    let res;
+    try { res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' }, signal: ctrl.signal }); }
+    finally { clearTimeout(timer); }
+    if (!res.ok) {
+      fetchBlocked = `HTTP ${res.status}`;
+    } else {
+      html = await res.text();
+      if (/bot verification|checking your browser|attention required|cf-browser-verification|verify you are human/i.test(html.slice(0, 4000))) {
+        fetchBlocked = 'bot-wall challenge page'; html = '';
+      } else {
+        head = parseHead(html);
+        const a = auditHtml(url, html);
+        seoFindings = a.findings;
+        seoProposals = a.proposals;
+      }
+    }
+  } catch (e) { fetchBlocked = e.name === 'AbortError' ? 'timeout after 15s' : String(e.message || e).slice(0, 80); }
 
   const path = new URL(url).pathname || '/';
   const findings = [];
@@ -137,6 +161,18 @@ export async function auditPage(url, { creds, withContent = false, siteId = null
       channel: channelFor(disc),
       detail: f.displayValue ? `${f.title} — ${f.displayValue}` : f.title,
       _auditId: f.id,
+    });
+  }
+
+  // Page fetch blocked → say so LOUDLY instead of silently skipping the SEO layer
+  // (and instead of ever auditing a challenge page as if it were the site).
+  if (fetchBlocked) {
+    findings.push({
+      id: `f${++fi}`, key: findingKey({ auditId: 'page-fetch-blocked', page: path }),
+      disc: 'seo', title: 'Page HTML could not be read (' + fetchBlocked + ')', page: path,
+      impact: 'medium', traffic: '—', gapPts: 2, channel: 'manual',
+      detail: 'The on-page SEO layer was skipped for this run: the server could not read the page HTML (' + fetchBlocked + '). If a bot-firewall (e.g. Hostinger) is blocking the agent, allowlist it — Lighthouse findings above are unaffected.',
+      _auditId: 'page-fetch-blocked',
     });
   }
 
