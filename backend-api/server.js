@@ -126,6 +126,7 @@ async function generateRewritePreview({ wp, found, page, site, siteId, brief }) 
 const REWRITES = new Map();   // `${siteId}:${postId}` -> { status:'running'|'done'|'error', result?, error?, at }
 const _atRecCache = new Map();  // `${base}:${table}:${filter}` -> { all, exp } — 10s TTL absorbs the grid's poll bursts
 const OPP_RUNS = new Map();     // siteId -> { status:'running'|'done'|'error', result?, error?, at } — content-opportunities background job
+const META_RUNS = new Map();   // siteId -> metadata-repair background job
 const AUDIT_RUNS = new Map();  // siteId -> { status, progress?, result?, error?, at } — scope-aware audit background job
 // The site's niche context PLUS its target market, for claude.filterKeywordsByNiche. Without
 // the market, another country's terms survive the service test (a UK visa firm was seeded
@@ -2321,6 +2322,32 @@ const routes = {
   // meta description and 13 titles overflowed the SERP. This walks the site's real pages,
   // generates what's missing with the site's own niche context, writes via the SAME
   // verified meta path (read-back confirmed), and reports per page.
+  // Background wrapper — a full-site pass (fetch + generate + verified write per page)
+  // runs for minutes and cannot fit the ~95s request cap (it 504'd at 20 pages).
+  // Start → poll, same pattern as the audit/opportunity jobs.
+  'POST /fix-page-metadata-start': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    const cur = META_RUNS.get(body.siteId);
+    if (cur && cur.status === 'running') return { status: 'running', progress: cur.progress };
+    META_RUNS.set(body.siteId, { status: 'running', progress: { done: 0, total: 0 }, at: Date.now() });
+    (async () => {
+      try {
+        const r = await routes['POST /fix-page-metadata']({ ...body, _progress: (p) => { const run = META_RUNS.get(body.siteId); if (run) run.progress = p; } });
+        META_RUNS.set(body.siteId, { status: r && r.error ? 'error' : 'done', result: r, error: r && r.error, at: Date.now() });
+      } catch (e) { META_RUNS.set(body.siteId, { status: 'error', error: String(e && e.message || e), at: Date.now() }); }
+    })();
+    return { status: 'running', progress: { done: 0, total: 0 } };
+  },
+  'POST /fix-page-metadata-status': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    const r = META_RUNS.get(body.siteId);
+    if (!r) return { status: 'unknown', reason: 'no active run — re-run' };
+    if (Date.now() - r.at > 20 * 60 * 1000) { META_RUNS.delete(body.siteId); return { status: 'unknown', reason: 'expired — re-run' }; }
+    if (r.status === 'done') return { status: 'done', ...(r.result || {}) };
+    if (r.status === 'error') return { status: 'error', error: r.error };
+    return { status: 'running', progress: r.progress };
+  },
+
   // body: { siteId, limit?, dryRun?, fixTitles?, types? } → { pages:[{url,desc,title,status}] }
   'POST /fix-page-metadata': async (body) => {
     const { creds, site } = await resolveCreds(body);
@@ -2340,7 +2367,10 @@ const routes = {
     }
     if (!items.length) return { error: 'No published pages/posts found to check.' };
     const out = [];
-    for (const it of items.slice(0, limit)) {
+    const work = items.slice(0, limit);
+    let _i = 0;
+    for (const it of work) {
+      if (typeof body._progress === 'function') body._progress({ done: _i++, total: work.length, current: it.url });
       const rec = { url: it.url, id: it.id, type: it.type };
       // 2) Read what the page ACTUALLY renders today (authoritative — covers whatever
       //    SEO plugin owns the head), bounded so one slow page can't stall the batch.
@@ -4313,7 +4343,7 @@ const HEAVY_ROUTES = new Set([
   'POST /apply-local-schema', 'POST /engine-autodraft', 'POST /engine-sync-published',
   'POST /n8n-run',
   'POST /ux-crawl',
-  'POST /fix-page-metadata', 'POST /apply-a11y-fixes', 'POST /fix-contact-tokens', 'POST /embed-video', 'POST /remove-video-embed', 'POST /strip-internal-labels', 'POST /fix-broken-embeds', 'POST /selftest-full',   // WP read+write loops over posts (selftest: many vendor probes)
+  'POST /fix-page-metadata', 'POST /fix-page-metadata-start', 'POST /apply-a11y-fixes', 'POST /fix-contact-tokens', 'POST /embed-video', 'POST /remove-video-embed', 'POST /strip-internal-labels', 'POST /fix-broken-embeds', 'POST /selftest-full',   // WP read+write loops over posts (selftest: many vendor probes)
   // Added: renamed/omitted routes that genuinely call Claude / DataForSEO / GSC / PSI / crawl.
   'POST /content-opportunities',            // renamed from the phantom /generate-opportunities (DataForSEO + clustering + Claude)
   'POST /audit-full',                       // full page crawl + PSI + on-page SEO read
