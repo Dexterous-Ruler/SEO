@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.21.2
+ * Version:     1.22.0
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.21.2';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.22.0';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -173,7 +173,7 @@ class SEO_Agent_Optimize {
     }
 
     public function meta_buffer_start() {
-        if (is_admin() || is_feed() || !is_singular()) return;
+        if (is_admin() || is_feed() || (!is_singular() && !is_post_type_archive())) return;
         if ($this->seo_plugin_owns_head()) return;
         $this->meta_buf = true;
         ob_start([$this, 'render_meta']);
@@ -205,10 +205,13 @@ class SEO_Agent_Optimize {
 
     public function render_meta($head) {
         $id = get_queried_object_id();
-        if (!$id) return $head;
-        $desc  = trim((string) get_post_meta($id, '_seoagent_meta_description', true));
-        $canon = trim((string) get_post_meta($id, '_seoagent_canonical', true));
-        $title = trim((string) get_post_meta($id, '_seoagent_meta_title', true));
+        $arch = !is_singular() && is_post_type_archive();
+        if (!$id && !$arch) return $head;
+        // agent_meta() resolves post meta on singulars and the archive option on
+        // post-type archives, so both paths share one source of truth.
+        $desc  = $this->agent_meta('_seoagent_meta_description');
+        $canon = $this->agent_meta('_seoagent_canonical');
+        $title = $this->agent_meta('_seoagent_meta_title');
         $add = '';
         if ($desc !== '' && !preg_match('/<meta[^>]+name=["\']description["\']/i', $head)) {
             $add .= "\n<meta name=\"description\" content=\"" . esc_attr($desc) . "\" data-seoagent=\"1\">";
@@ -221,13 +224,13 @@ class SEO_Agent_Optimize {
             $add .= "\n<meta property=\"og:description\" content=\"" . esc_attr($desc) . "\" data-seoagent=\"1\">";
             $add .= "\n<meta name=\"twitter:description\" content=\"" . esc_attr($desc) . "\" data-seoagent=\"1\">";
         }
-        $ogt = $title !== '' ? $title : trim((string) get_the_title($id));
+        $ogt = $title !== '' ? $title : ($arch ? trim((string) post_type_archive_title('', false)) : trim((string) get_the_title($id)));
         if ($ogt !== '' && !preg_match('/<meta[^>]+property=["\']og:title["\']/i', $head)) {
             $add .= "\n<meta property=\"og:title\" content=\"" . esc_attr($ogt) . "\" data-seoagent=\"1\">";
             $add .= "\n<meta name=\"twitter:card\" content=\"summary_large_image\" data-seoagent=\"1\">";
         }
         if (!preg_match('/<meta[^>]+property=["\']og:url["\']/i', $head)) {
-            $u = $canon !== '' ? $canon : get_permalink($id);
+            $u = $canon !== '' ? $canon : ($arch ? get_post_type_archive_link((string) get_query_var('post_type')) : get_permalink($id));
             if ($u) $add .= "\n<meta property=\"og:url\" content=\"" . esc_url($u) . "\" data-seoagent=\"1\">";
         }
         if ($canon !== '' && !preg_match('/<link[^>]+rel=["\']canonical["\']/i', $head)) {
@@ -255,9 +258,28 @@ class SEO_Agent_Optimize {
        value leaves the plugin's own output untouched. (RankMath sites write RankMath's
        native keys directly — see the backend field map — so they don't need this.) */
     private function agent_meta($key) {
-        if (!is_singular()) return '';
-        $id = get_queried_object_id();
-        return $id ? trim((string) get_post_meta($id, $key, true)) : '';
+        if (is_singular()) {
+            $id = get_queried_object_id();
+            return $id ? trim((string) get_post_meta($id, $key, true)) : '';
+        }
+        /* Post-type ARCHIVES (/team/, /glossary/) have no post to hang meta on, so
+           they used to be unreachable: the repair would write the like-named Page's
+           meta, verify it, and nothing would ever render. Archive copy lives in a
+           site option keyed by post type instead, served through the very same
+           bridge filters — which DO fire on archives — so it works identically on
+           Yoast / Rank Math / AIOSEO / no-plugin sites. */
+        if (is_post_type_archive()) {
+            $pt = get_query_var('post_type');
+            if (is_array($pt)) $pt = reset($pt);
+            $pt = (string) $pt;
+            if ($pt === '') return '';
+            $all = get_option('seoagent_archive_meta', []);
+            if (!is_array($all) || empty($all[$pt]) || !is_array($all[$pt])) return '';
+            $sub = ['_seoagent_meta_title' => 'title', '_seoagent_meta_description' => 'description', '_seoagent_canonical' => 'canonical'];
+            $f = isset($sub[$key]) ? $sub[$key] : '';
+            return $f !== '' && isset($all[$pt][$f]) ? trim((string) $all[$pt][$f]) : '';
+        }
+        return '';
     }
     public function seo_bridge_title($v) { $t = $this->agent_meta('_seoagent_meta_title');      return $t !== '' ? $t : $v; }
     public function seo_bridge_desc($v)  { $d = $this->agent_meta('_seoagent_meta_description'); return $d !== '' ? $d : $v; }
@@ -496,6 +518,34 @@ class SEO_Agent_Optimize {
         // rewrites) require full admin — the SAME bar as /self-update. A Contributor
         // or Author holding only 'edit_posts' must never inject site-wide JS/CSS.
         $permAdmin = function () { return current_user_can('manage_options'); };
+
+        /* Meta for a post-type ARCHIVE, which has no post to attach meta to. Stored
+           per post type in one option and served by agent_meta()/the bridge filters.
+           Site option → manage_options, same bar as the other option writers. */
+        register_rest_route('seoagent/v1', '/archive-meta', [
+            'methods'  => 'POST',
+            'permission_callback' => $permAdmin,
+            'callback' => function ($req) {
+                $p  = $req->get_json_params();
+                $pt = isset($p['post_type']) ? sanitize_key($p['post_type']) : '';
+                if ($pt === '') return new WP_Error('bad_request', 'post_type required', ['status' => 400]);
+                if (!post_type_exists($pt)) return new WP_Error('bad_request', 'unknown post type: ' . $pt, ['status' => 400]);
+                $all = get_option('seoagent_archive_meta', []);
+                if (!is_array($all)) $all = [];
+                $cur = isset($all[$pt]) && is_array($all[$pt]) ? $all[$pt] : [];
+                foreach (['title', 'description'] as $f) {
+                    if (isset($p[$f])) $cur[$f] = sanitize_text_field((string) $p[$f]);
+                }
+                if (isset($p['canonical'])) $cur['canonical'] = esc_url_raw((string) $p['canonical']);
+                $all[$pt] = $cur;
+                update_option('seoagent_archive_meta', $all, false);
+                $this->purge();
+                // Read back so the caller can verify, exactly like a meta write.
+                $back = get_option('seoagent_archive_meta', []);
+                return ['ok' => true, 'post_type' => $pt, 'stored' => isset($back[$pt]) ? $back[$pt] : null,
+                        'url' => get_post_type_archive_link($pt)];
+            },
+        ]);
 
         register_rest_route('seoagent/v1', '/schema', [
             'methods'  => 'POST',

@@ -155,6 +155,15 @@ export function rendersAsArchive(html) {
   return /\bpost-type-archive\b|\bcategory\b|\btax-\S+|\bdate\b|\bauthor\b/.test(cls);
 }
 
+// The post type behind a post-type archive, from WP's own body class
+// ("post-type-archive-team" → "team"). null when the URL is some other archive
+// kind, which we can't address with per-post-type archive meta.
+export function archivePostType(html) {
+  const cls = (String(html || '').match(/<body[^>]*\bclass=["']([^"']+)/i) || [])[1] || '';
+  const m = cls.match(/\bpost-type-archive-([a-z0-9_-]+)/i);
+  return m ? m[1] : null;
+}
+
 // Build findings + draft proposals for one URL.
 export async function auditPage(url, { creds, withContent = false, siteId = null, seoPlugin = null } = {}) {
   // 1) Detailed PSI across all four categories

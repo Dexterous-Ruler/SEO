@@ -22,7 +22,7 @@ import { prioritize } from '../src/lib/prioritize.js';
 import { prioritizeFindings } from './prioritization.js';
 import { auditHtml } from '../src/phases/04-seo.js';
 import { detectStack } from './detect.js';
-import { auditPage, proposeFromFinding, metaFieldMap, writeMetaResilient, rendersAsArchive } from './audit-pipeline.js';
+import { auditPage, proposeFromFinding, metaFieldMap, writeMetaResilient, rendersAsArchive, archivePostType } from './audit-pipeline.js';
 import { db, credsForSite } from './supabase.js';
 import * as claude from './claude.js';
 import { detectLiveCms } from './site-health.js';
@@ -2388,20 +2388,43 @@ const routes = {
       const curDesc = ((head.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)/i) || [])[1] || '').trim();
       const curTitle = ((head.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '').replace(/&[a-z#0-9]+;/gi, ' ').trim();
       rec.hadDesc = curDesc.length; rec.hadTitle = curTitle.length;
-      // This URL may be served by a post-type archive rather than the Page we hold an
-      // ID for. Writing that page's meta verifies but can never render (bridge is
-      // is_singular()-only), so skip it honestly instead of banking a fake win.
-      if (html && rendersAsArchive(html)) {
-        rec.descStatus = 'not-applicable (URL renders a post-type archive, not this page)';
-        rec.archive = true;
-        out.push(rec);
-        continue;
-      }
       // Body signal for the generator: headings + first real prose.
       const headings = (html.match(/<h[12][^>]*>[\s\S]*?<\/h[12]>/gi) || []).map((x) => x.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 8);
       const excerpt = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ')
         .replace(/<(nav|header|footer|aside|form|noscript|svg)\b[\s\S]*?<\/\1>/gi, ' ')
         .replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim().slice(0, 1200);
+      // This URL may be served by a post-type archive rather than the Page we hold an
+      // ID for. Meta written to that page verifies but can never render (the bridge is
+      // is_singular()-only), so archives take the option-backed path instead.
+      if (html && rendersAsArchive(html)) {
+        rec.archive = true;
+        const pt = archivePostType(html);
+        // Addressable archives get real copy through the archive-meta option; anything
+        // else (category/date/author) we report honestly rather than fake a write.
+        if (!pt || curDesc.length >= 70) {
+          rec.descStatus = !pt
+            ? 'not-applicable (URL renders an archive this repair cannot address)'
+            : 'ok (already set)';
+          out.push(rec); continue;
+        }
+        try {
+          let desc = String(await claude.metaDescription({ url: it.url, title: curTitle || it.title, headings, excerpt, siteId: body.siteId })).replace(/^["']|["']$/g, '').trim();
+          if (desc.length > 160) {
+            const cut = desc.slice(0, 160);
+            const lastStop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '));
+            desc = lastStop > 90 ? cut.slice(0, lastStop + 1) : cut.slice(0, cut.lastIndexOf(' ')).replace(/[,;:\-–—]$/, '') + '.';
+          }
+          rec.desc = desc.replace(/\s+/g, ' ').trim();
+          rec.archivePostType = pt;
+          if (body.dryRun) rec.descStatus = 'dry-run';
+          else {
+            const r = await wp.request(`${creds.baseUrl}/wp-json/seoagent/v1/archive-meta`, { method: 'POST', body: { post_type: pt, description: rec.desc } });
+            const stuck = r && r.ok && r.stored && String(r.stored.description || '') === rec.desc;
+            rec.descStatus = stuck ? 'verified' : 'failed: archive-meta write did not stick';
+          }
+        } catch (e) { rec.descStatus = 'failed: ' + String(e.message || e).slice(0, 80); }
+        out.push(rec); continue;
+      }
       // 3) Meta description — generate only when genuinely missing or too short to rank.
       if (curDesc.length < 70) {
         try {
