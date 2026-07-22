@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.21.0
+ * Version:     1.21.1
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.21.0';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.21.1';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -88,6 +88,25 @@ class SEO_Agent_Optimize {
         add_filter('rank_math/opengraph/facebook/og_description', [$this, 'seo_bridge_desc'], 20);
         add_filter('rank_math/opengraph/twitter/twitter_title', [$this, 'seo_bridge_title'], 20);
         add_filter('rank_math/opengraph/twitter/twitter_description', [$this, 'seo_bridge_desc'], 20);
+        /* Applied metadata goes through CORE /wp/v2/{type}/{id}, never one of this
+           plugin's own routes — so it never reached purge(), and a cached page kept
+           serving the OLD head until the cache expired on its own. That is a large
+           part of why an approved fix reads as "not applied" when you check it
+           (verified on goodfor.app: the new og:* tags were live only with a
+           cache-busting query). Purge whenever one of the meta keys we render changes. */
+        foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $h) {
+            add_action($h, [$this, 'purge_on_meta_change'], 10, 3);
+        }
+    }
+
+    /* Purge caches when an SEO meta key this plugin renders is written. $meta_id is
+       first for these hooks; we only care about the post id and key. */
+    public function purge_on_meta_change($meta_id, $post_id, $meta_key) {
+        $k = (string) $meta_key;
+        if (strpos($k, '_seoagent_') !== 0 && strpos($k, 'rank_math_') !== 0) return;
+        if (function_exists('clean_post_cache')) clean_post_cache($post_id);
+        if (function_exists('rocket_clean_post')) { rocket_clean_post($post_id); return; }
+        $this->purge();
     }
 
     /* ── Sentinel-owned SEO meta: register for REST so writes actually stick ───
@@ -854,6 +873,9 @@ class SEO_Agent_Optimize {
                     if (function_exists('opcache_invalidate')) { @opcache_invalidate($file, true); }   // drop the bad bytecode too
                     return new WP_Error('health', 'new version failed health-check (HTTP ' . $rc . ') — rolled back to ' . self::VERSION, ['status' => 500]);
                 }
+                // A cached page keeps serving head markup built by the OLD version, so a
+                // successful upgrade looks like it did nothing until the cache expires.
+                $this->purge();
                 return ['ok' => true, 'updated_to' => $ver, 'health' => $rc];
             },
         ]);
