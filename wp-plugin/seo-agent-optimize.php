@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.22.0
+ * Version:     1.22.1
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.22.0';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.22.1';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -30,7 +30,9 @@ class SEO_Agent_Optimize {
     private $gen_buf  = false;  // true while the generator-strip buffer is open
 
     public function __construct() {
-        add_action('init', [$this, 'register_meta_keys']);
+        // Priority 99 so custom post types (registered on init at the default priority 10)
+        // already exist when we enumerate public types to register our meta on them.
+        add_action('init', [$this, 'register_meta_keys'], 99);
         add_action('template_redirect', [$this, 'gen_buf_start'], 0);
         add_action('template_redirect', [$this, 'start_webp_buffer'], 1);
         // Wrap wp_head in a buffer (priority 0 → 999) so we can inject a missing
@@ -120,8 +122,14 @@ class SEO_Agent_Optimize {
        keys makes the agent's apply-meta writes (verify-after-write) succeed. */
     public function register_meta_keys() {
         $auth = function () { return current_user_can('edit_posts'); };
+        // Register on EVERY public, REST-enabled post type — not just post/page. Custom
+        // post types (e.g. settlement's `expertise` / `client-story`) otherwise reject the
+        // REST meta write silently (200 OK, value discarded), which is exactly why the
+        // cross-site brand fix "returned OK but did NOT stick" on those pages.
+        $types = get_post_types(['public' => true, 'show_in_rest' => true], 'names');
+        $types = array_values(array_unique(array_merge(['post', 'page'], (array) $types)));
         foreach (self::META_KEYS as $key) {
-            foreach (['post', 'page'] as $obj) {
+            foreach ($types as $obj) {
                 register_post_meta($obj, $key, [
                     'type' => 'string', 'single' => true, 'show_in_rest' => true,
                     'auth_callback' => $auth,
