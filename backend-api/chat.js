@@ -296,9 +296,17 @@ export function metaKeyFor(field, seoPlugin) {
 // Execute a tool call for a given siteId. Returns a string result.
 // `turn` (optional) carries per-turn provenance: which URLs were ACTUALLY read, and how.
 // push_article_brief consults it so a brief can never claim a source the model never read.
+const CHAT_ACTION_TOOLS = new Set(['apply_page_meta', 'apply_schema_to_page', 'apply_site_css', 'push_keywords_to_airtable', 'push_article_brief']);
+
 async function runTool(name, input, siteId, turn) {
   try {
     if (!siteId && name !== 'fetch_url') return 'No site is selected. Ask the user to pick an account first.';
+    // Kill-switch enforcement. Chat action tools call the WP/Airtable clients directly and
+    // never pass through the server dispatcher's WRITE_ROUTE_RE gate, so with writes
+    // "paused" the chat could still write live. Honour the same server-enforced switch here.
+    if (CHAT_ACTION_TOOLS.has(name)) {
+      try { if ((await db.getAppSecret('kill_switch')) === '1') return 'The kill switch is engaged — all live writes are paused (Admin screen). I can prepare the change, but I cannot apply it until writes are re-enabled.'; } catch (e) {}
+    }
     if (name === 'fetch_url') {
       const p = await readPage(input.url, siteId);
       if (p.error || !p.text) {
@@ -476,6 +484,21 @@ async function runTool(name, input, siteId, turn) {
         keywords = (r.clusters || []).filter((c) => c.isGap).map((c) => c.primaryKeyword).filter(Boolean);
       }
       if (!keywords.length) return 'No content-gap keywords found to push.';
+      // Niche-filter before pushing so off-niche junk never reaches the writer table.
+      // Explicitly-passed keywords used to go straight through unfiltered, which is how
+      // "monkey app" (goodfor), "diversity visa lottery australia" (go-visa) and "self
+      // assessment tax return" (go-legal.ai) landed in the writer queues. The site's
+      // geo_context is the service context; the filter drops same-industry-wrong-service
+      // and wrong-market terms.
+      try {
+        const s = await db.getSite(siteId).catch(() => null);
+        const niche = s && s.geo_context ? String(s.geo_context) : null;
+        if (niche && keywords.length > 1) {
+          const kept = await claudeMod.filterKeywordsByNiche({ keywords, niche, siteName: s && s.name, siteId });
+          if (Array.isArray(kept) && kept.length) keywords = kept;
+        }
+      } catch (e) { /* filter is best-effort — never block the push */ }
+      if (!keywords.length) return 'After niche-filtering, none of those keywords fit this site’s services — nothing pushed.';
       const res = await airtable.pushKeywords(pat, cfg.base_id, cfg.table_gaps, cfg.table_content || 'Keyword', keywords);
       await db.logAirtableSync({ site_id: siteId, kind: 'keywords', records_pushed: res.pushed, status: 'ok' }).catch(() => {});
       await db.upsertAirtableConfig(siteId, { last_sync: new Date().toISOString() }).catch(() => {});
@@ -605,6 +628,24 @@ async function runTool(name, input, siteId, turn) {
 
 // Build the system prompt with the site already injected (so it's site-aware
 // from message 1, even before any tool call).
+// Fit geo_context into the system prompt without dropping the SERVICES section. The old
+// flat slice(0,2500) truncated from the top, so on sites whose geo_context puts "Services
+// we provide" later in the document the model never saw it and drifted generic (the root
+// of the off-niche keyword/content complaints). Keep a generous head, and if a services
+// section falls beyond it, splice that section in too.
+function geoContextForPrompt(raw) {
+  const txt = String(raw || '');
+  const HEAD = 4500, MAX = 6500;
+  if (txt.length <= MAX) return txt;
+  let out = txt.slice(0, HEAD);
+  const m = txt.slice(HEAD).match(/(services?\s+(we\s+)?(provide|offer)|what\s+we\s+do|our\s+services)/i);
+  if (m) {
+    const start = HEAD + m.index;
+    out += '\n…\n' + txt.slice(start, start + (MAX - HEAD));
+  }
+  return out;
+}
+
 function buildSystem(siteCtx, siteId) {
   const s = siteCtx || {};
   return `You are Sentinel's senior SEO & content strategist, working on a SPECIFIC WordPress site.
@@ -614,7 +655,7 @@ ${s.stack ? 'Stack: ' + [s.stack.builder, s.stack.seo, s.stack.cache].filter(Boo
 ${s.scale ? `Scale: ${s.scale.posts || 0} posts, ${s.scale.pages || 0} pages.` : ''}
 ${s.scores ? `Latest scores — Perf ${s.scores.performance}, A11y ${s.scores.accessibility}, SEO ${s.scores.seo}.` : ''}
 ${s.competitors && s.competitors.length ? 'Tracked competitors: ' + s.competitors.join(', ') + '.' : ''}
-${s.geo_context ? `\n=== THIS SITE'S NICHE & SERVICES (author strictly for this — do not drift generic) ===\n${String(s.geo_context).slice(0, 2500)}\n` : ''}
+${s.geo_context ? `\n=== THIS SITE'S NICHE & SERVICES (author strictly for this — do not drift generic) ===\n${geoContextForPrompt(s.geo_context)}\n` : ''}
 ${P('chat.assistant', siteId)}`;
 }
 

@@ -2315,9 +2315,25 @@ const routes = {
     const { creds, site } = await resolveCreds(body);
     if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'site is read-only (write not armed)' };
     const wp = clientFrom(creds);
+    const css = String(body.css || '').trim();
+    if (!css) return { error: 'No CSS to apply.' };
     try {
-      const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/css`, { method: 'POST', body: { css: body.css || '' } });
-      if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: 'Applied custom CSS to live site', meta: (r && r.bytes) ? r.bytes + ' bytes' : '' }).catch(() => {});
+      // ACCUMULATE, don't overwrite. This route used to POST body.css straight to the
+      // mu-plugin /css store, REPLACING whatever was there — so applying the CSS-fixes
+      // tab wiped every previously-applied per-proposal fix, and the live <style> often
+      // ended up empty. Store this blob under a stable key and rebuild the live bundle as
+      // the UNION of every stored rule group (same store /apply-css-fixes uses).
+      if (site) {
+        await db.upsertCssFix(site.id, { proposalId: 'css-tab', auditId: 'css-tab', note: 'CSS Fixes tab', css });
+        const rows = await db.listCssFixes(site.id);
+        const bundle = `/* seo-agent accumulated CSS fixes — ${rows.length} rule group(s), rebuilt ${new Date().toISOString().slice(0, 10)} */\n`
+          + rows.map((r) => `\n/* [${r.audit_id || r.proposal_id || 'rule'}]${r.note ? ' ' + r.note : ''} */\n${r.css}`).join('\n');
+        const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/css`, { method: 'POST', body: { css: bundle } });
+        await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: 'Applied custom CSS to live site', meta: `bundle now ${rows.length} rule group(s)` }).catch(() => {});
+        return { ok: true, ruleGroups: rows.length, ...r };
+      }
+      // Raw-creds callers (no site row) — direct write, nothing to accumulate against.
+      const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/css`, { method: 'POST', body: { css } });
       return { ok: true, ...r };
     } catch (e) { return { error: 'Apply failed — is the seo-agent-optimize mu-plugin installed? ' + e.message }; }
   },
