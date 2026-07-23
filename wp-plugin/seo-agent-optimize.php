@@ -8,7 +8,7 @@
  *   (3) injects site-wide custom CSS; (4) inserts internal/external links into
  *   page content AND Elementor widgets (/insert-link). REST endpoints let the agent
  *   store schema/CSS and add links. Everything is reversible (clear the value/delete).
- * Version:     1.22.1
+ * Version:     1.22.2
  * Author:      wp-seo-agent
  *
  * INSTALL: copy to wp-content/mu-plugins/ (create the folder if it doesn't exist).
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) { exit; }
 
 class SEO_Agent_Optimize {
 
-    const VERSION = '1.22.1';   // single source of truth (keep in sync with the header above)
+    const VERSION = '1.22.2';   // single source of truth (keep in sync with the header above)
 
     /* Sentinel-owned SEO meta keys. Written by the agent via core REST post-meta
        (so they MUST be registered with show_in_rest), rendered into <head> by us
@@ -122,12 +122,17 @@ class SEO_Agent_Optimize {
        keys makes the agent's apply-meta writes (verify-after-write) succeed. */
     public function register_meta_keys() {
         $auth = function () { return current_user_can('edit_posts'); };
-        // Register on EVERY public, REST-enabled post type — not just post/page. Custom
-        // post types (e.g. settlement's `expertise` / `client-story`) otherwise reject the
-        // REST meta write silently (200 OK, value discarded), which is exactly why the
-        // cross-site brand fix "returned OK but did NOT stick" on those pages.
-        $types = get_post_types(['public' => true, 'show_in_rest' => true], 'names');
+        // Register on EVERY REST-enabled post type — not just post/page. Custom post types
+        // (e.g. settlement's `expertise` / `client-story`) otherwise reject the REST meta
+        // write silently (200 OK, value discarded) — why the cross-site brand fix "returned
+        // OK but did NOT stick". Use show_in_rest (NOT public) as the filter, since a CPT
+        // can be REST-exposed without being `public`, and add custom-fields support so the
+        // REST meta endpoint is actually mounted for it.
+        $types = get_post_types(['show_in_rest' => true], 'names');
         $types = array_values(array_unique(array_merge(['post', 'page'], (array) $types)));
+        foreach ($types as $obj) {
+            if (!post_type_supports($obj, 'custom-fields')) add_post_type_support($obj, 'custom-fields');
+        }
         foreach (self::META_KEYS as $key) {
             foreach ($types as $obj) {
                 register_post_meta($obj, $key, [
