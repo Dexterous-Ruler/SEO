@@ -102,6 +102,17 @@ async function elementorContentState(wp, postId) {
   } catch (e) { return { elementor: false, widgets: [] }; }
 }
 
+// Enforce the content style rules the model must never violate, no matter what it emits:
+//  • no horizontal rules / divider lines (section breaks) in article content;
+//  • no standalone "Related Resources / Further Reading / Useful Links / See Also"
+//    link-dump section (its heading + everything to the next heading/end is removed).
+function stripBannedContentBlocks(html) {
+  let s = String(html || '');
+  s = s.replace(/<hr\b[^>]*>/gi, '');
+  s = s.replace(/<h([1-3])\b[^>]*>\s*(?:related\s+resources|further\s+reading|useful\s+links|see\s+also|related\s+(?:articles|reading|links|guides|posts))\s*<\/h\1>[\s\S]*?(?=<h[1-3]\b|$)/gi, '');
+  return s.replace(/(\r?\n){3,}/g, '\n\n').trim();
+}
+
 // The heavy part of a content rewrite = decayBrief + refreshArticle (two Claude calls).
 // On long pages this exceeds the edge gateway's ~100s response cap → 504. So it runs in
 // the BACKGROUND (started via /content-rewrite {start:true}); the client polls
@@ -118,7 +129,13 @@ async function generateRewritePreview({ wp, found, page, site, siteId, brief }) 
   let newHtml = '';
   try { newHtml = await claude.refreshArticle({ page: { ...page, title }, currentContent: rawHtml || rawText, brief: br, siteId }); }
   catch (e) { return { error: 'Rewrite failed: ' + e.message }; }
-  const clean = String(newHtml || '').replace(/^\s*```(?:html)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+  // Defensive: strip anything the style rules forbid, regardless of the model —
+  //  • horizontal rules / divider lines (Karim: never section-break lines in content)
+  //  • a trailing "Related Resources / Further Reading" link-dump section (Karim: no
+  //    random link lists — internal links must be woven into the prose instead).
+  const clean = stripBannedContentBlocks(
+    String(newHtml || '').replace(/^\s*```(?:html)?\s*/i, '').replace(/\s*```\s*$/i, '').trim()
+  );
   if (clean.length < 80) return { error: 'The rewrite came back empty — try again.' };
   return { status: 'preview', postId: found.id, type: found.type, title, brief: br, newHtml: clean,
     oldWords: rawText.split(/\s+/).filter(Boolean).length, newWords: clean.replace(/<[^>]+>/g, ' ').split(/\s+/).filter(Boolean).length };
@@ -3026,7 +3043,7 @@ const routes = {
     // Apply a REVIEWED rewrite directly — publish exactly what was previewed (no re-generation).
     if (body.apply && body.html && String(body.html).trim().length > 80) {
       if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then apply the rewrite.' };
-      const clean = String(body.html).replace(/^\s*```(?:html)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+      const clean = stripBannedContentBlocks(String(body.html).replace(/^\s*```(?:html)?\s*/i, '').replace(/\s*```\s*$/i, '').trim());
       const elx = await elementorContentState(wp, found.id);
       if (elx.elementor && elx.widgets.length && !body.force) return { status: 'manual-builder', builder: 'Elementor', canElementorPush: true, postId: found.id, type: found.type, url: pageUrl, newHtml: clean, reason: 'This page’s content lives in Elementor widgets — writing it to the raw content field would break the layout. Use “Push into Elementor (safe)” (it swaps only the article widget, and saves a backup).', reversible: 'Reversible — a backup is saved (use Restore).' };
       const upd = await wp.update(found.type, found.id, { content: balanceBlockTags(clean) }, { force: true });   // balance tags so it can't break out of the theme’s content widget
