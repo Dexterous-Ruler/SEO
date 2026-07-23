@@ -295,9 +295,10 @@ ${(currentContent || '').slice(0, 24000)}
 ${links || '(none available — add NO internal links rather than invent any)'}
 
 STYLE RULES (these OVERRIDE the brief — obey even if the brief says otherwise):
-- Internal links: link ONLY to exact URLs from the list above. NEVER invent, guess or modify a URL, and never link to an email address. If nothing fits, add no link.
+- NEVER display a raw/bare URL as visible text. EVERY link must be a proper <a href="…">natural anchor text</a> hyperlink — e.g. write <a href="…">book a free consultation</a>, never the literal "https://…" as words.
+- Internal links: the href must be an EXACT URL from the list above. NEVER invent, guess or modify a URL, and never link to an email address. If nothing fits, add no link.
+- Calls to action: send readers to BOOK A FREE CONSULTATION — hyperlink an anchor like "book a free consultation" to the site's consultation/booking page (choose it from the list above: a URL containing "free-consultation", "book", "consult", "appointment" or, failing those, "contact"). You may also give the phone number. NEVER tell readers to email and never output an email address as a CTA.
 - No dividers/section-break lines (no <hr>). No "Related Resources / Further Reading / Useful Links" list section — weave links into the prose.
-- Calls to action: send readers to the online booking/calendar form or to phone — NEVER "email us" and never output an email address as a CTA.
 - OMIT any section with no real, verified content — never a "No cases verified"/"None found"/placeholder row or empty table.
 
 Output ONLY the complete, updated article body as clean HTML. No preamble, no code fences, no commentary.`,

@@ -144,7 +144,12 @@ async function generateRewritePreview({ wp, found, page, site, siteId, brief, fe
     ]);
     linkCandidates = [...(Array.isArray(pg) ? pg : []), ...(Array.isArray(ps) ? ps : [])]
       .map((r) => ({ title: ((r.title && r.title.rendered) || '').replace(/&[a-z#0-9]+;/gi, ' ').trim(), url: r.link }))
-      .filter((p) => p.title && p.url).slice(0, 60);
+      .filter((p) => p.title && p.url);
+    // Put booking/consultation/contact pages FIRST so the CTA target is never truncated
+    // off the list (e.g. go-legal's /free-consultation/).
+    const isCta = (u) => /free-consultation|\/book|consult|appointment|\/contact/i.test(u || '');
+    linkCandidates.sort((a, b) => (isCta(b.url) ? 1 : 0) - (isCta(a.url) ? 1 : 0));
+    linkCandidates = linkCandidates.slice(0, 60);
   } catch (e) {}
   let newHtml = '';
   try { newHtml = await claude.refreshArticle({ page: { ...page, title }, currentContent: rawHtml || rawText, brief: br, linkCandidates, feedback, priorDraft, siteId }); }
