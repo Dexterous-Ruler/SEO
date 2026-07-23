@@ -108,8 +108,15 @@ async function elementorContentState(wp, postId) {
 //    link-dump section (its heading + everything to the next heading/end is removed).
 function stripBannedContentBlocks(html) {
   let s = String(html || '');
+  // horizontal rules / dividers
   s = s.replace(/<hr\b[^>]*>/gi, '');
+  // standalone "Related Resources / Further Reading …" link-dump section
   s = s.replace(/<h([1-3])\b[^>]*>\s*(?:related\s+resources|further\s+reading|useful\s+links|see\s+also|related\s+(?:articles|reading|links|guides|posts))\s*<\/h\1>[\s\S]*?(?=<h[1-3]\b|$)/gi, '');
+  // an EMPTY case-law / examples section — a "courts say / case law" heading whose block
+  // only contains a "no cases verified / none found" placeholder must be removed whole
+  // (Karim: if the case-law section has no cases, remove the entire section).
+  s = s.replace(/<h[1-3]\b[^>]*>[^<]*(?:courts?\s+say|case\s?law|case\s+examples|relevant\s+case|key\s+cases|notable\s+cases)[^<]*<\/h[1-3]>[\s\S]*?(?=<h[1-3]\b|$)/gi,
+    (block) => /no\s+cases?\s+verified|no\s+verified\s+case|none\s+(?:found|verified)|no\s+relevant\s+cases|no\s+case\s?law|not\s+verified\s+in\s+(?:the\s+)?(?:supplied\s+)?sources/i.test(block) ? '' : block);
   return s.replace(/(\r?\n){3,}/g, '\n\n').trim();
 }
 
@@ -126,8 +133,21 @@ async function generateRewritePreview({ wp, found, page, site, siteId, brief }) 
   const title = (post && post.title && (post.title.raw || post.title.rendered)) || page.title || '';
   let br = brief;
   if (!br) { try { br = await claude.decayBrief({ page, pageContext: { excerpt: rawText.slice(0, 4000) }, siteId }); } catch (e) { br = ''; } }
+  // Real internal-link targets from THIS site's published pages/posts, so the refresh can
+  // only link to URLs that actually exist (Karim: it was giving wrong internal URLs — the
+  // model invents them when it has no real list to draw from).
+  let linkCandidates = [];
+  try {
+    const [pg, ps] = await Promise.all([
+      wp.list('pages', { perPage: 100, fields: 'title,link' }).catch(() => []),
+      wp.list('posts', { perPage: 100, fields: 'title,link' }).catch(() => []),
+    ]);
+    linkCandidates = [...(Array.isArray(pg) ? pg : []), ...(Array.isArray(ps) ? ps : [])]
+      .map((r) => ({ title: ((r.title && r.title.rendered) || '').replace(/&[a-z#0-9]+;/gi, ' ').trim(), url: r.link }))
+      .filter((p) => p.title && p.url).slice(0, 60);
+  } catch (e) {}
   let newHtml = '';
-  try { newHtml = await claude.refreshArticle({ page: { ...page, title }, currentContent: rawHtml || rawText, brief: br, siteId }); }
+  try { newHtml = await claude.refreshArticle({ page: { ...page, title }, currentContent: rawHtml || rawText, brief: br, linkCandidates, siteId }); }
   catch (e) { return { error: 'Rewrite failed: ' + e.message }; }
   // Defensive: strip anything the style rules forbid, regardless of the model —
   //  • horizontal rules / divider lines (Karim: never section-break lines in content)

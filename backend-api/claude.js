@@ -269,8 +269,9 @@ ${(pageContext && pageContext.excerpt) || '(could not fetch the live page)'}`,
 // Full REWRITE of a decaying page — expand/update the EXISTING article per the decay
 // refresh brief (NOT a new article, NOT a bolt-on block). Returns the complete updated
 // post body as HTML. Editable prompt: content.refresh.
-export async function refreshArticle({ page, currentContent, brief, siteId }) {
+export async function refreshArticle({ page, currentContent, brief, linkCandidates, siteId }) {
   const p = page || {};
+  const links = (linkCandidates || []).slice(0, 60).map((c) => `${c.title} → ${c.url}`).join('\n');
   const txt = await complete({
     system: sys('content.refresh', siteId), promptKey: 'content.refresh',
     // A preserve-and-enhance of a long article must not be truncated by the token ceiling
@@ -289,6 +290,15 @@ ${brief || '(no brief supplied — improve depth, freshness, structure, FAQs and
 
 === CURRENT PAGE CONTENT (refresh/expand THIS; keep it; do not invent facts beyond it and the brief) ===
 ${(currentContent || '').slice(0, 24000)}
+
+=== REAL INTERNAL-LINK TARGETS (this site's actual pages — the ONLY URLs you may link to) ===
+${links || '(none available — add NO internal links rather than invent any)'}
+
+STYLE RULES (these OVERRIDE the brief — obey even if the brief says otherwise):
+- Internal links: link ONLY to exact URLs from the list above. NEVER invent, guess or modify a URL, and never link to an email address. If nothing fits, add no link.
+- No dividers/section-break lines (no <hr>). No "Related Resources / Further Reading / Useful Links" list section — weave links into the prose.
+- Calls to action: send readers to the online booking/calendar form or to phone — NEVER "email us" and never output an email address as a CTA.
+- OMIT any section with no real, verified content — never a "No cases verified"/"None found"/placeholder row or empty table.
 
 Output ONLY the complete, updated article body as clean HTML. No preamble, no code fences, no commentary.`,
     }],
