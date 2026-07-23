@@ -721,7 +721,12 @@ function HealthGaugeCard({ ctx, run }) {
               <span style={{ fontSize:46, fontWeight:800, color:tealForScore(avg), lineHeight:1 }}>{auditing?shownAvg:Math.round(shownAvg)}</span>
               <span style={{ fontSize:12, color:"var(--muted)", fontWeight:600, marginTop:4 }}>out of 100</span></>} />
         </div>
-        <Chip tone="teal" size="sm" icon="trend">+4 vs last audit</Chip>
+        {(()=>{ // real delta vs the previous audit — hidden when there's no genuine prior score
+          const p=s.prev; const prevAvg=p?Math.round((p.performance+p.accessibility+p.bestPractices+p.seo)/4):0;
+          if(!prevAvg) return null;
+          const d=avg-prevAvg; const tone=d>0?"teal":d<0?"clay":"gray";
+          return <Chip tone={tone} size="sm" icon="trend">{d>0?("+"+d):d<0?(""+d):"±0"} vs last audit</Chip>;
+        })()}
       </div>
       <div className="card-foot" style={{ width:"100%" }}>
         <button onClick={()=>ctx.goto("review")} className="nav-item row-link" style={{ width:"100%", display:"flex", alignItems:"center", gap:9, padding:"10px 13px", borderRadius:13, background:"var(--bg)", boxShadow:"var(--neo-in)", marginBottom:13 }}>
@@ -835,25 +840,32 @@ function Spark({ points, color, w=58, h=26, fmt }) {
 function CWVCard({ ctx }) {
   const s = ctx.site;
   const [maxed,setMaxed] = useState(false);
+  // Real sparklines from saved audit history (each audit stores cwv), NOT a hardcoded
+  // trend. Fewer than 2 real points → no sparkline rather than a fabricated one. And
+  // these are Lighthouse LAB values (m.v), so they are labelled as such — never "field
+  // data / p75", which would falsely imply CrUX real-user measurement.
+  const hist = (ctx.history||[]).filter(h=>h && h.cwv);
+  const num = (x)=>{ const n=parseFloat(String(x==null?"":x).replace(/[^0-9.]/g,"")); return isFinite(n)?n:null; };
+  const series = (key)=>{ const arr=hist.map(h=>num(h.cwv&&h.cwv[key]&&h.cwv[key].v)).filter(v=>v!=null); return arr.length>=2?arr.slice(-7):null; };
   const rows = [
-    ["LCP", s.cwv.lcp, [2.4,2.8,3.0,2.9,3.2,3.1,3.1], v=>v.toFixed(1)+"s"],
-    ["INP", s.cwv.inp, [240,210,205,195,185,182,180], v=>Math.round(v)+"ms"],
-    ["CLS", s.cwv.cls, [0.12,0.10,0.09,0.07,0.05,0.04,0.04], v=>v.toFixed(2)],
+    ["LCP", s.cwv.lcp, series("lcp"), v=>v.toFixed(1)+"s"],
+    ["INP", s.cwv.inp, series("inp"), v=>Math.round(v)+"ms"],
+    ["CLS", s.cwv.cls, series("cls"), v=>v.toFixed(2)],
   ];
   const map = { good:["teal","Good"], ni:["gold","Fair"], poor:["clay","Poor"], na:["gray","—"] };
   return (
     <SoftCard>
-      <SectionHead sub="Real-user field data" right={<MaxBtn onClick={()=>setMaxed(true)} />}>Core Web Vitals</SectionHead>
-      <ChartModal open={maxed} onClose={()=>setMaxed(false)} title="Core Web Vitals" sub="Real-user field data · trailing 28 days">
+      <SectionHead sub="Lighthouse lab" right={<MaxBtn onClick={()=>setMaxed(true)} />}>Core Web Vitals</SectionHead>
+      <ChartModal open={maxed} onClose={()=>setMaxed(false)} title="Core Web Vitals" sub="Lighthouse lab · trend across saved audits">
         <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
           {rows.map(([l,m,sp,fmt])=>{ const [tone,lab]=map[m.state]||map.na, [fg]=TT[tone]; return (
             <Well key={l} pad={20}>
               <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:10 }}>
                 <div style={{ width:48, height:48, borderRadius:14, background:"var(--surface)", boxShadow:"var(--neo-sm)", display:"grid", placeItems:"center", fontSize:13, fontWeight:800, color:fg }}>{l}</div>
-                <div style={{ flex:1 }}><div style={{ fontSize:24, fontWeight:800, fontFamily:"var(--mono)", color:fg, lineHeight:1 }}>{m.v}</div><div style={{ fontSize:11, color:"var(--muted)", marginTop:3 }}>p75 · {l==="LCP"?"Largest Contentful Paint":l==="INP"?"Interaction to Next Paint":"Cumulative Layout Shift"}</div></div>
+                <div style={{ flex:1 }}><div style={{ fontSize:24, fontWeight:800, fontFamily:"var(--mono)", color:fg, lineHeight:1 }}>{m.v}</div><div style={{ fontSize:11, color:"var(--muted)", marginTop:3 }}>lab · {l==="LCP"?"Largest Contentful Paint":l==="INP"?"Interaction to Next Paint":"Cumulative Layout Shift"}</div></div>
                 <Chip tone={tone} dot>{lab}</Chip>
               </div>
-              <BigSpark points={sp} color={fg} fmt={fmt} />
+              {sp ? <BigSpark points={sp} color={fg} fmt={fmt} /> : <div style={{ fontSize:11.5, color:"var(--muted)", padding:"6px 2px" }}>Trend appears after 2+ audits.</div>}
             </Well>
           ); })}
         </div>
@@ -866,16 +878,16 @@ function CWVCard({ ctx }) {
               <div style={{ width:42, height:42, borderRadius:13, background:"var(--bg)", boxShadow:"var(--neo-in)", display:"grid", placeItems:"center", fontSize:12, fontWeight:800, color:fg, flexShrink:0 }}>{l}</div>
               <div style={{ minWidth:62 }}>
                 <div style={{ fontSize:17, fontWeight:800, fontFamily:"var(--mono)", color:fg, lineHeight:1 }}>{m.v}</div>
-                <div style={{ fontSize:10, color:"var(--muted)", marginTop:3, fontWeight:600 }}>p75</div>
+                <div style={{ fontSize:10, color:"var(--muted)", marginTop:3, fontWeight:600 }}>lab</div>
               </div>
-              <div style={{ flex:1, display:"flex", justifyContent:"center" }}><Spark points={sp} color={fg} fmt={fmt} /></div>
+              <div style={{ flex:1, display:"flex", justifyContent:"center" }}>{sp ? <Spark points={sp} color={fg} fmt={fmt} /> : <span style={{ fontSize:10.5, color:"var(--muted)" }}>—</span>}</div>
               <Chip tone={tone} size="sm" dot>{lab}</Chip>
             </div>
           );
         })}
       </div>
       <div className="card-foot" style={{ marginTop:16, paddingTop:13, borderTop:"1px solid var(--line-soft)", fontSize:11.5, color:"var(--muted)", display:"flex", alignItems:"center", gap:6 }}>
-        <Icon name="clock" size={13} />Field data · trailing 28 days
+        <Icon name="clock" size={13} />Lighthouse lab · latest audit
       </div>
     </SoftCard>
   );
@@ -883,10 +895,14 @@ function CWVCard({ ctx }) {
 
 function ActivityCard({ ctx }) {
   const tone = { verified:"teal", approved:"teal", applied:"plum", "rolled-back":"gold", audit:"plum", connection:"gray", failed:"clay" };
-  const items = ACTIVITY.slice(0,4);
+  // Live activity — the same source NotifBell + the Activity screen use. Reading the
+  // module-level ACTIVITY mock here meant the dashboard showed a demo trail (Atlas /
+  // Verde "401 Unauthorized") in live mode; window.ACTIVITY is set to [] in live mode.
+  const items = ((typeof window!=="undefined" && window.ACTIVITY) || ACTIVITY).slice(0,4);
   return (
     <SoftCard>
       <SectionHead sub="Every action is logged" right={<NeoButton kind="ghost" size="sm" iconR="chevR" onClick={()=>ctx.goto("activity")}>All</NeoButton>}>Recent Activity</SectionHead>
+      {items.length===0 && <div style={{ padding:"14px 4px", color:"var(--muted)", fontSize:13 }}>No activity yet — run an audit or apply a fix.</div>}
       <div style={{ display:"flex", flexDirection:"column" }}>
         {items.map((a,i)=>{
           const [fg,bg]=TT[tone[a.type]||"gray"];
@@ -1212,7 +1228,7 @@ function AdminScreen({ ctx }) {
                 <PatternCard icon="check" tone="teal" value={okCount+"/"+ints.length} title="Integrations live" sub="API connections configured" />
                 <PatternCard icon="doc" tone="plum" value={(stat.prompts&&stat.prompts.count)||0} title="AI prompts" sub={((stat.prompts&&stat.prompts.overridden)||0)+" customised"} />
                 <PatternCard icon="globe" tone="gold" value={stat.country||"UK"} title="Target market" sub="active site's research scope" />
-                <PatternCard icon="shield" tone={stat.server&&stat.server.dryRun?"gray":"clay"} value={stat.server&&stat.server.dryRun?"DRY-RUN":"LIVE writes"} title="Write mode" sub={stat.server&&stat.server.dryRun?"safe — no live writes":"approved writes go live"} />
+                <PatternCard icon="shield" tone={stat.server&&stat.server.writesPaused?"gray":"clay"} value={stat.server&&stat.server.writesPaused?"PAUSED":"LIVE writes"} title="Write mode" sub={stat.server&&stat.server.writesPaused?"kill switch on — writes blocked":"armed sites write live"} />
               </div>
               <SoftCard hover={false}>
                 <SectionHead sub="Every external service the platform depends on">Integrations</SectionHead>
@@ -2417,8 +2433,8 @@ function OptimizeScreen({ ctx }) {
   useEffect(()=>{ if(live) API.siteHealth(s.id).then(r=>setHealth(r||{})).catch(()=>{}); },[s.id]);
   const copy = (t)=>{ try{ navigator.clipboard.writeText(t); ctx.toast("Copied to clipboard","teal"); }catch(e){ ctx.toast("Copy failed","gold"); } };
   // Apply schema/CSS straight to the live site (needs the seo-agent-optimize mu-plugin).
-  const applySchemaLive = ()=>{ if(!schema){return;} setBusy("applySchema"); API.applySchema(s.id,{ url:pageUrl, jsonld:schema.json }).then(r=>{ if(r.error){ctx.toast("Schema: "+r.error,"clay");return;} ctx.toast("Schema applied to the live page ✓","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
-  const applyCssLive = ()=>{ if(!css){return;} setBusy("applyCss"); API.applyCss(s.id, css.css).then(r=>{ if(r.error){ctx.toast("CSS: "+r.error,"clay");return;} ctx.toast("CSS applied to the live site ✓","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
+  const applySchemaLive = ()=>{ if(!schema){return;} setBusy("applySchema"); API.applySchema(s.id,{ url:pageUrl, jsonld:schema.json }).then(r=>{ if(r.status==="blocked"){ctx.toast(r.reason||"Site is read-only — arm writes on Admin first.","gold");return;} if(r.error){ctx.toast("Schema: "+r.error,"clay");return;} if(r.rendered===false){ctx.toast(r.warning||"Schema stored, but no JSON-LD block was found rendering on the page.","gold");return;} ctx.toast("Schema applied to the live page ✓","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
+  const applyCssLive = ()=>{ if(!css){return;} setBusy("applyCss"); API.applyCss(s.id, css.css).then(r=>{ if(r.status==="blocked"){ctx.toast(r.reason||"Site is read-only — arm writes on Admin first.","gold");return;} if(r.error){ctx.toast("CSS: "+r.error,"clay");return;} ctx.toast("CSS applied to the live site ✓","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy("")); };
 
   const findLinks = ()=>{ const sid=s.id; setBusy("links"); setErr(null); API.internalLinks(sid,{maxSources:8}).then(r=>{ if(r.error){setErr(r.error);return;} setLinks(Object.assign({_siteId:sid},r)); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const genExt = ()=>{ if(!pageUrl){ctx.toast("Enter a page URL","gold");return;} const sid=s.id; setBusy("ext"); setErr(null); API.externalLinks(sid,pageUrl).then(r=>{ if(r.error){setErr(r.error);return;} setExt(Object.assign({_siteId:sid},r)); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
@@ -2468,14 +2484,31 @@ function OptimizeScreen({ ctx }) {
   const genCss = ()=>{ setBusy("css"); setErr(null); API.generateCss(s.id).then(r=>{ if(r.error){setErr(r.error);return;} setCss(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const scanMedia = ()=>{ setBusy("scan"); setErr(null); API.mediaScan(s.id).then(r=>{ if(r.error){setErr(r.error);return;} setMedia(r); }).catch(e=>setErr(e.message)).finally(()=>setBusy("")); };
   const [optProg,setOptProg] = useState(null); // {done,total} while converting all
+  // Run ONE image-optimize batch as a background job (start → poll), so a heavy
+  // library that takes minutes never 504s the way the old synchronous call did.
+  const runMediaBatch = async (apply, max)=>{
+    const st = await API.mediaOptimizeStart(s.id,{apply,max});
+    if(st && st.error) return { error: st.error };
+    if(st && st.status==="blocked") return { error: st.reason||"site is read-only" };
+    for(let i=0;i<160;i++){ // up to ~13 min (matches the 20-min server job cap)
+      await new Promise(r=>setTimeout(r, 5000));
+      const stat = await API.mediaOptimizeStatus(s.id);
+      if(!stat) continue;
+      if(stat.status==="running"){ if(stat.progress) setOptProg(p=>({done:(p&&p.done||0)+(stat.progress.done||0),total:(p&&p.total)||stat.progress.total||0})); continue; }
+      if(stat.status==="error") return { error: stat.error||"optimization failed" };
+      if(stat.status==="unknown") return { error: "The run was lost (server restart) — click again to resume." };
+      return stat; // done: carries processed/uploaded/savedKB/remaining/...
+    }
+    return { error: "Still running after 13 min — check back shortly." };
+  };
   const optimizeMedia = async (apply)=>{
-    if(!apply){ // preview: single call
+    if(!apply){ // preview: single background batch
       setBusy("preview");
-      try{ const r=await API.mediaOptimize(s.id,{apply:false,max:10}); if(r.error){ctx.toast("Images: "+r.error,"clay");} else { ctx.toast("Preview: "+r.processed+" image(s) · ~"+r.savedKB+" KB potential saving (no write)","teal"); setMedia(m=>({...(m||{}),lastRun:r})); } }
+      try{ const r=await runMediaBatch(false,10); if(r.error){ctx.toast("Images: "+r.error,"clay");} else { ctx.toast("Preview: "+r.processed+" image(s) · ~"+r.savedKB+" KB potential saving (no write)","teal"); setMedia(m=>({...(m||{}),lastRun:r})); } }
       catch(e){ ctx.toast(e.message,"clay"); } finally{ setBusy(""); }
       return;
     }
-    // apply: loop batches until the whole backlog is converted
+    // apply: loop background batches until the whole backlog is converted
     setBusy("apply");
     const total=(media&&media.heavyCount)||0;
     let done=0, saved=0, relinked=0, failed=0, lastErr=null, iter=0, last=null;
@@ -2483,7 +2516,7 @@ function OptimizeScreen({ ctx }) {
     try{
       while(iter<30){
         iter++;
-        const r=await API.mediaOptimize(s.id,{apply:true,max:10});
+        const r=await runMediaBatch(true,10);
         if(r.error){ lastErr=r.error; break; }
         last=r;
         done+=r.uploaded||0; saved+=r.savedKB||0; relinked=Math.max(relinked,r.relinked||0); failed+=r.failed||0;

@@ -294,6 +294,8 @@
     generateCss(siteId, findings) { return engine("/generate-css", { siteId, findings }); },
     mediaScan(siteId) { return engine("/media-scan", { siteId }); },
     mediaOptimize(siteId, opts) { return engine("/media-optimize", Object.assign({ siteId }, opts || {})); },
+    mediaOptimizeStart(siteId, opts) { return engine("/media-optimize-start", Object.assign({ siteId }, opts || {})); },
+    mediaOptimizeStatus(siteId) { return engine("/media-optimize-status", { siteId }); },
     speedTest(url, strategy) { return engine("/speed-test", { url, strategy }); },
     contentDecay(siteId, windowDays) { return engine("/content-decay", { siteId, windowDays }); },
     contentDecayBrief(page) { return engine("/content-decay-brief", { page }); },

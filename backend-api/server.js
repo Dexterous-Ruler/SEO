@@ -1834,6 +1834,10 @@ const routes = {
     // a hardcoded "UK only". Falls back to UK when no site is passed (back-compat).
     const scopeSite = body && body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
     const scopeMarket = marketFor(scopeSite && scopeSite.semrush_db);
+    // The DRY_RUN env gates nothing on the write routes (they use verify-after-write +
+    // per-site write_armed + the kill switch), so reporting it as "no live writes" was
+    // false. Expose the REAL server-enforced global gate — the kill switch — instead.
+    const killSwitch = await killSwitchOn().catch(() => false);
     return {
       integrations: {
         claude: { configured: !!process.env.ANTHROPIC_API_KEY, label: 'Anthropic Claude', detail: process.env.CLAUDE_MODEL || 'claude-sonnet-4-5' },
@@ -1844,7 +1848,7 @@ const routes = {
         supabase: { configured: !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE), label: 'Supabase', detail: 'data + secrets' },
       },
       prompts: prompts.status(),
-      server: { version: '2.0', uptimeSec: Math.round(process.uptime()), node: process.version, model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929', dryRun: process.env.DRY_RUN !== 'false' },
+      server: { version: '2.0', uptimeSec: Math.round(process.uptime()), node: process.version, model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929', killSwitch, writesPaused: killSwitch },
       country: scopeMarket.country,
       scope: `${scopeMarket.country}${scopeMarket.db === 'uk' ? ' (UK-only)' : ''}`,
     };
