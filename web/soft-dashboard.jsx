@@ -4592,7 +4592,8 @@ function GscScreen({ ctx }) {
                           return (
                           <div style={{ marginTop:10, padding:"12px 14px", background:"var(--surface)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)", borderLeft:"3px solid "+(ok?"var(--teal)":blocked?"var(--gold)":failed?"var(--clay)":"var(--gold)") }}>
                             {ok && (<>
-                              <div style={{ fontSize:12.5, fontWeight:700, color:"var(--teal)", display:"flex", alignItems:"center", gap:7 }}><Icon name="check" size={14} />{r.replaced?"Refresh updated on the live page":"Freshness block added to the live page"} · modified date bumped{r.indexed&&r.indexed.ok?" · submitted to Google for re-indexing":""}</div>
+                              <div style={{ fontSize:12.5, fontWeight:700, color:"var(--teal)", display:"flex", alignItems:"center", gap:7 }}><Icon name="check" size={14} />{r.quiet?"Freshness date bumped":(r.replaced?"Refresh updated on the live page":"Freshness block added to the live page")}{r.indexed&&r.indexed.ok?" · re-submitted to Google for indexing":""}{r.removedBlock?" · removed an old block":""}</div>
+                              {r.quiet && <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:4 }}>This is a <b>quiet</b> refresh — it updates the page's last-modified date (a real freshness signal to Google) and asks Google to re-crawl it. The visible content is intentionally unchanged, so the page looks the same. Use <b>Rewrite &amp; refresh</b> if you want the body content actually rewritten.</div>}
                               {r.indexed && r.indexed.skipped && <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:4 }}>{r.indexed.reason}</div>}
                               {r.indexed && r.indexed.error && <div style={{ fontSize:11.5, color:"var(--clay)", marginTop:4 }}>{r.indexed.error}</div>}
                               {r.parts && (
