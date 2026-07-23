@@ -271,7 +271,9 @@ export async function auditPage(url, { creds, withContent = false, siteId = null
         .replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim();
       const words = body ? body.split(' ').filter(Boolean).length : 0;
       const h1h2 = (html.match(/<h[12][^>]*>[\s\S]*?<\/h[12]>/gi) || []).map((x) => x.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean);
-      const placeholder = h1h2.some((h) => /^(test heading|lorem ipsum|placeholder|untitled|sample (page|post)|heading \d+)$/i.test(h.trim())) || /lorem ipsum/i.test(body.slice(0, 400));
+      // Prefix match (not exact) so "Test Heading 6" is caught; "heading \d" needs a digit
+      // so a legit "Heading to court…" H2 doesn't false-positive.
+      const placeholder = h1h2.some((h) => /^(test heading|test page|test post|lorem ipsum|placeholder text|untitled|sample (page|post)|heading \d+)\b/i.test(h.trim())) || /lorem ipsum/i.test(body.slice(0, 400));
       if (placeholder || words < 120) {
         findings.push({
           id: `f${++fi}`,
