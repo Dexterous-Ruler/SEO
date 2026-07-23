@@ -326,15 +326,25 @@ export const db = {
     return o && o[0];
   },
   async logActivity(row) {
-    // activity.owner is NOT NULL. Backend callers pass only {site_id,type,...} with
-    // no owner, so resolve it here so the insert never violates the constraint:
-    // caller-supplied owner → the site's owner → a safe fallback.
+    // activity.owner is `uuid NOT NULL REFERENCES auth.users(id)` (schema.sql:80), so it
+    // must be a REAL user id — the previous fallback wrote the literal 'system', which
+    // fails the uuid type (22P02), and every caller swallowed the 4xx, so since ~Jul-14
+    // no backend-originated activity landed at all (the feed silently went blind). Omitting
+    // the column fails NOT NULL and a nil uuid fails the FK, so we must resolve an actual
+    // user: caller-supplied → the site's owner → env default → any site's owner (all sites
+    // here belong to the same user). Only if none resolves do we skip (never throw).
+    const isUuid = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
     let owner = row && row.owner;
-    if (!owner && row && row.site_id) {
-      try { const s = await this.getSite(row.site_id); owner = s && s.owner; } catch (e) {}
+    if (!isUuid(owner) && row && row.site_id) {
+      try { const s = await this.getSite(row.site_id); if (s && isUuid(s.owner)) owner = s.owner; } catch (e) {}
     }
-    if (!owner) owner = process.env.DEFAULT_ACTIVITY_OWNER || 'system';
-    return rest('activity', { method: 'POST', body: JSON.stringify({ ...row, owner }) });
+    if (!isUuid(owner) && isUuid(process.env.DEFAULT_ACTIVITY_OWNER)) owner = process.env.DEFAULT_ACTIVITY_OWNER;
+    if (!isUuid(owner)) {
+      try { const sites = await this.listSites(); const o = (sites || []).map((s) => s && s.owner).find(isUuid); if (o) owner = o; } catch (e) {}
+    }
+    if (!isUuid(owner)) { console.warn('[activity] no resolvable owner uuid — skipping log:', row && row.type); return null; }
+    try { return await rest('activity', { method: 'POST', body: JSON.stringify({ ...row, owner }) }); }
+    catch (e) { console.warn('[activity] insert failed:', String(e && e.message || e).slice(0, 160)); return null; }
   },
 };
 

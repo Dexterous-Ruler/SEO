@@ -131,11 +131,18 @@ export async function listSites(sa) {
 // Query Search Analytics. dimensions e.g. ['query'] or ['page'] or ['date'].
 export async function query(sa, property, { startDate, endDate, dimensions = ['query'], rowLimit = 1000 } = {}) {
   const token = await getAccessToken(sa);
-  const res = await fetch(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(property)}/searchAnalytics/query`, {
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ startDate, endDate, dimensions, rowLimit }),
-  });
+  // Bounded so a hung socket to Google can't hold a synchronous route past the 95s cap.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 25000);
+  let res;
+  try {
+    res = await fetch(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(property)}/searchAnalytics/query`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startDate, endDate, dimensions, rowLimit }),
+      signal: ctrl.signal,
+    });
+  } finally { clearTimeout(timer); }
   const data = await res.json();
   if (!res.ok) {
     const msg = data.error?.message || res.status;

@@ -15,10 +15,18 @@ export class WordPressClient {
     return `Basic ${token}`;
   }
 
-  async request(path, { method = 'GET', body, headers = {}, raw = false, retries = 3 } = {}) {
+  async request(path, { method = 'GET', body, headers = {}, raw = false, retries = 3, timeoutMs = 20000 } = {}) {
     const url = path.startsWith('http') ? path : `${this.api}${path}`;
     let lastErr;
     for (let attempt = 0; attempt <= retries; attempt++) {
+      // Hard per-call timeout. A bare fetch inherits undici's ~300s socket default, so a
+      // slow or bot-challenged host (these sites sit behind Hostinger's CDN) can hang a
+      // whole Promise.all batch far past the 95s request cap and 504 the route — the
+      // proven cause of the content-decay/refresh and media-optimize timeouts. Abort
+      // keeps every WP call bounded; callers doing wide fan-outs pass a shorter
+      // timeoutMs + retries:0 so concurrent probes can't stack.
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
       try {
         const res = await fetch(url, {
           method,
@@ -28,6 +36,7 @@ export class WordPressClient {
             ...headers,
           },
           body: body ? JSON.stringify(body) : undefined,
+          signal: ctrl.signal,
         });
         if (!res.ok) {
           const text = await res.text().catch(() => '');
@@ -43,13 +52,15 @@ export class WordPressClient {
         return ct.includes('application/json') ? res.json() : res.text();
       } catch (e) {
         lastErr = e;
-        // Network-level errors (ECONNRESET, fetch failed) — back off and retry.
-        const transient = /ECONNRESET|fetch failed|ETIMEDOUT|ENOTFOUND|socket hang up/i.test(e.message);
+        // Network-level errors + our own abort — back off and retry (bounded).
+        const transient = /ECONNRESET|fetch failed|ETIMEDOUT|ENOTFOUND|socket hang up|aborted|operation was aborted/i.test(e.message) || e.name === 'AbortError';
         if (transient && attempt < retries) {
           await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
           continue;
         }
         throw e;
+      } finally {
+        clearTimeout(timer);
       }
     }
     throw lastErr;

@@ -23,9 +23,15 @@ const MAX_DIM = 2560;            // plenty for web; caps the decoded bitmap
 const MAX_INPUT_PIXELS = 60_000_000; // refuse absurd images instead of crashing
 
 async function download(url) {
-  const r = await fetch(url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' } });
-  if (!r.ok) throw new Error('download ' + r.status);
-  return Buffer.from(await r.arrayBuffer());
+  // Bounded like every other outbound fetch — a slow image on a CDN-fronted host must
+  // not hang the whole optimize loop past the request cap.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': 'wp-seo-agent/2.0' }, signal: ctrl.signal });
+    if (!r.ok) throw new Error('download ' + r.status);
+    return Buffer.from(await r.arrayBuffer());
+  } finally { clearTimeout(timer); }
 }
 const kb = (b) => Math.round(b / 1024);
 
@@ -119,7 +125,7 @@ export async function scanMedia(siteId, { minKB = 80, limit = 200 } = {}) {
 // Optimize: compress to WebP. apply=false → preview savings (no write);
 // apply=true → upload WebP to the media library (force-bypasses DRY_RUN since
 // the click is the explicit approval). Capped + sequential for safety.
-export async function optimizeImages(siteId, { ids = null, quality = 80, max = 10, apply = false, skipExisting = false, minKB = 80 } = {}) {
+export async function optimizeImages(siteId, { ids = null, quality = 80, max = 10, apply = false, skipExisting = false, minKB = 80, onProgress = null } = {}) {
   const { baseUrl, username, appPassword } = await credsForSite(siteId);
   const wp = new WordPressClient({ baseUrl, username, appPassword });
   let targets = await fetchImages(wp);
@@ -151,7 +157,10 @@ export async function optimizeImages(siteId, { ids = null, quality = 80, max = 1
   if (!toProcess.length && !relinked) return apply ? { applied: true, processed: 0, uploaded: 0, relinked: 0, remaining: 0, failed: 0, errors: [], savedKB: 0, results: [], note: 'nothing to optimize' } : { error: 'No images need converting — every heavy image already has a WebP.' };
 
   const results = [];
+  let _done = 0;
   for (const img of toProcess) {
+    if (typeof onProgress === 'function') { try { onProgress({ done: _done, total: toProcess.length }); } catch (e) {} }
+    _done++;
     try {
       const buf = await download(img.url);
       if (buf.length > 12 * 1024 * 1024) { results.push({ id: img.id, url: img.url, skip: 'too large (>12MB)' }); continue; }

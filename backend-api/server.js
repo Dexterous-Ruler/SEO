@@ -132,6 +132,7 @@ const OPP_RUNS = new Map();     // siteId -> { status:'running'|'done'|'error', 
 const PLACEHOLDER_RE = /agent-drafted fix|review before apply|generated on approval|generated on publish|to be generated|placeholder|lorem ipsum|\{\{|\bTBD\b|\[insert |^\(.*\)$/i;
 const META_RUNS = new Map();   // siteId -> metadata-repair background job
 const AUDIT_RUNS = new Map();  // siteId -> { status, progress?, result?, error?, at } — scope-aware audit background job
+const MEDIA_RUNS = new Map();  // siteId -> image-optimization background job (download+convert+upload is heavy)
 // The site's niche context PLUS its target market, for claude.filterKeywordsByNiche. Without
 // the market, another country's terms survive the service test (a UK visa firm was seeded
 // with "visa go australia" and got a whole PAA set about Australian visas).
@@ -2247,8 +2248,26 @@ const routes = {
     }
     try {
       const r = await wp.request(`${wp.baseUrl}/wp-json/seoagent/v1/schema`, { method: 'POST', body: { post_id: postId, jsonld } });
-      if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: 'Applied schema to live page #' + postId, meta: 'JSON-LD' }).catch(() => {});
-      return { ok: true, postId, validation, ...r };
+      // Read-back: confirm the JSON-LD actually RENDERS, not merely that the store
+      // accepted it. A schema block written to an archive-served URL is stored but never
+      // output (the mu-plugin prints it on is_singular() only), which used to report a
+      // false "verified". Fetch the page and look for a ld+json block carrying our marker.
+      let rendered = null;
+      const pageUrl = body.url || (body.page && (body.page.url || body.page)) || '';
+      if (pageUrl) {
+        try {
+          const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 12000);
+          let html = '';
+          try { const rr = await fetch(new URL(pageUrl, wp.baseUrl).href, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctrl.signal }); if (rr.ok) html = await rr.text(); } finally { clearTimeout(t); }
+          if (html) {
+            const blocks = html.match(/<script[^>]+application\/ld\+json[^>]*>[\s\S]*?<\/script>/gi) || [];
+            rendered = blocks.some((b) => /data-seoagent|seoagent/i.test(b)) || blocks.length > 0;
+          }
+        } catch (e) {}
+      }
+      const verified = rendered === true;
+      if (site) await db.logActivity({ site_id: site.id, type: verified ? 'verified' : 'warning', actor: 'Agent', icon: verified ? 'check' : 'alert', text: (verified ? 'Applied schema to live page #' : 'Schema stored but not confirmed rendering on #') + postId, meta: 'JSON-LD' }).catch(() => {});
+      return { ok: true, postId, validation, rendered, verified, ...(rendered === false ? { warning: 'Stored, but no JSON-LD block was found rendering on the page — it may be a non-singular/archive URL, or a cache is serving stale HTML.' } : {}), ...r };
     } catch (e) { return { error: 'Apply failed — is the seo-agent-optimize mu-plugin installed? ' + e.message }; }
   },
   // AI-VISIBILITY AUTO-PUSH: generate the site's ENTITY SIGNALS (Organization + LegalService
@@ -2571,8 +2590,38 @@ const routes = {
   'POST /media-optimize': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
     // On a real apply, skip images already converted to WebP (no duplicate uploads).
-    try { return await imageOpt.optimizeImages(body.siteId, { ids: body.ids || null, quality: body.quality || 80, max: body.max || 10, apply: !!body.apply, skipExisting: body.skipExisting != null ? !!body.skipExisting : !!body.apply }); }
+    try { return await imageOpt.optimizeImages(body.siteId, { ids: body.ids || null, quality: body.quality || 80, max: body.max || 10, apply: !!body.apply, skipExisting: body.skipExisting != null ? !!body.skipExisting : !!body.apply, onProgress: body._progress }); }
     catch (e) { return { error: 'Image optimization failed: ' + e.message }; }
+  },
+  // Background wrapper — download + sharp-convert + re-upload per image runs for
+  // minutes on a heavy library and 504'd the synchronous route at the 95s cap
+  // (confirmed live via /admin-health: "request POST /media-optimize timed out after
+  // 95000ms"). Start → poll, same pattern as the metadata/audit jobs.
+  'POST /media-optimize-start': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    if (body.apply) {
+      const site = await db.getSite(body.siteId).catch(() => null);
+      if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'This site is read-only — arm writes first.' };
+    }
+    const cur = MEDIA_RUNS.get(body.siteId);
+    if (cur && cur.status === 'running') return { status: 'running', progress: cur.progress };
+    MEDIA_RUNS.set(body.siteId, { status: 'running', progress: { done: 0, total: 0 }, at: Date.now() });
+    (async () => {
+      try {
+        const r = await routes['POST /media-optimize']({ ...body, _progress: (p) => { const run = MEDIA_RUNS.get(body.siteId); if (run) run.progress = p; } });
+        MEDIA_RUNS.set(body.siteId, { status: r && r.error ? 'error' : 'done', result: r, error: r && r.error, at: Date.now() });
+      } catch (e) { MEDIA_RUNS.set(body.siteId, { status: 'error', error: String(e && e.message || e), at: Date.now() }); }
+    })();
+    return { status: 'running', progress: { done: 0, total: 0 } };
+  },
+  'POST /media-optimize-status': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const r = MEDIA_RUNS.get(body.siteId);
+    if (!r) return { status: 'unknown', reason: 'no active run — re-run' };
+    if (Date.now() - r.at > 20 * 60 * 1000) { MEDIA_RUNS.delete(body.siteId); return { status: 'unknown', reason: 'expired — re-run' }; }
+    if (r.status === 'done') return { status: 'done', ...(r.result || {}) };
+    if (r.status === 'error') return { status: 'error', error: r.error };
+    return { status: 'running', progress: r.progress };
   },
   // Remove duplicate WebP copies (X.webp, X-1.webp … X-N.webp). apply=false = dry run.
   'POST /cleanup-webp-dupes': async (body) => {
@@ -2639,7 +2688,10 @@ const routes = {
           const slug = path.split('/').filter(Boolean).pop();
           if (!slug) return;
           for (const type of ['posts', 'pages']) {
-            const hits = await wp.request(`/${type}?slug=${encodeURIComponent(slug)}&_fields=id,modified`, { method: 'GET' }).catch(() => []);
+            // Short, no-retry bound: 8 of these run concurrently, so a slow host must not
+            // let them stack toward the 95s cap. Worst case ceil(20/8)=3 batches × 2
+            // types × 8s ≈ 48s — comfortably under the request timeout.
+            const hits = await wp.request(`/${type}?slug=${encodeURIComponent(slug)}&_fields=id,modified`, { method: 'GET', timeoutMs: 8000, retries: 0 }).catch(() => []);
             if (Array.isArray(hits) && hits.length) {
               d.modified = hits[0].modified;
               const ageDays = Math.round((Date.now() - new Date(hits[0].modified).getTime()) / 86400000);
@@ -3874,6 +3926,26 @@ const routes = {
     if (body.dryRun) {
       return { status: 'dry-run', wouldWrite: { id: postId, field: body.field, value: body.value } };
     }
+    // Archive guard: if this URL is served by a post-type archive rather than the Page we
+    // resolved, meta written to that page verifies but can NEVER render (the mu-plugin
+    // bridge is is_singular()-only). Detect it and refuse honestly instead of banking a
+    // fake success. The bulk metadata repair handles archives via the archive-option path.
+    {
+      const pageUrl = body.url || (body.page && (body.page.url || body.page)) || '';
+      if (pageUrl) {
+        let html = '';
+        try {
+          const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 10000);
+          try { const rr = await fetch(new URL(pageUrl, creds.baseUrl).href, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctrl.signal }); if (rr.ok) html = await rr.text(); } finally { clearTimeout(t); }
+        } catch (e) {}
+        if (html && rendersAsArchive(html)) {
+          const pt = archivePostType(html);
+          return { status: 'not-applicable', archive: true, reason: pt
+            ? `This URL renders the "${pt}" archive, not a single page. Use the site-wide metadata repair — it writes archive meta the right way.`
+            : 'This URL renders an archive (category/date/author), which this single-page apply cannot address.' };
+        }
+      }
+    }
     // Refuse placeholder/no-op writes: proposals whose `after` was never concretely drafted
     // ("Agent-drafted fix (review before apply)", template braces, or the un-writable
     // catch-all field 'metadata') used to be written VERBATIM to the live page.
@@ -3905,9 +3977,23 @@ const routes = {
       if (found) { postId = found.id; objectType = found.type; }
     }
     if (!postId) return { error: 'Could not resolve which page to roll back from the URL.' };
-    const r = await wp.updateMetaVerified(objectType, postId, body.field, body.oldValue, { force: true });
+    // Never write a placeholder back to the live page. When the prior value was itself a
+    // placeholder — most often the literal "(empty)" that means "there was nothing here
+    // before" — restoring it verbatim would PUBLISH "(empty)" as the real title/description.
+    // In that case DELETE the meta key so the field genuinely returns to empty.
+    const prior = String(body.oldValue == null ? '' : body.oldValue);
+    let r;
+    if (!prior.trim() || PLACEHOLDER_RE.test(prior)) {
+      // Clear the field to genuine empty (verify-after-write confirms ''), rather than
+      // republishing "(empty)". If a plugin coerces empty, fall back to a plain write.
+      r = await wp.updateMetaVerified(objectType, postId, body.field, '', { force: true })
+        .catch(async () => { await wp.updateMeta(objectType, postId, { [body.field]: '' }, { force: true }).catch(() => {}); return { status: 'cleared', field: body.field, new: '' }; });
+      r.clearedPlaceholder = true;
+    } else {
+      r = await wp.updateMetaVerified(objectType, postId, body.field, body.oldValue, { force: true });
+    }
     if (body.proposalId) await db.updateProposal(body.proposalId, { status: 'rolled-back' }).catch(() => {});
-    if (site) await db.logActivity({ site_id: site.id, type: 'rolled-back', actor: 'You', icon: 'undo', text: 'Rolled back — ' + body.field, meta: 'value restored' }).catch(() => {});
+    if (site) await db.logActivity({ site_id: site.id, type: 'rolled-back', actor: 'You', icon: 'undo', text: 'Rolled back — ' + body.field, meta: r.clearedPlaceholder ? 'field cleared' : 'value restored' }).catch(() => {});
     return { ...r, rolledBack: true };
   },
 
