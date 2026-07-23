@@ -277,7 +277,7 @@ export async function refreshArticle({ page, currentContent, brief, siteId }) {
     // (a 2,500-word page + additions needs ~6k tokens) — that truncation was SHORTENING
     // refreshed pages instead of keeping them. Runs in the /content-rewrite background job,
     // so it's free of the ~95s request cap; give it room.
-    maxTokens: 8192, timeoutMs: 90000, deadlineMs: 180000, temperature: 0.5,
+    maxTokens: 8192, timeoutMs: 150000, deadlineMs: 320000, temperature: 0.5,
     messages: [{
       role: 'user',
       content: `AUDIT then REFRESH this EXISTING page so it recovers its lost rankings. This is an update, NOT a rewrite: keep the article's structure, wording and voice largely intact and surgically improve only what the brief flags (stale info, intent match, thin sections, missing FAQs/sub-topics, internal links, snippet structure). A reader should recognise it as the same page, improved. Keep it AT LEAST as long as the original — never shorten it; only trim genuinely redundant sentences. Do NOT start from scratch and do NOT add a visible "updated on" banner.
