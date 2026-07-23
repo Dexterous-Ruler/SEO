@@ -88,27 +88,41 @@ function channelFor(disc) {
   if (disc === 'accessibility') return 'theme/css';
   return 'theme/css';
 }
-// A11y audits with NO safe automatic fix — the card must not show an apply chip that
-// can't deliver. color-contrast can't be auto-fixed: the correct accessible colour
-// depends on the element's real foreground AND background, and Lighthouse doesn't return
-// both, so any blind "darken" could make a light-on-dark element worse. Route to manual.
-const MANUAL_A11Y = new Set(['color-contrast']);
+// A11y audits with no safe automatic fix stay manual. color-contrast is NO LONGER here —
+// Lighthouse returns the real foreground + background per element (in the item
+// explanation), so we can compute a WCAG-compliant colour deterministically. See
+// contrastNodesFromPsi + css-fixes.contrastRules.
+const MANUAL_A11Y = new Set([]);
 function channelForAudit(auditId, disc) {
   if (MANUAL_A11Y.has(String(auditId))) return 'manual';
   return channelFor(disc);
 }
-// For a color-contrast finding, list the REAL flagged element selectors (from the full
-// Lighthouse audit detail we already carry in psi.audits) so the manual card is
-// actionable — "which elements?" — instead of a vague "fix low-contrast text".
-function contrastDetail(f, psi) {
-  if (String(f.id) !== 'color-contrast') return null;
+// Parse Lighthouse's color-contrast items into {selector, fg, bg, target} — the data the
+// auto-fixer needs. The colours live in node.explanation:
+//   "…insufficient color contrast of 1.35 (foreground color: #ffffff, background color: #dddddd…). Expected contrast ratio of 4.5:1"
+function contrastNodesFromPsi(psi) {
   try {
     const items = (psi && psi.audits && psi.audits['color-contrast'] && psi.audits['color-contrast'].details && psi.audits['color-contrast'].details.items) || [];
-    const sels = items.map((it) => it && it.node && (it.node.selector || it.node.snippet)).filter(Boolean).map((s) => String(s).replace(/\s+/g, ' ').trim().slice(0, 80));
-    const uniq = [...new Set(sels)].slice(0, 6);
-    if (!uniq.length) return null;
-    return `${items.length} element(s) below the 4.5:1 minimum (WCAG 1.4.3). No safe one-click fix — the accessible colour depends on each element's own background, so set it in your theme. Flagged: ${uniq.join('  ·  ')}${sels.length > uniq.length ? ` … +${sels.length - uniq.length} more` : ''}`;
-  } catch (e) { return null; }
+    const out = [];
+    for (const it of items) {
+      const n = it && it.node; if (!n) continue;
+      const ex = String(n.explanation || '');
+      const fg = (ex.match(/foreground color:\s*(#[0-9a-f]{3,6})/i) || [])[1];
+      const bg = (ex.match(/background color:\s*(#[0-9a-f]{3,6})/i) || [])[1];
+      const target = parseFloat((ex.match(/Expected contrast ratio of\s*([\d.]+)/i) || [])[1]) || 4.5;
+      const selector = (n.selector || '').trim();
+      if (selector && fg && bg) out.push({ selector: selector.slice(0, 300), fg, bg, target });
+    }
+    return out;
+  } catch (e) { return []; }
+}
+// Human-readable detail for the color-contrast finding — now describes the auto-fix.
+function contrastDetail(f, psi) {
+  if (String(f.id) !== 'color-contrast') return null;
+  const nodes = contrastNodesFromPsi(psi);
+  if (!nodes.length) return null;
+  const uniq = [...new Set(nodes.map((n) => n.selector.slice(0, 70)))].slice(0, 5);
+  return `${nodes.length} element(s) below 4.5:1 (WCAG 1.4.3) — auto-fixable: a compliant text colour is computed from each element's real foreground/background. e.g. ${uniq.join('  ·  ')}`;
 }
 function impactFor(score, savingsMs) {
   if (savingsMs > 1000 || score === 0) return 'high';
@@ -255,6 +269,9 @@ export async function auditPage(url, { creds, withContent = false, siteId = null
       channel: channelForAudit(f.id, disc),
       detail: contrastDetail(f, psi) || (f.displayValue ? `${f.title} — ${f.displayValue}` : f.title),
       _auditId: f.id,
+      // color-contrast carries the per-element colours so the CSS generator can compute a
+      // compliant text colour (the automatic fix). Persisted with the finding.
+      ...(String(f.id) === 'color-contrast' ? { contrastNodes: contrastNodesFromPsi(psi) } : {}),
     });
   }
 

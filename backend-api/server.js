@@ -2741,11 +2741,31 @@ const routes = {
   // modern-css fix generator: turn audit findings into real, reviewable CSS.
   'POST /generate-css': async (body) => {
     let findings = Array.isArray(body.findings) ? body.findings : null;
-    if (!findings && body.siteId) {
+    // The stored audit findings — pulled either as the source (no body.findings) OR to
+    // ENRICH the slim {auditId,title} findings the frontend sends with the per-element
+    // `contrastNodes` needed for the automatic color-contrast fix (they'd otherwise be
+    // stripped and contrast would fall back to "nothing to write").
+    let stored = [];
+    if (body.siteId) {
       try {
         const rows = await fetch(`${process.env.SUPABASE_URL}/rest/v1/audits?site_id=eq.${body.siteId}&select=findings&order=created_at.desc&limit=1`, { headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE } }).then((r) => r.json()).catch(() => []);
-        findings = (rows && rows[0] && rows[0].findings) || [];
-      } catch (e) { findings = []; }
+        stored = (rows && rows[0] && rows[0].findings) || [];
+      } catch (e) { stored = []; }
+    }
+    if (!findings) findings = stored;
+    else {
+      // Merge contrastNodes from the stored audit into matching color-contrast findings.
+      const nodesByAudit = {};
+      for (const s of stored) { const id = s._auditId || s.auditId || s.id; if (id && s.contrastNodes && s.contrastNodes.length) nodesByAudit[id] = s.contrastNodes; }
+      findings = findings.map((f) => {
+        const id = f._auditId || f.auditId || f.id;
+        const isC = /contrast/i.test(id || '') || /contrast/i.test(f.title || '');
+        if (isC && !(f.contrastNodes && f.contrastNodes.length)) {
+          const nodes = nodesByAudit[id] || nodesByAudit['color-contrast'];
+          if (nodes) return { ...f, contrastNodes: nodes };
+        }
+        return f;
+      });
     }
     findings = findings || [];
     const result = generateCssFixes(findings);

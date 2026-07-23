@@ -68,16 +68,73 @@ nav a, .menu a { display: inline-flex; align-items: center; min-height: 24px; }`
   }),
 };
 
-// Contrast needs the actual target color, which we cannot infer from a score.
-// We emit a clearly-marked template the reviewer completes (or pairs with a
-// Claude-suggested value). This is honest: we don't guess brand colors.
-function contrastTemplate(selector = '.low-contrast', fg = '#1a1a1a') {
-  return { note: 'Raise text contrast to ≥4.5:1 (WCAG 1.4.3). Fill in the real selector/colour.', css: `/* WCAG 1.4.3 contrast — replace selector + colour with the flagged element's */
-${selector} { color: ${fg}; }`, manual: true };
+// ── WCAG contrast math ──────────────────────────────────────────────────────
+function hexToRgb(h) {
+  let s = String(h || '').trim().replace(/^#/, '');
+  if (s.length === 3) s = s.split('').map((c) => c + c).join('');
+  if (!/^[0-9a-f]{6}$/i.test(s)) return null;
+  const n = parseInt(s, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function rgbToHex(r, g, b) {
+  return '#' + [r, g, b].map((x) => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, '0')).join('');
+}
+function _lin(c) { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+function _lum(rgb) { return 0.2126 * _lin(rgb[0]) + 0.7152 * _lin(rgb[1]) + 0.0722 * _lin(rgb[2]); }
+function contrastRatio(a, b) { const la = _lum(a), lb = _lum(b); const hi = Math.max(la, lb), lo = Math.min(la, lb); return (hi + 0.05) / (lo + 0.05); }
+
+// Compute a WCAG-compliant foreground for `fgHex` text over `bgHex` background that meets
+// `target` (default 4.5:1). We blend the original foreground toward black AND toward white
+// (whichever direction can actually reach the target for this background), binary-search
+// the SMALLEST shift that meets it, and keep the candidate closest to the original colour.
+// Returns a hex string, or null if already compliant / inputs unusable. This is safe
+// precisely because Lighthouse hands us the REAL foreground+background — no guessing.
+function compliantColor(fgHex, bgHex, target = 4.5) {
+  const fg = hexToRgb(fgHex), bg = hexToRgb(bgHex);
+  if (!fg || !bg) return null;
+  if (contrastRatio(fg, bg) >= target) return null;
+  const search = (toward) => {
+    if (contrastRatio(toward, bg) < target) return null;   // this extreme can't reach target
+    let lo = 0, hi = 1, best = null;
+    for (let i = 0; i < 24; i++) {
+      const t = (lo + hi) / 2;
+      const c = fg.map((v, k) => v + (toward[k] - v) * t);
+      if (contrastRatio(c, bg) >= target) { best = c; hi = t; } else { lo = t; }
+    }
+    return best;
+  };
+  const cands = [search([0, 0, 0]), search([255, 255, 255])].filter(Boolean);
+  if (!cands.length) return null;
+  const dist = (c) => Math.abs(c[0] - fg[0]) + Math.abs(c[1] - fg[1]) + Math.abs(c[2] - fg[2]);
+  cands.sort((a, b) => dist(a) - dist(b));
+  return rgbToHex(cands[0][0], cands[0][1], cands[0][2]);
+}
+
+// Parse Lighthouse color-contrast nodes (selector + fg/bg/target from the explanation)
+// into real per-selector CSS that forces a compliant text colour. This is the AUTOMATIC
+// contrast fix — no human colour-picking, because the audit gave us the actual colours.
+function contrastRules(nodes) {
+  const bySelector = new Map();
+  for (const n of (nodes || [])) {
+    const sel = (n.selector || '').trim();
+    if (!sel || sel.length > 300) continue;
+    const target = n.target || 4.5;
+    const nw = compliantColor(n.fg, n.bg, target);
+    if (!nw) continue;
+    if (!bySelector.has(sel)) bySelector.set(sel, nw);   // first (worst) wins; dedupe by selector
+  }
+  if (!bySelector.size) return null;
+  const lines = [...bySelector.entries()].map(([sel, col]) => `${sel} { color: ${col} !important; }`);
+  return {
+    note: `Raised ${bySelector.size} element(s) to a WCAG-compliant text colour (≥4.5:1), computed from each element's real foreground/background.`,
+    css: `/* WCAG 1.4.3 contrast — auto-computed compliant text colours */\n${lines.join('\n')}`,
+    manual: false,
+  };
 }
 
 // Generate a CSS block from a list of findings. Each finding may carry an
-// `_auditId` (PSI) or `id`/`auditId`. Returns { css, rules, manualCount }.
+// `_auditId` (PSI) or `id`/`auditId`, and color-contrast findings carry
+// `contrastNodes:[{selector,fg,bg,target}]` for the real auto-fix.
 function generateCssFixes(findings) {
   const seen = new Set();
   const rules = [];
@@ -87,7 +144,11 @@ function generateCssFixes(findings) {
     const key = id || (isContrast ? 'color-contrast' : null);
     if (!key || seen.has(key)) continue;
     let r = (id && RULES[id]) ? RULES[id]() : null;
-    if (!r && isContrast) r = contrastTemplate();
+    if (!r && isContrast) {
+      const nodes = f.contrastNodes || f._contrastNodes || [];
+      r = contrastRules(nodes);   // real per-selector fix when we have the colours…
+      if (!r) continue;           // …and no manual stub when we don't (honest: nothing to write)
+    }
     if (!r) continue;
     seen.add(key);
     rules.push({ auditId: key, note: r.note, css: r.css, manual: !!r.manual });
