@@ -296,7 +296,7 @@ async function getWorkflowPrompts(baseUrl, apiKey, id) {
         prompts,
       });
     }
-    return { id: data.id, name: data.name, active: !!data.active, nodes, hasWebhook };
+    return { id: data.id, name: data.name, active: !!data.active, nodes, hasWebhook, connections: data.connections || {}, allNodes: rawNodes.map((n) => ({ name: n.name, type: shortType(n.type) })) };
   } catch (e) {
     return apiError(0, null, apiKey, e);
   }
