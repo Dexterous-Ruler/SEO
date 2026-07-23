@@ -273,18 +273,22 @@ export async function refreshArticle({ page, currentContent, brief, siteId }) {
   const p = page || {};
   const txt = await complete({
     system: sys('content.refresh', siteId), promptKey: 'content.refresh',
-    maxTokens: 4096, temperature: 0.5,
+    // A preserve-and-enhance of a long article must not be truncated by the token ceiling
+    // (a 2,500-word page + additions needs ~6k tokens) — that truncation was SHORTENING
+    // refreshed pages instead of keeping them. Runs in the /content-rewrite background job,
+    // so it's free of the ~95s request cap; give it room.
+    maxTokens: 8192, timeoutMs: 90000, deadlineMs: 180000, temperature: 0.5,
     messages: [{
       role: 'user',
-      content: `AUDIT then REFRESH this EXISTING page so it recovers its lost rankings. This is an update, NOT a rewrite: keep the article's structure, wording and voice largely intact and surgically improve only what the brief flags (stale info, intent match, thin sections, missing FAQs/sub-topics, internal links, snippet structure). A reader should recognise it as the same page, improved. Do NOT start from scratch and do NOT add a visible "updated on" banner.
+      content: `AUDIT then REFRESH this EXISTING page so it recovers its lost rankings. This is an update, NOT a rewrite: keep the article's structure, wording and voice largely intact and surgically improve only what the brief flags (stale info, intent match, thin sections, missing FAQs/sub-topics, internal links, snippet structure). A reader should recognise it as the same page, improved. Keep it AT LEAST as long as the original — never shorten it; only trim genuinely redundant sentences. Do NOT start from scratch and do NOT add a visible "updated on" banner.
 
 PAGE: ${p.title || ''} — ${p.url || p.page || ''}
 
 === REFRESH BRIEF (the plan to execute) ===
 ${brief || '(no brief supplied — improve depth, freshness, structure, FAQs and internal links)'}
 
-=== CURRENT PAGE CONTENT (rewrite/expand THIS; do not invent facts beyond it and the brief) ===
-${(currentContent || '').slice(0, 16000)}
+=== CURRENT PAGE CONTENT (refresh/expand THIS; keep it; do not invent facts beyond it and the brief) ===
+${(currentContent || '').slice(0, 24000)}
 
 Output ONLY the complete, updated article body as clean HTML. No preamble, no code fences, no commentary.`,
     }],
