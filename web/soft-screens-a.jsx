@@ -350,7 +350,7 @@ function FindingRow({ f, ctx, open, onToggle }) {
   // Only a genuinely-pending proposal counts as "in queue" — not a dismissed/reopened/
   // rejected ledger entry (those share the finding's key but aren't review items).
   const inQueue = ctx.proposals.find(p=>p.findingId===fk && !["dismissed","reopened","rejected"].includes(p.status));
-  const ch = { "rest-write":["teal","REST write"], "theme/css":["gold","Theme / CSS"], manual:["gray","Manual"] }[f.channel];
+  const ch = { "rest-write":["teal","REST write"], "theme/css":["gold","Theme / CSS"], "schema":["plum","Schema"], manual:["gray","Manual"] }[f.channel] || ["gray","Manual"];
   return (
     <div style={{ borderRadius:"var(--r-md)", overflow:"hidden", background:open?"var(--t-50)":"var(--bg)", boxShadow:open?"var(--neo-xs)":"var(--neo-in)", transition:"all .16s" }}>
       <div className="row-link" onClick={onToggle} style={{ display:"flex", alignItems:"center", gap:14, padding:"14px 16px" }}>

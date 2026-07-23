@@ -31,7 +31,7 @@ function discFor(id, category) {
 // Known fix recipes: a failing audit id → a concrete, carry-out-able proposal.
 // REST metadata writes (Rank Math keys) or child-theme patches in deploy/child-theme/.
 export const RECIPES = {
-  'color-contrast': { disc: 'accessibility', risk: 'low', channel: 'theme/css', title: 'Fix low-contrast text (WCAG 1.4.3)', impact: '+A11y', target: 'staging', field: 'child-theme · seo-agent-a11y.css', before: 'Brand greys at 2.2–2.6:1', after: 'Darkened to ≥4.5:1 (hue preserved)' },
+  'color-contrast': { disc: 'accessibility', risk: 'low', channel: 'manual', title: 'Fix low-contrast text (WCAG 1.4.3)', impact: '+A11y', target: 'manual', field: 'child-theme CSS (set per flagged element)', before: 'Text below 4.5:1', after: 'Set an accessible colour for each flagged selector — no safe auto-fix (needs the element’s real background).' },
   'target-size': { disc: 'accessibility', risk: 'low', channel: 'theme/css', title: 'Enlarge small touch targets (WCAG 2.5.8)', impact: '+A11y', target: 'staging', field: 'child-theme · CSS', before: 'Footer links 22.4px tall', after: 'min-height 24px' },
   'skip-link': { disc: 'accessibility', risk: 'low', channel: 'theme/css', title: 'Add focusable skip link', impact: '+A11y', target: 'staging', field: 'child-theme · functions.php', before: 'No skip link', after: 'Skip-to-content link (focus-visible)' },
   'landmark-one-main': { disc: 'accessibility', risk: 'low', channel: 'theme/css', title: 'Add <main> landmark', impact: '+A11y', target: 'staging', field: 'child-theme · functions.php', before: 'No main landmark', after: 'role="main" on content container' },
@@ -88,6 +88,28 @@ function channelFor(disc) {
   if (disc === 'accessibility') return 'theme/css';
   return 'theme/css';
 }
+// A11y audits with NO safe automatic fix — the card must not show an apply chip that
+// can't deliver. color-contrast can't be auto-fixed: the correct accessible colour
+// depends on the element's real foreground AND background, and Lighthouse doesn't return
+// both, so any blind "darken" could make a light-on-dark element worse. Route to manual.
+const MANUAL_A11Y = new Set(['color-contrast']);
+function channelForAudit(auditId, disc) {
+  if (MANUAL_A11Y.has(String(auditId))) return 'manual';
+  return channelFor(disc);
+}
+// For a color-contrast finding, list the REAL flagged element selectors (from the full
+// Lighthouse audit detail we already carry in psi.audits) so the manual card is
+// actionable — "which elements?" — instead of a vague "fix low-contrast text".
+function contrastDetail(f, psi) {
+  if (String(f.id) !== 'color-contrast') return null;
+  try {
+    const items = (psi && psi.audits && psi.audits['color-contrast'] && psi.audits['color-contrast'].details && psi.audits['color-contrast'].details.items) || [];
+    const sels = items.map((it) => it && it.node && (it.node.selector || it.node.snippet)).filter(Boolean).map((s) => String(s).replace(/\s+/g, ' ').trim().slice(0, 80));
+    const uniq = [...new Set(sels)].slice(0, 6);
+    if (!uniq.length) return null;
+    return `${items.length} element(s) below the 4.5:1 minimum (WCAG 1.4.3). No safe one-click fix — the accessible colour depends on each element's own background, so set it in your theme. Flagged: ${uniq.join('  ·  ')}${sels.length > uniq.length ? ` … +${sels.length - uniq.length} more` : ''}`;
+  } catch (e) { return null; }
+}
 function impactFor(score, savingsMs) {
   if (savingsMs > 1000 || score === 0) return 'high';
   if (savingsMs > 300 || score < 0.5) return 'medium';
@@ -108,6 +130,19 @@ export function metaFieldMap(seoPlugin) {
     return { title: 'rank_math_title', meta_description: 'rank_math_description', canonical: 'rank_math_canonical_url' };
   }
   return { title: '_seoagent_meta_title', meta_description: '_seoagent_meta_description', canonical: '_seoagent_canonical' };
+}
+
+// The channel that can ACTUALLY fix a given SEO field — the single source of truth for
+// the review-card chip, replacing the old blanket 'rest-write' that mislabeled fields no
+// REST meta write can touch (h1/img_alt) and hid the schema auto-fix behind a manual stub.
+//   title/meta_description/canonical → rest-write (the verified meta path)
+//   schema                           → schema (the generate-schema/apply-schema pair)
+//   h1/img_alt/anything else         → manual (no safe one-click write exists)
+export function channelForField(field) {
+  const f = String(field || '').toLowerCase();
+  if (f === 'title' || f === 'meta_description' || f === 'canonical') return 'rest-write';
+  if (f === 'schema' || f === 'jsonld' || f === 'structured_data') return 'schema';
+  return 'manual';
 }
 
 // The Sentinel-owned key for a logical field — always writable over REST because the
@@ -217,8 +252,8 @@ export async function auditPage(url, { creds, withContent = false, siteId = null
       impact: impactFor(f.score, savingsMs),
       traffic: '—',
       gapPts: Math.max(1, Math.round((1 - (f.score ?? 0)) * 10)),
-      channel: channelFor(disc),
-      detail: f.displayValue ? `${f.title} — ${f.displayValue}` : f.title,
+      channel: channelForAudit(f.id, disc),
+      detail: contrastDetail(f, psi) || (f.displayValue ? `${f.title} — ${f.displayValue}` : f.title),
       _auditId: f.id,
     });
   }
@@ -246,7 +281,7 @@ export async function auditPage(url, { creds, withContent = false, siteId = null
       impact: 'medium',
       traffic: '—',
       gapPts: 4,
-      channel: 'rest-write',
+      channel: channelForField(p.field),
       detail: p.detail || p.title,
       _field: p.field,
       _value: p.value || null,
