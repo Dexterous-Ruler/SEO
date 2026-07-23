@@ -276,7 +276,7 @@ export async function refreshArticle({ page, currentContent, brief, siteId }) {
     maxTokens: 4096, temperature: 0.5,
     messages: [{
       role: 'user',
-      content: `Rewrite and improve this EXISTING page so it recovers its lost rankings. Keep what already works; expand, update and restructure per the refresh brief. Do NOT start from scratch and do NOT add a visible "updated on" banner.
+      content: `AUDIT then REFRESH this EXISTING page so it recovers its lost rankings. This is an update, NOT a rewrite: keep the article's structure, wording and voice largely intact and surgically improve only what the brief flags (stale info, intent match, thin sections, missing FAQs/sub-topics, internal links, snippet structure). A reader should recognise it as the same page, improved. Do NOT start from scratch and do NOT add a visible "updated on" banner.
 
 PAGE: ${p.title || ''} — ${p.url || p.page || ''}
 
