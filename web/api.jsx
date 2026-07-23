@@ -141,6 +141,8 @@
     contentOpportunitiesStart(siteId, opts) { return engine("/content-opportunities-start", Object.assign({ siteId }, opts || {})); },
     contentOpportunitiesStatus(siteId) { return engine("/content-opportunities-status", { siteId }); },
     contentBrief(siteId, keyword, intent) { return engine("/content-brief", { siteId, keyword, intent }); },
+    contentBriefStart(siteId, keyword, intent) { return engine("/content-brief-start", { siteId, keyword, intent }); },
+    contentBriefStatus(siteId) { return engine("/content-brief-status", { siteId }); },
     // Content Engine — one unified, de-duped, scored worklist from every content source
     // (keywords, trending, People Also Ask, AI-visibility). HEAVY/slow route (~20-60s).
     // notProvisioned until supabase/content-engine.sql is run.

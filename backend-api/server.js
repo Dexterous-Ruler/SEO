@@ -164,6 +164,7 @@ async function foreignBrandTokens(site) {
 const META_RUNS = new Map();   // siteId -> metadata-repair background job
 const AUDIT_RUNS = new Map();  // siteId -> { status, progress?, result?, error?, at } — scope-aware audit background job
 const MEDIA_RUNS = new Map();  // siteId -> image-optimization background job (download+convert+upload is heavy)
+const BRIEF_RUNS = new Map();  // siteId -> content-brief background job (SERP research + Claude runs >95s)
 // The site's niche context PLUS its target market, for claude.filterKeywordsByNiche. Without
 // the market, another country's terms survive the service test (a UK visa firm was seeded
 // with "visa go australia" and got a whole PAA set about Australian visas).
@@ -1328,6 +1329,7 @@ const routes = {
   'POST /semrush-striking': async (body) => {
     if (!semrush.hasKey()) return { error: 'DataForSEO not configured (set DATAFORSEO_LOGIN + DATAFORSEO_PASSWORD)', needsKey: true };
     const t = (body.domain || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    if (!t) return { error: 'A domain is required.' };   // else DataForSEO returns a cryptic "Invalid Field: target"
     try {
       return await semrush.strikingDistance(t, { db: body.db || 'uk', limit: body.limit || 30 });
     } catch (e) {
@@ -1797,6 +1799,32 @@ const routes = {
         excludeDomain, internalLinkCandidates, siteId: body.siteId, db: site && site.semrush_db, now: Date.now(),
       });
     } catch (e) { return { error: 'Brief generation failed: ' + e.message }; }
+  },
+  // Background wrapper — a content brief does SERP research + several Claude calls and can
+  // run past the ~95s request cap (504'd at 102s on a slow keyword). Start → poll, same
+  // pattern as the audit/metadata/media jobs. Keyed by siteId (the UI runs one at a time).
+  'POST /content-brief-start': async (body) => {
+    if (!body.keyword) return { error: 'A keyword/cluster is required.' };
+    const key = body.siteId || 'nosite';
+    const cur = BRIEF_RUNS.get(key);
+    if (cur && cur.status === 'running') return { status: 'running' };
+    BRIEF_RUNS.set(key, { status: 'running', at: Date.now(), keyword: body.keyword });
+    (async () => {
+      try {
+        const r = await routes['POST /content-brief'](body);
+        BRIEF_RUNS.set(key, { status: r && r.error ? 'error' : 'done', result: r, error: r && r.error, at: Date.now(), keyword: body.keyword });
+      } catch (e) { BRIEF_RUNS.set(key, { status: 'error', error: String(e && e.message || e), at: Date.now() }); }
+    })();
+    return { status: 'running' };
+  },
+  'POST /content-brief-status': async (body) => {
+    const key = body.siteId || 'nosite';
+    const r = BRIEF_RUNS.get(key);
+    if (!r) return { status: 'unknown', reason: 'no active run — re-run' };
+    if (Date.now() - r.at > 10 * 60 * 1000) { BRIEF_RUNS.delete(key); return { status: 'unknown', reason: 'expired — re-run' }; }
+    if (r.status === 'done') return { status: 'done', ...(r.result || {}) };
+    if (r.status === 'error') return { status: 'error', error: r.error };
+    return { status: 'running', keyword: r.keyword };
   },
 
   // Live UK trending intelligence for a niche (news-weighted), with sources.
@@ -3508,6 +3536,7 @@ const routes = {
   'POST /airtable-tables': async (body) => {
     const pat = await db.getAirtablePat(body.siteId);
     if (!pat) return { error: 'Airtable not connected', needsConnect: true };
+    if (!body.baseId) return { error: 'A base is required.' };   // else Airtable returns a bare 404
     try { return { tables: await airtable.listTables(pat, body.baseId) }; }
     catch (e) { return { error: e.message }; }
   },

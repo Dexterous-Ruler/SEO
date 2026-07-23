@@ -2164,12 +2164,26 @@ function OpportunitiesScreen({ ctx }) {
       if(n>0&&paaSel.size) setPaaSel(new Set());
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(""));
   };
-  const genBrief = (c,i)=>{
+  const genBrief = async (c,i)=>{
     setBriefBusy(i);
-    API.contentBrief(s.id, c.primaryKeyword||c.suggestedTitle, c.intent).then(r=>{
-      if(r.error){ ctx.toast("Brief: "+r.error,"clay"); return; }
-      setBriefs(b=>({...b,[i]:{brief:r.brief,sources:r.sources||[]}}));
-    }).catch(e=>ctx.toast("Brief: "+e.message,"clay")).finally(()=>setBriefBusy(-1));
+    const kw=c.primaryKeyword||c.suggestedTitle;
+    try{
+      // Background job (start → poll): a brief does SERP research + Claude and can exceed
+      // the 95s request cap, which used to 504 the synchronous call.
+      const st=await API.contentBriefStart(s.id, kw, c.intent);
+      if(st&&st.error){ ctx.toast("Brief: "+st.error,"clay"); return; }
+      for(let n=0;n<80;n++){ // ~10 min ceiling
+        await new Promise(r=>setTimeout(r,4000));
+        const r=await API.contentBriefStatus(s.id);
+        if(!r) continue;
+        if(r.status==="running") continue;
+        if(r.status==="error"){ ctx.toast("Brief: "+(r.error||"failed"),"clay"); return; }
+        if(r.status==="unknown"){ ctx.toast("Brief run was lost — try again.","gold"); return; }
+        setBriefs(b=>({...b,[i]:{brief:r.brief,sources:r.sources||[]}})); return; // done
+      }
+      ctx.toast("Brief is taking unusually long — try again.","gold");
+    }catch(e){ ctx.toast("Brief: "+e.message,"clay"); }
+    finally{ setBriefBusy(-1); }
   };
   const withBriefs = (clusters)=> clusters.map((c)=>{ const idx=(data&&data.clusters||[]).indexOf(c); const b=briefs[idx]; return b?{...c,brief:b.brief,briefSources:b.sources}:c; });
   const pushAirtable = (clusters,tag)=>{
