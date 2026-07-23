@@ -514,6 +514,10 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
     system: sys('content.brief', siteId),
     promptKey: 'content.brief',
     maxTokens: 3000,
+    // Runs inside the /content-brief-start background job (not bound by the ~95s request
+    // cap), so give the synthesis room: 3000 tokens of structured JSON over dense research
+    // regularly ran past the default 60s attempt and then failed on a 34s retry sliver.
+    timeoutMs: 85000, deadlineMs: 170000,
     messages: [{ role: 'user', content: `${scope}TARGET MARKET: ${country}\nKEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}\n\nWrite the ${country} content brief as JSON.` }],
   });
   try {
