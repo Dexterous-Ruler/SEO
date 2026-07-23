@@ -4117,25 +4117,28 @@ function GscScreen({ ctx }) {
   };
   // Full REWRITE of a decaying page: preview the Claude-rewritten content (review), then publish to the live post.
   const [rewriteFor,setRewriteFor] = useState(null);  // { page, loading?|applying?, preview?|manual?|applied?|error? }
-  const doRewrite = (d)=>{
-    setRewriteFor({ page:d.page, loading:true });
+  const [rwFeedback,setRwFeedback] = useState("");    // free-text "change this" for the regenerate loop
+  const doRewrite = (d, feedback)=>{
+    // When regenerating from feedback, carry the current draft so the model REVISES it.
+    const priorDraft = (feedback && rewriteFor && rewriteFor.page===d.page && rewriteFor.preview && rewriteFor.preview.newHtml) || null;
+    setRewriteFor({ page:d.page, loading:true, feedbackApplied: feedback||null });
     const handle=(r)=>{
       if(!r||r.error){ setRewriteFor({ page:d.page, error:(r&&r.error)||"Rewrite failed" }); ctx.toast("Rewrite: "+((r&&r.error)||"failed"),"clay"); return; }
       if(r.status==="manual"){ setRewriteFor({ page:d.page, manual:r }); ctx.toast(r.reason||"Edit this page in your builder","gold"); return; }
       setRewriteFor({ page:d.page, preview:r });
     };
     // Generation runs in the BACKGROUND (long pages exceed the ~100s gateway cap) → poll.
-    API.contentRewrite(s.id, d, { start:true }).then(r=>{
+    API.contentRewrite(s.id, d, { start:true, feedback: feedback||undefined, priorDraft: priorDraft||undefined }).then(r=>{
       if(r&&r.error){ handle(r); return; }
       const postId = r && r.postId;
       if(!postId){ handle(r); return; }
       let tries=0;
       const poll=()=>{
         API.contentRewriteStatus(s.id, postId).then(st=>{
-          if(st && st.status==="running"){ if(++tries>75){ setRewriteFor({ page:d.page, error:"Rewrite timed out — try again." }); return; } setTimeout(poll,4000); return; }
+          if(st && st.status==="running"){ if(++tries>110){ setRewriteFor({ page:d.page, error:"Rewrite timed out — try again." }); return; } setTimeout(poll,4000); return; }
           if(st && st.status==="unknown"){ setRewriteFor({ page:d.page, error: st.reason||"Rewrite job was lost (server restart) — run it again." }); return; }
           handle(st);
-        }).catch(e=>{ if(++tries>75){ setRewriteFor({ page:d.page, error:e.message }); return; } setTimeout(poll,4000); });
+        }).catch(e=>{ if(++tries>110){ setRewriteFor({ page:d.page, error:e.message }); return; } setTimeout(poll,4000); });
       };
       setTimeout(poll,3000);
     }).catch(e=>{ setRewriteFor({ page:d.page, error:e.message }); ctx.toast(e.message,"clay"); });
@@ -4654,6 +4657,15 @@ function GscScreen({ ctx }) {
                                 </span>
                               </div>
                               <div className="scroll md" style={{ maxHeight:340, overflow:"auto", fontSize:12.5, lineHeight:1.5, background:"var(--bg)", padding:"10px 13px", borderRadius:8, boxShadow:"var(--neo-in)" }} dangerouslySetInnerHTML={{ __html: rewriteFor.preview.newHtml }} />
+                              {/* Feedback loop — tell it what to change and regenerate, keeping the rest */}
+                              <div style={{ marginTop:10, padding:"11px 13px", background:"var(--surface)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)" }}>
+                                <div style={{ fontSize:12, fontWeight:700, marginBottom:6, display:"flex", alignItems:"center", gap:6 }}><Icon name="sparkles" size={13} style={{ color:"var(--t-700)" }} />Not right? Tell it what to change</div>
+                                <textarea value={rwFeedback} onChange={e=>setRwFeedback(e.target.value)} placeholder="e.g. remove the case-law section, make the intro punchier, add a section on payment terms, drop the pricing paragraph…" rows={2} style={{ width:"100%", resize:"vertical", padding:"9px 11px", borderRadius:8, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5, fontFamily:"inherit", color:"var(--ink)", outline:"none" }} />
+                                <div style={{ display:"flex", gap:8, marginTop:8, alignItems:"center" }}>
+                                  <NeoButton kind="primary" size="sm" icon="sparkles" disabled={!rwFeedback.trim()} onClick={()=>{ const fb=rwFeedback.trim(); setRwFeedback(""); doRewrite(d, fb); }}>Regenerate with my changes</NeoButton>
+                                  <span style={{ fontSize:11, color:"var(--muted)" }}>Revises this draft — keeps everything you didn't mention.</span>
+                                </div>
+                              </div>
                             </>)}
                           </div>
                         )}

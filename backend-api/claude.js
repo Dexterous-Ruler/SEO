@@ -269,19 +269,19 @@ ${(pageContext && pageContext.excerpt) || '(could not fetch the live page)'}`,
 // Full REWRITE of a decaying page — expand/update the EXISTING article per the decay
 // refresh brief (NOT a new article, NOT a bolt-on block). Returns the complete updated
 // post body as HTML. Editable prompt: content.refresh.
-export async function refreshArticle({ page, currentContent, brief, linkCandidates, siteId }) {
+export async function refreshArticle({ page, currentContent, brief, linkCandidates, feedback, priorDraft, siteId }) {
   const p = page || {};
   const links = (linkCandidates || []).slice(0, 60).map((c) => `${c.title} → ${c.url}`).join('\n');
   const txt = await complete({
     system: sys('content.refresh', siteId), promptKey: 'content.refresh',
-    // A preserve-and-enhance of a long article must not be truncated by the token ceiling
-    // (a 2,500-word page + additions needs ~6k tokens) — that truncation was SHORTENING
-    // refreshed pages instead of keeping them. Runs in the /content-rewrite background job,
-    // so it's free of the ~95s request cap; give it room.
-    maxTokens: 8192, timeoutMs: 150000, deadlineMs: 320000, temperature: 0.5,
+    // A long article + additions can exceed 8k tokens and get CUT OFF mid-way (Karim saw
+    // a refresh "cut off before the full thing"). Runs in the /content-rewrite background
+    // job, free of the ~95s request cap, so give it a large ceiling and time.
+    maxTokens: 16000, timeoutMs: 220000, deadlineMs: 420000, temperature: 0.5,
     messages: [{
       role: 'user',
-      content: `AUDIT then REFRESH this EXISTING page so it recovers its lost rankings. This is an update, NOT a rewrite: keep the article's structure, wording and voice largely intact and surgically improve only what the brief flags (stale info, intent match, thin sections, missing FAQs/sub-topics, internal links, snippet structure). A reader should recognise it as the same page, improved. Keep it AT LEAST as long as the original — never shorten it; only trim genuinely redundant sentences. Do NOT start from scratch and do NOT add a visible "updated on" banner.
+      content: `AUDIT then REFRESH this EXISTING page so it recovers its lost rankings. This is an update, NOT a rewrite: keep the article's structure, wording and voice largely intact and surgically improve only what the brief flags (stale info, intent match, thin sections, missing FAQs/sub-topics, internal links, snippet structure). A reader should recognise it as the same page, improved. Keep it AT LEAST as long as the original — never shorten it; only trim genuinely redundant sentences. Output the COMPLETE article to the end — never stop mid-section or mid-sentence. Do NOT start from scratch and do NOT add a visible "updated on" banner.
+${feedback ? `\n=== THE USER REVIEWED THE LAST DRAFT AND ASKS FOR THESE CHANGES (HIGHEST PRIORITY — apply them exactly) ===\n${String(feedback).slice(0, 2000)}\n${priorDraft ? `\n=== THE DRAFT THEY ARE COMMENTING ON (revise THIS to satisfy their request; keep everything else) ===\n${String(priorDraft).slice(0, 24000)}\n` : ''}` : ''}
 
 PAGE: ${p.title || ''} — ${p.url || p.page || ''}
 

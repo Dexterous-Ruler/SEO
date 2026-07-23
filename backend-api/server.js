@@ -124,7 +124,7 @@ function stripBannedContentBlocks(html) {
 // On long pages this exceeds the edge gateway's ~100s response cap → 504. So it runs in
 // the BACKGROUND (started via /content-rewrite {start:true}); the client polls
 // /content-rewrite-status. This helper does the generation and returns the preview.
-async function generateRewritePreview({ wp, found, page, site, siteId, brief }) {
+async function generateRewritePreview({ wp, found, page, site, siteId, brief, feedback, priorDraft }) {
   const builder = (site && site.stack && site.stack.builder) || '';
   const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content,title`).catch(() => null);
   const rawHtml = (post && post.content && (post.content.raw != null ? post.content.raw : '')) || '';
@@ -147,7 +147,7 @@ async function generateRewritePreview({ wp, found, page, site, siteId, brief }) 
       .filter((p) => p.title && p.url).slice(0, 60);
   } catch (e) {}
   let newHtml = '';
-  try { newHtml = await claude.refreshArticle({ page: { ...page, title }, currentContent: rawHtml || rawText, brief: br, linkCandidates, siteId }); }
+  try { newHtml = await claude.refreshArticle({ page: { ...page, title }, currentContent: rawHtml || rawText, brief: br, linkCandidates, feedback, priorDraft, siteId }); }
   catch (e) { return { error: 'Rewrite failed: ' + e.message }; }
   // Defensive: strip anything the style rules forbid, regardless of the model —
   //  • horizontal rules / divider lines (Karim: never section-break lines in content)
@@ -3080,13 +3080,13 @@ const routes = {
       const prevJob = REWRITES.get(jobId);
       if (prevJob && prevJob.status === 'running') return { started: true, jobId, postId: found.id, status: 'running' };
       REWRITES.set(jobId, { status: 'running', at: Date.now() });
-      generateRewritePreview({ wp, found, page, site, siteId: body.siteId, brief: body.brief })
+      generateRewritePreview({ wp, found, page, site, siteId: body.siteId, brief: body.brief, feedback: body.feedback, priorDraft: body.priorDraft })
         .then((r) => REWRITES.set(jobId, { status: (r && !r.error) ? 'done' : 'error', result: r, error: r && r.error, at: Date.now() }))
         .catch((e) => REWRITES.set(jobId, { status: 'error', error: String(e.message || e), at: Date.now() }));
       return { started: true, jobId, postId: found.id, status: 'running' };
     }
     // Synchronous generate (short pages / preview), or the generation half of an apply.
-    const gen = await generateRewritePreview({ wp, found, page, site, siteId: body.siteId, brief: body.brief });
+    const gen = await generateRewritePreview({ wp, found, page, site, siteId: body.siteId, brief: body.brief, feedback: body.feedback, priorDraft: body.priorDraft });
     if (!gen || gen.status !== 'preview') return gen || { error: 'Rewrite failed.' };
     if (!body.apply) return gen;
     if (site && site.write_armed === false && !body.force) return { status: 'blocked', reason: 'This site is read-only — arm writes for it first, then apply the rewrite.' };
