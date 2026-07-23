@@ -15,7 +15,12 @@ const softPropStatus = {
 /* ================= REVIEW QUEUE ================= */
 function ProposalCard({ p, ctx, open, onToggle }) {
   const dm = softDisc[p.disc] || softDisc.seo, st = softPropStatus[p.status] || softPropStatus.proposed;
-  const isProd = p.target==="production", canAct = p.status==="proposed";
+  // A write hits production whenever the target is explicitly production OR the site has
+  // no staging URL configured (true for every site today) — the old check keyed only on
+  // p.target, which defaults to "staging", so it falsely showed a "Staging" chip and hid
+  // the production warning even though the change went straight to the live site.
+  const noStaging = !(ctx && ctx.site && ctx.site.staging);
+  const isProd = p.target==="production" || noStaging, canAct = p.status==="proposed";
   return (
     <SoftCard hover={false} pad={0} style={{ overflow:"hidden", boxShadow:open?"var(--neo)":"var(--neo-sm)" }}>
       <div className="row-link" onClick={onToggle} style={{ display:"flex", alignItems:"center", gap:14, padding:"15px 18px" }}>
@@ -61,7 +66,8 @@ function ApplyModal({ ctx }) {
   const [phase,setPhase] = useState(-1);
   const [result,setResult] = useState(null);
   const STEPS = ["Snapshotting current values (rollback point)","Applying via REST / theme channel","Reading back every write to confirm","Purging caching-plugin cache","Re-scoring affected pages"];
-  const prodCount = approved.filter(p=>p.target==="production").length;
+  const noStaging = !(ctx.site && ctx.site.staging);
+  const prodCount = approved.filter(p=>p.target==="production"||noStaging).length;
   // Advance the step checklist while applying, but HOLD on the last step until the
   // REAL commitApplied resolves — completion (phase 99) is driven by the actual writes,
   // not a timer, so the "verified" card can never appear before anything was written.
@@ -85,14 +91,14 @@ function ApplyModal({ ctx }) {
             <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:16 }}>
               {approved.map(p=>(
                 <div key={p.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"11px 13px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
-                  <Icon name="check" size={15} style={{ color:"var(--t-600)" }} /><span style={{ fontSize:13.5, fontWeight:600, flex:1 }}>{p.title}</span><Chip tone={p.target==="production"?"gold":"gray"} size="sm">{p.target}</Chip>
+                  <Icon name="check" size={15} style={{ color:"var(--t-600)" }} /><span style={{ fontSize:13.5, fontWeight:600, flex:1 }}>{p.title}</span><Chip tone={(p.target==="production"||noStaging)?"gold":"gray"} size="sm">{(p.target==="production"||noStaging)?"production":"staging"}</Chip>
                 </div>
               ))}
               {approved.length===0 && <div style={{ fontSize:13.5, color:"var(--muted)", textAlign:"center", padding:"20px 0" }}>No approved changes to apply yet.</div>}
             </div>
             <div style={{ fontSize:13, fontWeight:700, marginBottom:9 }}>Safety guarantees</div>
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:14 }}>
-              {[["layers","Staging-first where available"],["eye","Verify-after-write read-back"],["undo","One-click rollback per change"],["bolt","Cache purge + rate-limited"]].map(([ic,t])=>(
+              {[[noStaging?"alert":"layers",noStaging?"Writes go to production":"Staging-first where available"],["eye","Verify-after-write read-back"],["undo","One-click rollback per change"],["bolt","Cache purge + rate-limited"]].map(([ic,t])=>(
                 <div key={t} style={{ display:"flex", alignItems:"center", gap:9, padding:"10px 12px", background:"var(--t-50)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-xs)" }}><Icon name={ic} size={16} style={{ color:"var(--t-700)" }} /><span style={{ fontSize:12.5, fontWeight:600, color:"var(--t-800)" }}>{t}</span></div>
               ))}
             </div>

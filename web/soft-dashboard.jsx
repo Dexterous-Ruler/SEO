@@ -1502,7 +1502,14 @@ function N8nScreen({ ctx }){
       setRunOut(r||{});
       if(r&&r.error) ctx.toast("n8n run: "+r.error,"clay");
       else if(r&&r.ranVia==="none") ctx.toast("No webhook trigger — run it from the n8n editor.","gold");
-      else ctx.toast("Workflow triggered ✓","teal");
+      else {
+        // A writer webhook accepts the blank trigger (HTTP 200) but the run then dies at
+        // its first Airtable node because no ?recordID was supplied — so a green
+        // "triggered ✓" was misleading. Be honest for writer flows.
+        const curWf=(workflows||[]).find(w=>String(w.id)===String(wfId));
+        if(curWf&&curWf.isWriter) ctx.toast("Trigger fired, but writer flows need a specific Airtable record (?recordID) — a blank run won't produce an article. Flip that record's Status in Airtable for a real run.","gold");
+        else ctx.toast("Workflow triggered ✓","teal");
+      }
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusy(""));
   };
   const loadErrs = ()=>{
@@ -1617,11 +1624,11 @@ function N8nScreen({ ctx }){
             })}
           </div>
           <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap", fontSize:11.5, color:"var(--muted)", marginTop:12 }}>
-            <Chip tone="teal" size="sm">✓ covered</Chip>
+            <Chip tone="teal" size="sm">✓ active</Chip>
             <Chip tone="clay" size="sm">⚠ duplicate</Chip>
             <Chip tone="gold" size="sm">off</Chip>
             <Chip tone="gray" size="sm">missing</Chip>
-            <span>· click a type to open its prompts · nothing is deleted — extras &amp; duplicates are only flagged.</span>
+            <span>· "active" = a workflow exists and is switched on — not that it has produced an article (check Run history in n8n) · click a type to open its prompts · nothing is deleted.</span>
           </div>
         </SoftCard>
       )}

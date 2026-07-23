@@ -258,6 +258,40 @@ export async function auditPage(url, { creds, withContent = false, siteId = null
     });
   }
 
+  // EMPTY / PLACEHOLDER CONTENT — a live, INDEXABLE page with almost no real body text
+  // (or a literal placeholder heading like "Test Heading 1") should be filled or
+  // noindexed, not silently indexed. Nothing else in the audit looks at rendered word
+  // count — this is how goodfor's "Test Heading" recipes and blank pages went unflagged.
+  if (html && !fetchBlocked) {
+    const isNoindex = /<meta[^>]+name=["']robots["'][^>]*\bnoindex\b/i.test(html);
+    if (!isNoindex) {
+      const body = html
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<(nav|header|footer|aside|form|noscript|svg)\b[\s\S]*?<\/\1>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim();
+      const words = body ? body.split(' ').filter(Boolean).length : 0;
+      const h1h2 = (html.match(/<h[12][^>]*>[\s\S]*?<\/h[12]>/gi) || []).map((x) => x.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean);
+      const placeholder = h1h2.some((h) => /^(test heading|lorem ipsum|placeholder|untitled|sample (page|post)|heading \d+)$/i.test(h.trim())) || /lorem ipsum/i.test(body.slice(0, 400));
+      if (placeholder || words < 120) {
+        findings.push({
+          id: `f${++fi}`,
+          key: findingKey({ auditId: 'empty-content', page: path }),
+          disc: 'seo',
+          title: placeholder ? 'Placeholder content is live and indexable' : 'Thin/empty page (little real content)',
+          page: path,
+          impact: placeholder ? 'high' : 'medium',
+          traffic: '—',
+          gapPts: placeholder ? 8 : 5,
+          channel: 'manual',
+          detail: placeholder
+            ? `This indexable page renders placeholder text${h1h2[0] ? ` ("${h1h2[0].slice(0, 40)}")` : ''}. Replace it with real content or add noindex.`
+            : `Only ~${words} words of real body content on an indexable page — too thin to rank and a quality-signal risk. Add substantive content or noindex.`,
+          _auditId: 'empty-content',
+        });
+      }
+    }
+  }
+
   // Page fetch blocked → say so LOUDLY instead of silently skipping the SEO layer
   // (and instead of ever auditing a challenge page as if it were the site).
   if (fetchBlocked) {
