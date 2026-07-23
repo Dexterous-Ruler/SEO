@@ -776,6 +776,28 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids } = {}) {
 //   • { skipped, reason } → no Airtable / no Article Writer table
 // A row is "complete" when its Status matches DONE_STATUS and it carries a URL.
 const DONE_STATUS = /article\s*complete|complete|published|done/i;
+
+// Is this URL a genuinely-live published article, or a draft masquerading as done? The
+// n8n "Wordpress make post" node has no status param, so it defaults to DRAFT; a draft's
+// ?p=<id> URL 301s to the homepage for logged-out visitors (or 404s). Marking that
+// "published" — and drift-baselining the redirect — recorded the site HOMEPAGE as the
+// article. Confirm the URL resolves 200 to something other than the site root.
+async function isLivePublished(url, siteRoot) {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 12000);
+    let res;
+    try { res = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SentinelBot/2.0)' }, signal: ctrl.signal }); }
+    finally { clearTimeout(timer); }
+    if (!res || !res.ok) return false;
+    const norm = (u) => String(u || '').replace(/[?#].*$/, '').replace(/\/+$/, '');
+    const finalUrl = norm(res.url || url);
+    const root = norm(siteRoot);
+    if (root && (finalUrl === root)) return false;      // 301'd to homepage → not really published
+    if (/[?&](p|page_id)=\d+/.test(res.url || url)) return false;  // stayed a bare guid → draft/private
+    return true;
+  } catch (e) { return false; }
+}
 const URL_FIELDS = ['Published URL', 'Published Url', 'URL', 'Url', 'Link', 'Article URL', 'Published Link'];
 function firstUrl(fields) {
   for (const k of URL_FIELDS) {
@@ -841,7 +863,9 @@ export async function syncPublished(siteId) {
 
   // 4) Match completed rows → open opportunities by Keyword; advance to
   //    'published' and capture a drift baseline for the published URL.
-  let published = 0, baselines = 0;
+  const siteRow = await db.getSite(siteId).catch(() => null);
+  const siteRoot = siteRow && siteRow.url ? String(siteRow.url) : '';
+  let published = 0, baselines = 0, skippedNotLive = 0;
   const seenKw = new Set(), seenUrl = new Set();
   const errors = [];
   for (const { keyword, url } of completed) {
@@ -849,6 +873,10 @@ export async function syncPublished(siteId) {
     seenKw.add(keyword);
     const opp = openByKw.get(keyword);
     if (!opp) continue;   // completed article with no matching open opportunity — ignore.
+
+    // Verify it's genuinely live before advancing (and before drift-baselining a redirect).
+    // A draft stays 'queued' — nothing is lost, and it advances on the next sync once live.
+    if (!(await isLivePublished(url, siteRoot))) { skippedNotLive++; continue; }
 
     const patched = await setStatus(opp.id, 'published').catch((e) => ({ error: String(e.message || e) }));
     if (patched && patched.notProvisioned) return { ...NOT_PROVISIONED, published };
@@ -865,6 +893,7 @@ export async function syncPublished(siteId) {
   }
 
   const out = { published, baselines, completed: completed.length, candidates: openByKw.size, table: tbl.name };
+  if (skippedNotLive) out.skippedNotLive = skippedNotLive;   // done in Airtable but the URL isn't live (draft) — left queued
   if (errors.length) out.errors = errors.slice(0, 10);
   return out;
 }

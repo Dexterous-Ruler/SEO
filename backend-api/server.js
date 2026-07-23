@@ -130,6 +130,37 @@ const OPP_RUNS = new Map();     // siteId -> { status:'running'|'done'|'error', 
 // literal "(generated on approval)" as BOTH its title and og:title — written by an early
 // apply before any guard existed, and invisible to length-based checks because it is short.
 const PLACEHOLDER_RE = /agent-drafted fix|review before apply|generated on approval|generated on publish|to be generated|placeholder|lorem ipsum|\{\{|\bTBD\b|\[insert |^\(.*\)$/i;
+// Brand tokens for a site (from its name + domain label). Used to catch cross-site
+// contamination — e.g. settlement's /expertise/ pages carry "Fast ILA" copy (clone
+// residue), which is a DIFFERENT connected site's brand appearing on this one.
+function brandTokensForSite(s) {
+  const toks = new Set();
+  const push = (raw) => {
+    let t = String(raw || '').toLowerCase().trim();
+    if (!t) return;
+    try { if (/^https?:\/\//.test(t)) t = new URL(t).hostname; } catch (e) {}
+    t = t.replace(/^www\./, '').replace(/\.(co\.uk|com|org|net|app|ai|io|uk)$/g, '');
+    const spaced = t.replace(/[-_.]+/g, ' ').trim();
+    const tight = t.replace(/[-_.]+/g, '').trim();
+    if (spaced.length >= 5) toks.add(spaced);
+    if (tight.length >= 5) toks.add(tight);
+  };
+  push(s && s.name); push(s && s.url);
+  return [...toks];
+}
+// The brand tokens of OTHER connected sites that don't also belong to this one.
+async function foreignBrandTokens(site) {
+  try {
+    const own = new Set(brandTokensForSite(site));
+    const all = await db.listSites();
+    const out = new Set();
+    for (const o of (all || [])) {
+      if (!o || o.id === (site && site.id)) continue;
+      for (const t of brandTokensForSite(o)) if (!own.has(t)) out.add(t);
+    }
+    return [...out];
+  } catch (e) { return []; }
+}
 const META_RUNS = new Map();   // siteId -> metadata-repair background job
 const AUDIT_RUNS = new Map();  // siteId -> { status, progress?, result?, error?, at } — scope-aware audit background job
 const MEDIA_RUNS = new Map();  // siteId -> image-optimization background job (download+convert+upload is heavy)
@@ -2409,6 +2440,10 @@ const routes = {
       } catch (e) { /* type unavailable on this site */ }
     }
     if (!items.length) return { error: 'No published pages/posts found to check.' };
+    // Cross-site brand guard: regenerate meta that carries ANOTHER connected site's brand
+    // (clone residue), and never write generated copy that still references one.
+    const foreign = await foreignBrandTokens(site);
+    const hasForeignBrand = (s) => { const x = String(s || '').toLowerCase(); return foreign.some((b) => x.includes(b)); };
     const out = [];
     const work = items.slice(0, limit);
     let _i = 0;
@@ -2464,8 +2499,11 @@ const routes = {
         } catch (e) { rec.descStatus = 'failed: ' + String(e.message || e).slice(0, 80); }
         out.push(rec); continue;
       }
-      // 3) Meta description — generate only when genuinely missing or too short to rank.
-      if (curDesc.length < 70) {
+      // 3) Meta description — generate when missing/too short to rank OR when the current
+      //    one carries a foreign brand (cross-site clone residue).
+      const descForeign = curDesc && hasForeignBrand(curDesc);
+      if (descForeign) rec.descForeignBrand = true;
+      if (curDesc.length < 70 || descForeign) {
         try {
           let desc = String(await claude.metaDescription({ url: it.url, title: curTitle || it.title, headings, excerpt, siteId: body.siteId })).replace(/^["']|["']$/g, '').trim();
           // Never publish a mid-word truncation: the generator's token ceiling can cut the
@@ -2478,7 +2516,9 @@ const routes = {
           }
           desc = desc.replace(/\s+/g, ' ').trim();
           rec.desc = desc;
-          if (!body.dryRun && desc) {
+          // Guard: refuse to write copy that STILL names another site's brand.
+          if (hasForeignBrand(desc)) { rec.descStatus = 'skipped: generated copy still referenced another site’s brand'; }
+          else if (!body.dryRun && desc) {
             const r = await writeMetaResilient(wp, it.type, it.id, FIELD.meta_description, desc, 'meta_description');
             rec.descStatus = r.status; if (r.viaFallback) rec.descVia = r.viaFallback;
           } else rec.descStatus = 'dry-run';
@@ -2487,8 +2527,13 @@ const routes = {
       // 4) Title — opt-in (fixTitles). Rewrite when it would truncate in the SERP OR when
       //    it is a leftover placeholder (short, so no length check would ever catch it).
       const titleIsPlaceholder = !curTitle || PLACEHOLDER_RE.test(curTitle);
+      const titleForeign = curTitle && hasForeignBrand(curTitle);
       if (titleIsPlaceholder) rec.titlePlaceholder = curTitle || '(empty)';
-      if (body.fixTitles && (curTitle.length > 62 || titleIsPlaceholder)) {
+      if (titleForeign) rec.titleForeignBrand = true;
+      // Rewrite when it would truncate in the SERP, is a leftover placeholder, OR carries
+      // another site's brand (clone residue) — the last one is short so no length check
+      // would ever catch it. A wrong-brand title is fixed even when fixTitles is off.
+      if ((body.fixTitles && (curTitle.length > 62 || titleIsPlaceholder)) || titleForeign) {
         try {
           let t = String(await claude.titleRewrite({ url: it.url, currentTitle: curTitle, brand: (site && site.name) || '', siteId: body.siteId })).replace(/^["']|["']$/g, '').trim();
           // A slightly-long rewrite is still far better than the 100-char original it
@@ -2500,7 +2545,8 @@ const routes = {
             t = (sep > 24 ? cut.slice(0, sep) : cut.slice(0, cut.lastIndexOf(' '))).trim();
           }
           rec.title = t;
-          if (!body.dryRun && t && t.length <= 65) {
+          if (hasForeignBrand(t)) { rec.titleStatus = 'skipped: generated title still referenced another site’s brand'; }
+          else if (!body.dryRun && t && t.length <= 65) {
             const r = await writeMetaResilient(wp, it.type, it.id, FIELD.title, t, 'title');
             rec.titleStatus = r.status; if (r.viaFallback) rec.titleVia = r.viaFallback;
           } else rec.titleStatus = body.dryRun ? 'dry-run' : 'skipped (could not shorten safely)';

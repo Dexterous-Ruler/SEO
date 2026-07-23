@@ -165,8 +165,13 @@ export async function suggestForSite(siteId, { maxSources = 8, targetUrl = null 
       if (!l.anchor || !insertableIn(l.anchor, normUnits)) { dropped++; continue; }
       // …and not already a link on the live page (inserter skips existing links).
       if (alreadyLinked(l.anchor, linkedTexts)) { dropped++; continue; }
+      // Never surface a link to a URL that isn't a REAL published page in this site's own
+      // corpus. The model can invent both hostnames (fastila.co.uk vs fast-ila.co.uk) and
+      // paths; those 404. The target must be an exact corpus URL — which is same-host by
+      // construction — so an off-site or hallucinated target is dropped here.
       const target = corpus.find((c) => c.url === l.targetUrl);
-      out.push({ sourcePage: src.url, sourceId: src.id, sourceType: src.type, sourceTitle: src.title, anchor: l.anchor, targetUrl: l.targetUrl, targetTitle: target ? target.title : '', reason: l.reason });
+      if (!target) { dropped++; continue; }
+      out.push({ sourcePage: src.url, sourceId: src.id, sourceType: src.type, sourceTitle: src.title, anchor: l.anchor, targetUrl: l.targetUrl, targetTitle: target.title, reason: l.reason });
     }
   }
   return { corpusSize: corpus.length, analyzed: sources.length, count: out.length, droppedNotOnPage: dropped, skippedNoUnits, liveCms: cms.cms, cmsMismatch, suggestions: out, aiError };
