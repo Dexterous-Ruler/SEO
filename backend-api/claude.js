@@ -296,7 +296,7 @@ ${links || '(none available — add NO internal links rather than invent any)'}
 
 STYLE RULES (these OVERRIDE the brief — obey even if the brief says otherwise):
 - NEVER display a raw/bare URL as visible text. EVERY link must be a proper <a href="…">natural anchor text</a> hyperlink — e.g. write <a href="…">book a free consultation</a>, never the literal "https://…" as words.
-- Internal links: the href must be an EXACT URL from the list above. NEVER invent, guess or modify a URL, and never link to an email address. If nothing fits, add no link.
+- Internal links are OPTIONAL — NEVER force them. Add one ONLY where it genuinely helps the reader at that exact point; if nothing is truly relevant, add NONE (zero internal links is a perfectly good outcome — do not pad, and never add a link just because the list or the brief offers one). When you do link, the href must be an EXACT URL from the list above — never invent, guess or modify a URL, and never link to an email address.
 - Calls to action: send readers to BOOK A FREE CONSULTATION — hyperlink an anchor like "book a free consultation" to the site's consultation/booking page (choose it from the list above: a URL containing "free-consultation", "book", "consult", "appointment" or, failing those, "contact"). You may also give the phone number. NEVER tell readers to email and never output an email address as a CTA.
 - No dividers/section-break lines (no <hr>). No "Related Resources / Further Reading / Useful Links" list section — weave links into the prose.
 - OMIT any section with no real, verified content — never a "No cases verified"/"None found"/placeholder row or empty table.
