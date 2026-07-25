@@ -1427,12 +1427,18 @@ function N8nScreen({ ctx }){
   // writers (the classifier tags each). Nothing is hidden permanently — "Show all"
   // reveals templates/experiments too. Duplicate (same site+type) writers are flagged.
   const SITE_ORDER = ["Go Legal AI","Go Legal","Go Visa","Fast ILA","Settlement Agreement Lawyers","GoodFor","Other"];
-  const shownWf = (workflows||[]).filter(w=> showAll || w.isWriter);
+  // A deactivated DUPLICATE writer (inactive, but its site+type already has an ACTIVE
+  // writer) is a retired second copy — e.g. the old SAL writer we turned off. Hide it from
+  // the default writers view so only the live one shows. Still revealed under "Show all",
+  // so nothing is permanently hidden.
+  const hasActiveWriter = {}; for(const w of (workflows||[])){ if(w.isWriter && w.active){ hasActiveWriter[w.site+"|"+(w.type||"")]=true; } }
+  const isDeadDup = (w)=> w.isWriter && !w.active && !!hasActiveWriter[w.site+"|"+(w.type||"")];
+  const shownWf = (workflows||[]).filter(w=> showAll ? true : (w.isWriter && !isDeadDup(w)));
   const bySite = {}; for(const w of shownWf){ (bySite[w.site]=bySite[w.site]||[]).push(w); }
   const groups = SITE_ORDER.filter(s=>bySite[s]&&bySite[s].length).map(s=>({ site:s, items:bySite[s] }));
-  const dupOf = {}; for(const w of (workflows||[])){ if(w.isWriter){ const k=w.site+"|"+(w.type||""); dupOf[k]=(dupOf[k]||0)+1; } }
+  const dupOf = {}; for(const w of (workflows||[])){ if(w.isWriter && !isDeadDup(w)){ const k=w.site+"|"+(w.type||""); dupOf[k]=(dupOf[k]||0)+1; } }
   const isDup = (w)=> w.isWriter && dupOf[w.site+"|"+(w.type||"")]>1;
-  const writerN = (workflows||[]).filter(w=>w.isWriter).length;
+  const writerN = (workflows||[]).filter(w=>w.isWriter && !isDeadDup(w)).length;
   const dupGroups = Object.keys(dupOf).filter(k=>dupOf[k]>1).length;
   const siteN = groups.filter(g=>g.site!=="Other").length;
 
