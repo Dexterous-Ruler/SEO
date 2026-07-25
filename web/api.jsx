@@ -143,6 +143,10 @@
     contentBrief(siteId, keyword, intent) { return engine("/content-brief", { siteId, keyword, intent }); },
     contentBriefStart(siteId, keyword, intent) { return engine("/content-brief-start", { siteId, keyword, intent }); },
     contentBriefStatus(siteId) { return engine("/content-brief-status", { siteId }); },
+    // Keyword Gap → article planning
+    gapTitle(siteId, keyword, opts) { return engine("/gap-title", Object.assign({ siteId, keyword }, opts || {})); },
+    // Push one approved {keyword,title,brief} to the Article Writer (reuses the opportunities path).
+    gapPushArticle(siteId, keyword, title, brief) { return engine("/airtable-sync", { siteId, kinds: ["opportunities"], clusters: [{ primaryKeyword: keyword, keyword, suggestedTitle: title, brief: Object.assign({}, brief, { title }) }] }); },
     // Content Engine — one unified, de-duped, scored worklist from every content source
     // (keywords, trending, People Also Ask, AI-visibility). HEAVY/slow route (~20-60s).
     // notProvisioned until supabase/content-engine.sql is run.

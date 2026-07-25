@@ -1868,6 +1868,15 @@ const routes = {
     if (r.status === 'error') return { status: 'error', error: r.error };
     return { status: 'running', keyword: r.keyword };
   },
+  // Turn a short gap keyword into a publishable article TITLE (niche-grounded). Fast — no
+  // research — so the Keyword Gap "plan article" flow can regenerate the title on feedback.
+  'POST /gap-title': async (body) => {
+    if (!body.keyword) return { error: 'A keyword is required.' };
+    try {
+      const title = await claude.gapTitle({ keyword: body.keyword, angle: body.angle, current: body.currentTitle, feedback: body.feedback, siteId: body.siteId });
+      return { title };
+    } catch (e) { return { error: 'Title generation failed: ' + String(e.message || e).slice(0, 80) }; }
+  },
 
   // Live UK trending intelligence for a niche (news-weighted), with sources.
   'POST /trending-intel': async (body) => {

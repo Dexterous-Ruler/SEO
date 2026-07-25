@@ -152,6 +152,24 @@ Output only the new title.`,
   return txt.replace(/^["']|["']$/g, '').slice(0, 65);
 }
 
+// Turn a short gap keyword into a real, publishable ARTICLE title (not a bare keyword).
+// Grounded in the site's niche (geo_context via SYSTEM). Optional feedback lets the user
+// steer a regeneration ("more specific", "mention directors", "less clickbait").
+export async function gapTitle({ keyword, angle, current, feedback, siteId }) {
+  const txt = await complete({
+    system: SYSTEM(siteId), promptKey: 'content.rules',
+    maxTokens: 160, temperature: 0.8,
+    messages: [{
+      role: 'user',
+      content: `Propose ONE compelling, specific, SEO-strong blog ARTICLE title for this site, targeting the keyword below. It must read as a genuine article this business would publish — useful and specific, never a bare keyword or a one-word heading. British English. 55-70 characters is ideal.
+KEYWORD: ${keyword}${angle ? `\nANGLE: ${angle}` : ''}${current ? `\nCURRENT TITLE: ${current}` : ''}${feedback ? `\n\nThe user reviewed the current title and asks you to change it: "${feedback}" — honour this exactly.` : ''}
+
+Return ONLY the title text — no quotes, no numbering, no commentary.`,
+    }],
+  });
+  return String(txt || '').replace(/^["']|["']$/g, '').replace(/\s+/g, ' ').trim().slice(0, 160);
+}
+
 // Alt text for an image, from its filename + surrounding context.
 export async function altText({ filename, context, pageTitle, siteId }) {
   const txt = await complete({

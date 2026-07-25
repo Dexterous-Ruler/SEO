@@ -4801,6 +4801,8 @@ function SemrushScreen({ ctx }) {
   const [gaps,setGaps] = useState(null);
   const [gapSel,setGapSel] = useState(()=>new Set());   // keywords ticked for a selective push
   const [gapBusy,setGapBusy] = useState(false);
+  const [gapPlan,setGapPlan] = useState(null);  // { keyword, loading?|brief?|error?|pushed?, title?, busy? }
+  const [gapPlanFb,setGapPlanFb] = useState("");   // feedback for regenerating the title
   const [striking,setStriking] = useState(null);
   const [strikeBusy,setStrikeBusy] = useState(false);
   const [tval,setTval] = useState(null);
@@ -4874,6 +4876,48 @@ function SemrushScreen({ ctx }) {
   };
   // Push gap keywords into the MASTER Article Writer as writer-ready rows (Title + Keyword +
   // Content Brief). `only` = the ticked subset; omitted → all. De-duped by Keyword server-side.
+  // Plan an article from a single gap keyword: generate a real title + brief (research),
+  // let the user tweak the title, then push to the Article Writer.
+  const planGapArticle = (g)=>{
+    setGapPlanFb("");
+    setGapPlan({ keyword:g.keyword, loading:true });
+    API.contentBriefStart(s.id, g.keyword).then(st=>{
+      if(st&&st.error){ setGapPlan({ keyword:g.keyword, error:st.error }); return; }
+      let tries=0;
+      const poll=()=>{
+        API.contentBriefStatus(s.id).then(r=>{
+          if(!r){ if(++tries>90){setGapPlan({keyword:g.keyword,error:"Timed out — try again."});return;} setTimeout(poll,4000); return; }
+          if(r.status==="running"){ if(++tries>90){setGapPlan({keyword:g.keyword,error:"Timed out — try again."});return;} setTimeout(poll,4000); return; }
+          if(r.status==="error"){ setGapPlan({ keyword:g.keyword, error:r.error||"Brief failed" }); return; }
+          if(r.status==="unknown"){ setGapPlan({ keyword:g.keyword, error:"Run was lost — try again." }); return; }
+          const b=r.brief||{};
+          setGapPlan({ keyword:g.keyword, brief:b, sources:r.sources||[], title:(b.title||g.keyword) });
+        }).catch(e=>{ if(++tries>90){setGapPlan({keyword:g.keyword,error:e.message});return;} setTimeout(poll,4000); });
+      };
+      setTimeout(poll,3500);
+    }).catch(e=>setGapPlan({ keyword:g.keyword, error:e.message }));
+  };
+  const regenGapTitle = ()=>{
+    if(!gapPlan||!gapPlan.brief) return;
+    const fb=gapPlanFb.trim();
+    setGapPlan(p=>({ ...p, busy:"title" }));
+    API.gapTitle(s.id, gapPlan.keyword, { angle:(gapPlan.brief&&gapPlan.brief.angle)||"", currentTitle:gapPlan.title, feedback:fb||undefined }).then(r=>{
+      if(r&&r.error){ ctx.toast("Title: "+r.error,"clay"); setGapPlan(p=>({ ...p, busy:null })); return; }
+      setGapPlanFb("");
+      setGapPlan(p=>({ ...p, title:(r&&r.title)||p.title, busy:null }));
+    }).catch(e=>{ ctx.toast(e.message,"clay"); setGapPlan(p=>({ ...p, busy:null })); });
+  };
+  const pushGapArticle = ()=>{
+    if(!gapPlan||!gapPlan.brief) return;
+    setGapPlan(p=>({ ...p, busy:"push" }));
+    API.gapPushArticle(s.id, gapPlan.keyword, (gapPlan.title||"").trim(), gapPlan.brief).then(r=>{
+      if(r&&r.error){ ctx.toast(r.error==="Airtable not connected"?"Connect Airtable first (Airtable Sync tab)":r.error,"clay"); setGapPlan(p=>({ ...p, busy:null })); return; }
+      const o=(r&&r.synced&&r.synced.opportunities)||{};
+      const ok=(o.pushed||0)+(o.updated||0)>0;
+      ctx.toast(ok?"Pushed to Article Writer ✓ — set Status to “Write Article” to generate":"Already in the Article Writer", ok?"teal":"gold");
+      setGapPlan(p=>({ ...p, busy:null, pushed:true }));
+    }).catch(e=>{ ctx.toast("Airtable: "+e.message,"clay"); setGapPlan(p=>({ ...p, busy:null })); });
+  };
   const pushGapsToWriter = (only)=>{
     const list = (gaps&&gaps.gaps||[]).filter(g=>!only||only.has(g.keyword));
     if(!list.length) return;
@@ -5147,13 +5191,42 @@ function SemrushScreen({ ctx }) {
                     </div>
                     {(gaps.gaps||[]).length===0 && <div style={{ padding:"12px", fontSize:13, color:"var(--muted)" }}>No gap keywords found after filtering (all were competitor brand names, excluded terms or off-niche).</div>}
                     {/* render EVERY gap (backend caps at 80) — a hidden tail under "Push all" meant pushing keywords the user never saw */}
-                    {(gaps.gaps||[]).map((g,i)=>{ const on=gapSel.has(g.keyword); return (
-                      <div key={i} onClick={()=>setGapSel(p=>{ const n=new Set(p); if(n.has(g.keyword)) n.delete(g.keyword); else n.add(g.keyword); return n; })} style={{ display:"flex", alignItems:"center", padding:"9px 12px", borderRadius:"var(--r-md)", background:on?"var(--t-50)":"var(--bg)", boxShadow:on?"inset 0 0 0 1.5px var(--t-500)":"var(--neo-in)", cursor:"pointer", transition:"background .12s ease" }} title={on?"Click to unselect":"Click to select for push"}>
+                    {(gaps.gaps||[]).map((g,i)=>{ const on=gapSel.has(g.keyword); const planning=gapPlan&&gapPlan.keyword===g.keyword; return (
+                      <div key={i}>
+                      <div onClick={()=>setGapSel(p=>{ const n=new Set(p); if(n.has(g.keyword)) n.delete(g.keyword); else n.add(g.keyword); return n; })} style={{ display:"flex", alignItems:"center", padding:"9px 12px", borderRadius:"var(--r-md)", background:on?"var(--t-50)":"var(--bg)", boxShadow:on?"inset 0 0 0 1.5px var(--t-500)":"var(--neo-in)", cursor:"pointer", transition:"background .12s ease" }} title={on?"Click to unselect":"Click to select for push"}>
                         <span style={{ width:30, display:"grid", placeItems:"center" }}><span style={{ width:17, height:17, borderRadius:5, display:"grid", placeItems:"center", background:on?"var(--t-500)":"var(--bg-2)", boxShadow:on?"none":"var(--neo-in)", color:"#fff", fontSize:11, fontWeight:900 }}>{on?"✓":""}</span></span>
                         <span style={{ width:50 }}><span style={{ display:"inline-grid", placeItems:"center", minWidth:30, height:22, padding:"0 6px", borderRadius:7, background:TT[posTone(g.competitorPos)][1], color:TT[posTone(g.competitorPos)][0], fontSize:12, fontWeight:800 }}>#{g.competitorPos}</span></span>
                         <span style={{ flex:1, fontSize:13, fontWeight:600, fontFamily:"var(--mono)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{g.keyword}</span>
-                        <span style={{ width:90, textAlign:"right", fontSize:13, fontWeight:700 }}>{fmt(g.volume)}</span>
-                        <span style={{ width:70, textAlign:"right", fontSize:12, color:"var(--muted)" }}>${(g.cpc||0).toFixed(2)}</span>
+                        <span style={{ width:80, textAlign:"right", fontSize:13, fontWeight:700 }}>{fmt(g.volume)}</span>
+                        <span style={{ width:56, textAlign:"right", fontSize:12, color:"var(--muted)" }}>${(g.cpc||0).toFixed(2)}</span>
+                        <NeoButton kind={planning?"soft":"ghost"} size="sm" icon={planning&&gapPlan.loading?undefined:"sparkles"} onClick={(e)=>{ e.stopPropagation(); if(planning) setGapPlan(null); else planGapArticle(g); }} style={{ marginLeft:8 }} title="Generate an article title + brief from this keyword, then push to the writer">{planning&&gapPlan.loading&&<Icon name="cog" size={13} className="audit-spin" />}{planning?"Close":"Plan"}</NeoButton>
+                      </div>
+                      {planning && (
+                        <div className="rise" style={{ margin:"6px 0 10px", padding:"13px 15px", background:"var(--surface)", borderRadius:"var(--r-md)", boxShadow:"var(--neo-in)" }}>
+                          {gapPlan.loading && <div style={{ fontSize:12.5, color:"var(--muted)", display:"flex", alignItems:"center", gap:8 }}><Icon name="cog" size={14} className="audit-spin" />Researching sources and drafting a title + brief…</div>}
+                          {gapPlan.error && <div style={{ fontSize:12.5, color:"var(--clay)" }}>{gapPlan.error}</div>}
+                          {gapPlan.brief && (<>
+                            <div style={{ fontSize:11, fontWeight:800, color:"var(--muted)", textTransform:"uppercase", letterSpacing:.4, marginBottom:5 }}>Article title</div>
+                            <input value={gapPlan.title||""} onChange={e=>setGapPlan(p=>({ ...p, title:e.target.value }))} style={{ width:"100%", padding:"9px 11px", borderRadius:8, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13.5, fontWeight:700, color:"var(--ink)", outline:"none" }} />
+                            <div style={{ display:"flex", gap:8, marginTop:8, alignItems:"center", flexWrap:"wrap" }}>
+                              <input value={gapPlanFb} onChange={e=>setGapPlanFb(e.target.value)} placeholder="Ask to change the title — e.g. more specific, mention directors, less salesy…" style={{ flex:"1 1 260px", padding:"8px 11px", borderRadius:8, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5, color:"var(--ink)", outline:"none" }} onKeyDown={e=>{ if(e.key==="Enter"&&!gapPlan.busy) regenGapTitle(); }} />
+                              <NeoButton kind="soft" size="sm" icon={gapPlan.busy==="title"?undefined:"sparkles"} disabled={gapPlan.busy==="title"} onClick={regenGapTitle}>{gapPlan.busy==="title"&&<Icon name="cog" size={13} className="audit-spin" />}Regenerate title</NeoButton>
+                            </div>
+                            {(()=>{ const b=gapPlan.brief; const outline=Array.isArray(b.outline)?b.outline:[]; return (
+                              <div style={{ marginTop:11, padding:"10px 12px", background:"var(--bg)", borderRadius:8, boxShadow:"var(--neo-in)", fontSize:12, lineHeight:1.55, maxHeight:220, overflow:"auto" }}>
+                                {b.angle && <div style={{ marginBottom:6 }}><b>Angle:</b> {b.angle}</div>}
+                                {b.metaDescription && <div style={{ marginBottom:6, color:"var(--muted)" }}>{b.metaDescription}</div>}
+                                {outline.length>0 && <div><b>Outline</b><ul style={{ margin:"4px 0 0", paddingLeft:18 }}>{outline.slice(0,8).map((o,j)=><li key={j} style={{ marginBottom:2 }}>{o.h2||o.heading||""}</li>)}</ul></div>}
+                                <div style={{ marginTop:6, fontSize:11, color:"var(--faint)" }}>{Array.isArray(b.faqs)?b.faqs.length:0} FAQs · target ~{b.wordCount||"—"} words · {(gapPlan.sources||[]).length} sources</div>
+                              </div>
+                            ); })()}
+                            <div style={{ display:"flex", gap:9, marginTop:11, alignItems:"center" }}>
+                              <NeoButton kind="primary" size="sm" icon={gapPlan.busy==="push"?undefined:"upload"} disabled={gapPlan.busy==="push"||!(gapPlan.title||"").trim()} onClick={pushGapArticle}>{gapPlan.busy==="push"&&<Icon name="cog" size={13} className="audit-spin" />}{gapPlan.pushed?"Pushed ✓ — push again?":"Approve & push to Airtable"}</NeoButton>
+                              {gapPlan.pushed && <span style={{ fontSize:11.5, color:"var(--t-700)" }}>In the Article Writer — set Status to “Write Article” to generate.</span>}
+                            </div>
+                          </>)}
+                        </div>
+                      )}
                       </div>
                     ); })}
                   </div>
