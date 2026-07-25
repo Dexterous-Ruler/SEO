@@ -467,7 +467,9 @@ async function getNodeParams(baseUrl, apiKey, id, nodeName) {
     const { ok, status, data } = await api('GET', baseUrl, apiKey, `/workflows/${encodeURIComponent(id)}`);
     if (!ok) return apiError(status, data, apiKey);
     const nodes = Array.isArray(data.nodes) ? data.nodes : [];
-    if (!nodeName) return { id: data.id, name: data.name, nodes: nodes.map((n) => ({ id: n.id, name: n.name, type: shortType(n.type) })) };
+    // Include the connections graph in list-mode so callers can see how nodes wire up
+    // (e.g. which agents have an ai_languageModel connected) — read-only.
+    if (!nodeName) return { id: data.id, name: data.name, nodes: nodes.map((n) => ({ id: n.id, name: n.name, type: shortType(n.type) })), connections: data.connections || {} };
     const node = nodes.find((n) => n.name === nodeName || n.id === nodeName);
     if (!node) return { error: 'Node not found: ' + nodeName, nodes: nodes.map((n) => n.name) };
     return { id: data.id, name: data.name, nodeId: node.id, nodeName: node.name, type: node.type, parameters: node.parameters || {} };
@@ -494,7 +496,13 @@ async function getExecutionNodeData(baseUrl, apiKey, executionId, nodeName) {
       const items = (arr[0] && arr[0].data && arr[0].data.main && arr[0].data.main[0]) || [];
       for (const it of items.slice(0, 3)) out.push(it && it.json);
     } catch (e) { /* leave what we have */ }
-    return { executionId, nodeName, items: out };
+    // Surface the node's ERROR when it failed — the whole point of "why did this die".
+    let nodeError = null;
+    try {
+      const e = arr[0] && arr[0].error;
+      if (e) nodeError = { message: e.message || null, description: e.description || null, node: (e.node && e.node.name) || null, type: e.name || null };
+    } catch (e2) {}
+    return { executionId, nodeName, items: out, nodeError, lastNode: d && d.resultData && d.resultData.lastNodeExecuted, execError: (d && d.resultData && d.resultData.error) ? { message: d.resultData.error.message, node: d.resultData.error.node && d.resultData.error.node.name } : null };
   } catch (e) { return apiError(0, null, apiKey, e); }
 }
 
