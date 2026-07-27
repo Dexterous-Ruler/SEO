@@ -467,9 +467,10 @@ async function getNodeParams(baseUrl, apiKey, id, nodeName) {
     const { ok, status, data } = await api('GET', baseUrl, apiKey, `/workflows/${encodeURIComponent(id)}`);
     if (!ok) return apiError(status, data, apiKey);
     const nodes = Array.isArray(data.nodes) ? data.nodes : [];
-    // Include the connections graph in list-mode so callers can see how nodes wire up
-    // (e.g. which agents have an ai_languageModel connected) — read-only.
-    if (!nodeName) return { id: data.id, name: data.name, nodes: nodes.map((n) => ({ id: n.id, name: n.name, type: shortType(n.type) })), connections: data.connections || {} };
+    // Include the connections graph + any PINNED node data in list-mode. Pinned data
+    // freezes a node's output, so every run reuses the same values regardless of the
+    // actual record — a classic "same content no matter the input" cause. Read-only.
+    if (!nodeName) return { id: data.id, name: data.name, nodes: nodes.map((n) => ({ id: n.id, name: n.name, type: shortType(n.type) })), connections: data.connections || {}, pinnedNodes: Object.keys(data.pinData || {}) };
     const node = nodes.find((n) => n.name === nodeName || n.id === nodeName);
     if (!node) return { error: 'Node not found: ' + nodeName, nodes: nodes.map((n) => n.name) };
     return { id: data.id, name: data.name, nodeId: node.id, nodeName: node.name, type: node.type, parameters: node.parameters || {} };
