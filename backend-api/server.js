@@ -340,7 +340,7 @@ function authOk(req) {
 // The dashboard's kill switch was per-tab React state — another tab (or the API)
 // happily kept writing. Now it's persisted (app_secrets) and enforced HERE, at the
 // dispatcher, for every route that can mutate WordPress/Airtable/n8n. 10s cache.
-const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
+const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
 let _kill = { v: false, exp: 0 };
 async function killSwitchOn() {
   if (Date.now() < _kill.exp) return _kill.v;
@@ -3248,6 +3248,50 @@ const routes = {
       if (site) await db.logActivity({ site_id: site.id, type: gone ? 'verified' : 'warning', actor: 'Agent', icon: 'undo', text: `Removed broken video embed (${bad.join(', ')}) from “${(p.title && p.title.rendered || '#' + p.id).slice(0, 55)}”`, meta: 'placeholder id — not a real video' }).catch(() => {});
     }
     return { ok: true, scanned: (posts || []).length, fixed };
+  },
+
+  // Normalize YouTube embed MARKUP on already-published posts to one canonical form.
+  // A writer's embed markup evolves in its prompt, but pages published under an older
+  // version keep that older markup forever — so a single site ends up serving several
+  // generations of iframe at once (e.g. youtube-nocookie + referrerpolicy, an autoplay
+  // permission, or the current clean form) and only the newest ones play reliably.
+  // This rewrites the WRAPPER ONLY: the video id in each block is preserved exactly, so a
+  // page never changes which video it shows, and re-running is a no-op once normalized.
+  // Ids that aren't real 11-char YouTube ids are left alone — removing those is
+  // /fix-broken-embeds' job, not this route's. Revision-backed, read-back verified.
+  'POST /normalize-video-embeds': async (body) => {
+    if (!body.siteId) return { error: 'siteId required' };
+    let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
+    const site = await db.getSite(body.siteId).catch(() => null);
+    const wp = new WordPressClient(creds);
+    const VALID = /^[A-Za-z0-9_-]{11}$/;
+    // The one form that is known-good on these sites: youtube.com (not nocookie), an
+    // explicit ?rel=0, no referrerpolicy, and no autoplay in the permission list.
+    const canonical = (id) => `<div class="youtube-embed-container" style="position: relative; padding-bottom: 56.25%; height: 0; overflow: hidden; margin: 1.5em 0;">\n<iframe style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0;" src="https://www.youtube.com/embed/${id}?rel=0" title="YouTube video player" loading="lazy" allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>\n</div>`;
+    const only = Array.isArray(body.postIds) && body.postIds.length ? new Set(body.postIds.map(Number)) : null;
+    const posts = await wp.request(`/posts?orderby=date&order=desc&per_page=${body.limit || 30}&status=publish,draft,pending,future,private&context=edit&_fields=id,title,content`);
+    const changed = [];
+    for (const p of (posts || [])) {
+      if (only && !only.has(Number(p.id))) continue;
+      const raw = String((p.content && (p.content.raw != null ? p.content.raw : p.content.rendered)) || '');
+      const seen = [];
+      // Non-greedy to the first </div>: the container holds a single iframe and no nested div.
+      const content = raw.replace(/<div class="youtube-embed-container"[^>]*>[\s\S]*?<\/div>/g, (block) => {
+        const m = block.match(/youtube(?:-nocookie)?\.com\/embed\/([A-Za-z0-9_-]+)/);
+        if (!m || !VALID.test(m[1])) return block;
+        seen.push(m[1]);
+        return canonical(m[1]);
+      });
+      if (content === raw) continue;
+      await wp.request(`/posts/${p.id}`, { method: 'POST', body: { content } });
+      const check = await wp.request(`/posts/${p.id}?_fields=content`).catch(() => null);
+      // A lazy-load plugin may move the src to data-lazy-src, so assert on the URL, not on src=.
+      const html = String((check && check.content && check.content.rendered) || '');
+      const verified = seen.every((id) => html.includes(`/embed/${id}?rel=0`)) && !/youtube-nocookie/.test(html);
+      changed.push({ id: p.id, title: (p.title && p.title.rendered || '').slice(0, 70), videos: seen, verified });
+      if (site) await db.logActivity({ site_id: site.id, type: verified ? 'verified' : 'warning', actor: 'Agent', icon: 'check', text: `Normalized video embed (${seen.join(', ')}) on “${(p.title && p.title.rendered || '#' + p.id).slice(0, 55)}”`, meta: verified ? 'canonical markup verified live' : 'saved but read-back did not confirm' }).catch(() => {});
+    }
+    return { ok: true, scanned: (posts || []).length, changed };
   },
 
   // Strip INTERNAL strategy labels that leaked into reader-facing copy. The writer agents
