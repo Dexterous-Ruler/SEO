@@ -4155,47 +4155,70 @@ const routes = {
     // page URL (audit proposals carry `page`, not a post_id, until first applied).
     let objectType = body.objectType || 'posts';
     let postId = body.postId;
-    if (!postId) {
-      let pageUrl = body.url || (body.page && (body.page.url || body.page)) || '';
-      try { pageUrl = new URL(pageUrl, creds.baseUrl).href; } catch (e) {}
-      const found = pageUrl ? await wp.resolvePostByUrl(pageUrl).catch(() => null) : null;
+    let pageUrl = body.url || (body.page && (body.page.url || body.page)) || '';
+    try { pageUrl = new URL(pageUrl, creds.baseUrl).href; } catch (e) {}
+    if (!postId && pageUrl) {
+      const found = await wp.resolvePostByUrl(pageUrl).catch(() => null);
       if (found) { postId = found.id; objectType = found.type; }
     }
-    if (!postId) return { status: 'failed', reason: 'Could not resolve which page to update from the URL — check the page exists.' };
     if (body.dryRun) {
+      if (!postId) return { status: 'failed', reason: 'Could not resolve which page to update from the URL — check the page exists.' };
       return { status: 'dry-run', wouldWrite: { id: postId, field: body.field, value: body.value } };
     }
-    // Archive guard: if this URL is served by a post-type archive rather than the Page we
-    // resolved, meta written to that page verifies but can NEVER render (the mu-plugin
-    // bridge is is_singular()-only). Detect it and refuse honestly instead of banking a
-    // fake success. The bulk metadata repair handles archives via the archive-option path.
+    // Fetch the live HTML once — used to (a) detect archive/taxonomy pages that can't take
+    // page meta, and (b) draft a real meta value at apply time when the proposal holds a
+    // placeholder. Bounded so a slow origin can't blow the request budget.
+    let liveHtml = '';
+    if (pageUrl) {
+      try {
+        const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 10000);
+        try { const rr = await fetch(pageUrl, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctrl.signal }); if (rr.ok) liveHtml = await rr.text(); } finally { clearTimeout(t); }
+      } catch (e) {}
+    }
+    // Archive / taxonomy guard: these URLs render a LIST, not a single editable page — the
+    // mu-plugin meta bridge is is_singular()-only, so a write verifies yet never renders.
+    // Report NOT-APPLICABLE (and DISMISS the proposal so it stops re-appearing as a scary
+    // "failed"). This also covers the case where resolvePostByUrl returned nothing precisely
+    // BECAUSE the URL is an archive/term. Real single posts fall through to the write below.
+    if (liveHtml && rendersAsArchive(liveHtml)) {
+      const pt = archivePostType(liveHtml);
+      if (body.proposalId) await db.updateProposal(body.proposalId, { status: 'dismissed', applied_at: new Date().toISOString() }).catch(() => {});
+      return { status: 'not-applicable', archive: true, reason: pt
+        ? `This URL renders the "${pt}" archive/taxonomy, not a single editable page — page meta can't be written here.`
+        : 'This URL renders an archive/taxonomy list, not a single editable page.' };
+    }
+    if (!postId) return { status: 'failed', reason: 'Could not resolve which page to update from the URL — check the page exists.' };
+    // Draft a real meta value at apply time when the proposal carries a placeholder. The
+    // audit only drafts real title/description for the HOMEPAGE (withContent === page 0), so
+    // every other page's meta proposal is "(generated on approval)" — which is exactly why
+    // bulk-apply used to "fail" on them. Generate now against the live page (siteId's
+    // geo_context keeps it on-brand), then write. Falls back to needs-edit if drafting fails.
+    let writeValue = body.value;
     {
-      const pageUrl = body.url || (body.page && (body.page.url || body.page)) || '';
-      if (pageUrl) {
-        let html = '';
-        try {
-          const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 10000);
-          try { const rr = await fetch(new URL(pageUrl, creds.baseUrl).href, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctrl.signal }); if (rr.ok) html = await rr.text(); } finally { clearTimeout(t); }
-        } catch (e) {}
-        if (html && rendersAsArchive(html)) {
-          const pt = archivePostType(html);
-          return { status: 'not-applicable', archive: true, reason: pt
-            ? `This URL renders the "${pt}" archive, not a single page. Use the site-wide metadata repair — it writes archive meta the right way.`
-            : 'This URL renders an archive (category/date/author), which this single-page apply cannot address.' };
+      const v = String(writeValue || '');
+      const isPlaceholder = !v.trim() || PLACEHOLDER_RE.test(v) || String(body.field) === 'metadata';
+      if (isPlaceholder) {
+        const f = String(body.field || '');
+        const wantsTitle = /title/i.test(f), wantsDesc = /desc/i.test(f);
+        if ((wantsTitle || wantsDesc) && f !== 'metadata') {
+          try {
+            const headTitle = (liveHtml.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || '';
+            const headings = (liveHtml.match(/<h[12][^>]*>([\s\S]*?)<\/h[12]>/gi) || []).map((x) => x.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 8);
+            const excerpt = liveHtml.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1500);
+            if (wantsDesc) writeValue = await claude.metaDescription({ url: pageUrl, title: headTitle, headings, excerpt, siteId: body.siteId });
+            else writeValue = await claude.titleRewrite({ url: pageUrl, currentTitle: headTitle, siteId: body.siteId });
+          } catch (e) { /* fall through to needs-edit */ }
+        }
+        const v2 = String(writeValue || '');
+        if (!v2.trim() || PLACEHOLDER_RE.test(v2) || String(body.field) === 'metadata') {
+          return { status: 'needs-edit', reason: 'This proposal had no concrete value and could not be auto-drafted for this field — edit the “after” text before applying.' };
         }
       }
     }
-    // Refuse placeholder/no-op writes: proposals whose `after` was never concretely drafted
-    // ("Agent-drafted fix (review before apply)", template braces, or the un-writable
-    // catch-all field 'metadata') used to be written VERBATIM to the live page.
-    {
-      const v = String(body.value || '');
-      const placeholder = !v.trim() || PLACEHOLDER_RE.test(v) || String(body.field) === 'metadata';
-      if (placeholder) return { status: 'needs-edit', reason: 'This proposal has no concrete value to write yet — edit the “after” text (or use Propose fix to draft one) before applying.' };
-    }
-    const r = await wp.updateMetaVerified(objectType, postId, body.field, body.value, { force: true });
+    const r = await wp.updateMetaVerified(objectType, postId, body.field, writeValue, { force: true });
     if (body.proposalId) {
-      await db.updateProposal(body.proposalId, { status: r.status === 'verified' ? 'verified' : 'failed', old_value: r.old, post_id: postId, object_type: objectType, applied_at: new Date().toISOString() }).catch(() => {});
+      // Persist the DRAFTED value too, so the queue shows what was actually written.
+      await db.updateProposal(body.proposalId, { status: r.status === 'verified' ? 'verified' : 'failed', after_val: writeValue, old_value: r.old, post_id: postId, object_type: objectType, applied_at: new Date().toISOString() }).catch(() => {});
     }
     if (site) await db.logActivity({ site_id: site.id, type: 'verified', actor: 'Agent', icon: 'check', text: 'Verified write — ' + body.field, meta: 'read-back OK' }).catch(() => {});
     return r;

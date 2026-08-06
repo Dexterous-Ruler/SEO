@@ -6570,7 +6570,7 @@ function App() {
       if(isLive()){
         const approved=proposals.filter(p=>p.status==="approved");
         return (async()=>{
-          let applied=0,failed=0,manual=0,blocked=0; const cssProps=[];
+          let applied=0,failed=0,manual=0,blocked=0,skipped=0; const cssProps=[];
           // PERSIST the outcome. Previously only /apply-meta (rest-write) wrote back to
           // Supabase; schema + theme/css applies updated React state only, so a reload
           // showed them as still-approved — the change "went back" even though the site
@@ -6582,9 +6582,14 @@ function App() {
                 // Secure apply: the server resolves the post from the page URL and
                 // decrypts the stored secret by siteId. killSwitch → dry-run only.
                 const r=await API.applyMeta(siteId,{proposalId:p.id,objectType:p._objectType,postId:p._postId,url:p.page,field:p.field,value:p.after},killSwitch);
-                const st=(r&&r.status==="verified")?"verified":(r&&(r.status==="dry-run"||r.status==="blocked"))?"approved":"failed";
-                if(r&&r.status==="verified")applied++; else if(r&&r.status==="blocked")blocked++; else if(r&&r.status==="dry-run"){} else failed++;
-                setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:st}:x));
+                // not-applicable (archive/taxonomy — auto-dismissed server-side) and needs-edit
+                // (nothing to write) are SKIPPED, not failed — they leave the queue silently so
+                // Karim doesn't see a page-meta write counted as a failure it can never be.
+                if(r&&r.status==="verified"){ applied++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"verified"}:x)); }
+                else if(r&&r.status==="blocked"){ blocked++; }
+                else if(r&&r.status==="dry-run"){ /* simulated under kill switch */ }
+                else if(r&&(r.status==="not-applicable"||r.status==="needs-edit")){ skipped++; setProposals(ps=>ps.filter(x=>x.id!==p.id)); }
+                else { failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); }
               }catch(e){ failed++; setProposals(ps=>ps.map(x=>x.id===p.id?{...x,status:"failed"}:x)); }
             } else if(p.channel==="schema"){
               // Structured-data proposal → write JSON-LD to the live page.
@@ -6659,8 +6664,8 @@ function App() {
             }catch(e){ cssProps.forEach(()=>failed++); }
           }
           if(killSwitch){ toast("Kill switch on — "+approved.length+" simulated, nothing written","gold"); }
-          else { const bits=[]; if(applied)bits.push(applied+" applied & verified"); if(blocked)bits.push(blocked+" blocked (read-only)"); if(manual)bits.push(manual+" need manual action"); if(failed)bits.push(failed+" failed"); toast(bits.length?bits.join(" · "):"Nothing to apply", failed?"clay":(applied?"teal":"gold")); }
-          return {applied,failed,manual,blocked,total:approved.length,killSwitch:!!killSwitch};
+          else { const bits=[]; if(applied)bits.push(applied+" applied & verified"); if(blocked)bits.push(blocked+" blocked (read-only)"); if(manual)bits.push(manual+" need manual action"); if(skipped)bits.push(skipped+" skipped (not applicable)"); if(failed)bits.push(failed+" failed"); toast(bits.length?bits.join(" · "):"Nothing to apply", failed?"clay":(applied?"teal":"gold")); }
+          return {applied,failed,manual,blocked,skipped,total:approved.length,killSwitch:!!killSwitch};
         })();
       }
       // MOCK fallback (design preview)

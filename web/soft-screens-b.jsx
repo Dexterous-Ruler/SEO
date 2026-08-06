@@ -78,9 +78,10 @@ function ApplyModal({ ctx }) {
   if(R.applied) applyBits.push(R.applied+" applied & verified");
   if(R.blocked) applyBits.push(R.blocked+" blocked (read-only)");
   if(R.manual) applyBits.push(R.manual+" need manual action");
+  if(R.skipped) applyBits.push(R.skipped+" skipped (not applicable)");
   if(R.failed) applyBits.push(R.failed+" failed");
   const applyTitle = R.killSwitch ? ("Simulated — "+(R.total||0)+" not written") : (applyBits.join(" · ")||"Nothing applied");
-  const applySub = R.killSwitch ? "Kill switch is on — turn it off to apply for real." : (R.failed?"Some writes failed — check the review queue.":(R.applied?"Read-back verified · rollback armed.":"Nothing was written."));
+  const applySub = R.killSwitch ? "Kill switch is on — turn it off to apply for real." : (R.failed?"Some writes failed — check the review queue.":(R.skipped&&!R.applied?"Skipped items were archive/taxonomy pages that can't take page meta.":(R.applied?"Read-back verified · rollback armed.":"Nothing was written.")));
   const applyOk = !R.killSwitch && R.applied>0 && !R.failed;
   return (
     <SoftModal open onClose={phase<0||phase>=99?ctx.closeApply:undefined} w={560}>
