@@ -6448,24 +6448,24 @@ function App() {
           setAuditing(false); setAuditPages(null);
           toast("Audit complete — "+((res.findings||[]).length)+" findings, "+((res.proposals||[]).length)+" proposals ✓"+(res.pagesAudited?(" · "+res.pagesAudited+" page(s)"):""),"teal");
         };
-        if(sc0==="single"){
-          API.auditFull(url, null, true).then(finish)
-            .catch(e=>{ setAuditing(false); setAuditError(e.message||"Audit failed"); toast("Audit failed: "+e.message,"clay"); });
-        } else {
-          // Multi-page: background job + poll (each page is a full ~25s PSI pass).
-          API.auditScopeStart(siteId, url, sc0).then(r=>{
-            if(r&&r.error){ setAuditing(false); setAuditError(r.error); toast("Audit failed: "+r.error,"clay"); return; }
-            const poll=()=>{
-              API.auditScopeStatus(siteId).then(st=>{
-                if(st.status==="running"){ setAuditPages(st.progress||null); setTimeout(poll,5000); return; }
-                if(st.status==="error"||st.error){ setAuditing(false); setAuditPages(null); setAuditError(st.error||"Audit failed"); toast("Audit failed: "+(st.error||"unknown"),"clay"); return; }
-                if(st.status==="unknown"){ setAuditing(false); setAuditPages(null); setAuditError("The audit run was lost (server restart) — run it again."); return; }
-                finish(st);
-              }).catch(e=>{ setAuditing(false); setAuditPages(null); setAuditError(e.message); });
-            };
-            setTimeout(poll,4000);
-          }).catch(e=>{ setAuditing(false); setAuditError(e.message||"Audit failed"); toast("Audit failed: "+e.message,"clay"); });
-        }
+        // ALL scopes run as a background job + poll now — including single. A single-page
+        // audit is otherwise a 60–90s SYNCHRONOUS request (PSI ~55s + homepage metadata
+        // draft), sitting right at the edge/proxy/browser response cap, so it intermittently
+        // gets its socket cut and the dashboard shows "Audit failed" even though the server
+        // finished — which reads as "audits don't work / aren't implementing". The background
+        // job returns immediately and we poll /audit-scope-status, immune to that cap.
+        API.auditScopeStart(siteId, url, sc0).then(r=>{
+          if(r&&r.error){ setAuditing(false); setAuditError(r.error); toast("Audit failed: "+r.error,"clay"); return; }
+          const poll=()=>{
+            API.auditScopeStatus(siteId).then(st=>{
+              if(st.status==="running"){ setAuditPages(st.progress||null); setTimeout(poll,5000); return; }
+              if(st.status==="error"||st.error){ setAuditing(false); setAuditPages(null); setAuditError(st.error||"Audit failed"); toast("Audit failed: "+(st.error||"unknown"),"clay"); return; }
+              if(st.status==="unknown"){ setAuditing(false); setAuditPages(null); setAuditError("The audit run was lost (server restart) — run it again."); return; }
+              finish(st);
+            }).catch(e=>{ setAuditing(false); setAuditPages(null); setAuditError(e.message); });
+          };
+          setTimeout(poll,4000);
+        }).catch(e=>{ setAuditing(false); setAuditError(e.message||"Audit failed"); toast("Audit failed: "+e.message,"clay"); });
         return;
       }
       // MOCK fallback (design preview)

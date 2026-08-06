@@ -704,6 +704,61 @@ function windowHistory(messages) {
   return start >= arr.length ? arr.slice(-MAX_HISTORY_MSGS) : arr.slice(start);
 }
 
+// Repair unbalanced tool blocks in the conversation before it is sent to Claude. When a
+// streaming turn is ABORTED (user hits Stop) the persisted history can keep the assistant's
+// `tool_use` block but never record the matching `tool_result` — so the next request sends a
+// dangling tool_use and Claude 400s: "tool_use ids were found without tool_result blocks".
+// This is defensive: it fixes the history no matter how it got malformed (abort, partial
+// save, windowing). Two repairs: (1) every tool_use gets a tool_result in the very next
+// message — synthesizing an "interrupted" result and merging it into the following user
+// message (or inserting one) when missing; (2) orphan tool_result blocks whose id has no
+// preceding tool_use are dropped (they 400 the other way).
+export function repairToolPairs(messages) {
+  const src = (Array.isArray(messages) ? messages : []).slice();
+  const out = [];
+  for (let i = 0; i < src.length; i++) {
+    const m = src[i];
+    if (!m || !m.role || m.content == null) continue;
+
+    if (m.role === 'assistant' && Array.isArray(m.content)) {
+      out.push(m);
+      const ids = m.content.filter((b) => b && b.type === 'tool_use').map((b) => b.id);
+      if (!ids.length) continue;
+      const next = src[i + 1];
+      const answered = new Set(next && next.role === 'user' && Array.isArray(next.content)
+        ? next.content.filter((b) => b && b.type === 'tool_result').map((b) => b.tool_use_id) : []);
+      const missing = ids.filter((id) => !answered.has(id));
+      if (!missing.length) continue;
+      const synth = missing.map((id) => ({ type: 'tool_result', tool_use_id: id, content: '[interrupted — no result was recorded for this tool call]' }));
+      if (next && next.role === 'user') {
+        // Merge into the following user message (keeping only valid tool_results), so the
+        // assistant's tool_use is answered in the immediately-next message as the API requires.
+        const nc = Array.isArray(next.content) ? next.content : [{ type: 'text', text: String(next.content || '') }];
+        const valid = nc.filter((b) => !(b && b.type === 'tool_result') || ids.includes(b.tool_use_id));
+        src[i + 1] = { role: 'user', content: [...synth, ...valid] };
+      } else {
+        // No following user message (dangling tail, or another assistant next) → insert one.
+        out.push({ role: 'user', content: synth });
+      }
+      continue;
+    }
+
+    if (m.role === 'user' && Array.isArray(m.content)) {
+      // Drop orphan tool_result blocks that don't answer the immediately-preceding assistant.
+      const prev = out[out.length - 1];
+      const validIds = new Set(prev && prev.role === 'assistant' && Array.isArray(prev.content)
+        ? prev.content.filter((b) => b && b.type === 'tool_use').map((b) => b.id) : []);
+      const cleaned = m.content.filter((b) => !(b && b.type === 'tool_result') || validIds.has(b.tool_use_id));
+      if (cleaned.length === 0 && m.content.length > 0) continue; // fully-orphan message → drop
+      out.push(cleaned.length === m.content.length ? m : { role: 'user', content: cleaned });
+      continue;
+    }
+
+    out.push(m);
+  }
+  return out;
+}
+
 // When the agentic loop exhausts its tool-step budget with work still pending, make ONE final
 // call WITHOUT tools so the model writes a real answer from everything it gathered — and FORBID
 // it from claiming an action it never actually performed (no false "✅ pushed to Airtable").
@@ -728,9 +783,10 @@ export async function chat({ messages = [], userText, images = [], siteId, siteC
   }
   const system = buildSystem(ctx, siteId);
 
-  const convo = windowHistory([...messages]);
+  let convo = windowHistory([...messages]);
   const userContent = buildUserContent(userText, images);
   if (userContent) convo.push({ role: 'user', content: userContent });
+  convo = repairToolPairs(convo);   // never send a dangling tool_use (aborted turns) → Claude 400
 
   const turn = { reads: seedReadsFromHistory(convo) };   // provenance across the WHOLE conversation (grounds push_article_brief)
   const MAX_STEPS = 8;  // non-stream must land inside the ~100s edge cap → keep tighter than the stream path
@@ -795,9 +851,10 @@ export async function chatStream({ messages = [], userText, images = [], siteId,
     if (s) ctx = { name: s.name, url: s.url, stack: s.stack, scale: s.scale, scores: s.scores, competitors: s.competitors, geo_context: s.geo_context };
   }
   const system = buildSystem(ctx, siteId);
-  const convo = windowHistory([...messages]);
+  let convo = windowHistory([...messages]);
   const userContent = buildUserContent(userText, images);
   if (userContent) convo.push({ role: 'user', content: userContent });
+  convo = repairToolPairs(convo);   // never send a dangling tool_use (aborted turns) → Claude 400
 
   const toolsUsed = [];
   const turn = { reads: seedReadsFromHistory(convo) };   // provenance across the WHOLE conversation (grounds push_article_brief)
