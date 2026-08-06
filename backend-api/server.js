@@ -3720,38 +3720,67 @@ const routes = {
     }
     if (!keywords.length) return { error: 'No content-gap keywords found to push — run a Content Plan first, or add competitors/connect Search Console.', pushed: 0 };
 
-    // Internal Links column: for each keyword, attach 2-3 relevant EXISTING pages
-    // (topic match) so n8n's article writer can link to them. Best-effort — needs
-    // the PAT to allow creating the field (schema.bases:write) if it's missing.
+    // Make every pushed keyword arrive as a WRITER-READY row — Title + Description (+ a
+    // Content Brief and topic-matched Internal Links) — not a bare keyword with empty
+    // Title/Description. That empty-row bug ("keyword push doesn't add the title and the
+    // description") happened because this route wrote ONLY the Keyword field. Titles are
+    // seeded from the keyword (the n8n "Refine the Title" step polishes them); every field
+    // is gated on EXISTING in the target table so a differing schema can never 422.
     let extras = null, linkField = null;
-    if (body.includeInternalLinks !== false) {
-      try {
-        const tables = await airtable.listTables(pat, cfg.base_id);
-        const tbl = tables.find((t) => t.id === table || t.name === table);
-        let f = tbl && (tbl.fields || []).find((x) => /internal\s*link/i.test(x.name));
-        if (!f && tbl) { const created = await airtable.ensureField(pat, cfg.base_id, tbl.id, 'Internal Links', 'multilineText'); if (created) f = { name: created }; }
-        if (f) {
-          linkField = f.name;
-          const { baseUrl, username, appPassword } = await credsForSite(siteId);
-          const wp = new WordPressClient({ baseUrl, username, appPassword });
-          const [pg, ps] = await Promise.all([
-            wp.list('pages', { perPage: 100, fields: 'title,link' }).catch(() => []),
-            wp.list('posts', { perPage: 100, fields: 'title,link' }).catch(() => []),
-          ]);
-          const STOP = new Set('the and for you your our how what why best top guide vs are can with from into a an of to in on at is it this that'.split(' '));
-          const tok = (s) => (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !STOP.has(t));
-          const pages = [...pg, ...ps].map((p) => ({ title: (p.title?.rendered || '').replace(/&[a-z]+;/g, ' ').trim(), url: p.link })).filter((p) => p.title && p.url).map((p) => ({ url: p.url, toks: new Set(tok(p.title)) }));
-          extras = {};
-          const clusters = gapClusters || keywords.map((k) => ({ primaryKeyword: k }));
-          for (const c of clusters) {
-            const kw = c.primaryKeyword || c; if (!kw) continue;
-            const ct = new Set(tok(kw + ' ' + (c.suggestedTitle || '')));
-            const top = pages.map((p) => ({ url: p.url, score: [...ct].filter((t) => p.toks.has(t)).length })).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 3);
-            if (top.length) extras[kw] = { [linkField]: top.map((x) => x.url).join('\n') };
-          }
+    try {
+      const tables = await airtable.listTables(pat, cfg.base_id);
+      const tbl = tables.find((t) => t.id === table || t.name === table);
+      const fieldNames = new Set((tbl && tbl.fields || []).map((f) => f.name));
+
+      // (a) Content Brief column — create it if absent (best-effort; needs schema.bases:write).
+      let briefField = fieldNames.has('Content Brief') ? 'Content Brief' : null;
+      if (!briefField && tbl) { try { const c = await airtable.ensureField(pat, cfg.base_id, tbl.id, 'Content Brief', 'multilineText'); if (c) { briefField = c; fieldNames.add(c); } } catch (e) {} }
+
+      // (b) Internal Links — 2-3 topic-matched existing pages per keyword (keyed by trimmed kw).
+      let links = null;
+      if (body.includeInternalLinks !== false) {
+        let lf = tbl && (tbl.fields || []).find((x) => /internal\s*link/i.test(x.name));
+        if (!lf && tbl) { try { const created = await airtable.ensureField(pat, cfg.base_id, tbl.id, 'Internal Links', 'multilineText'); if (created) lf = { name: created }; } catch (e) {} }
+        if (lf) {
+          linkField = lf.name;
+          try {
+            const { baseUrl, username, appPassword } = await credsForSite(siteId);
+            const wp = new WordPressClient({ baseUrl, username, appPassword });
+            const [pg, ps] = await Promise.all([
+              wp.list('pages', { perPage: 100, fields: 'title,link' }).catch(() => []),
+              wp.list('posts', { perPage: 100, fields: 'title,link' }).catch(() => []),
+            ]);
+            const STOP = new Set('the and for you your our how what why best top guide vs are can with from into a an of to in on at is it this that'.split(' '));
+            const tok = (s) => (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !STOP.has(t));
+            const pages = [...pg, ...ps].map((p) => ({ title: (p.title?.rendered || '').replace(/&[a-z]+;/g, ' ').trim(), url: p.link })).filter((p) => p.title && p.url).map((p) => ({ url: p.url, toks: new Set(tok(p.title)) }));
+            const clusters = gapClusters || keywords.map((k) => ({ primaryKeyword: k }));
+            links = {};
+            for (const c of clusters) {
+              const kw = String(c.primaryKeyword || c || '').trim(); if (!kw) continue;
+              const ct = new Set(tok(kw + ' ' + (c.suggestedTitle || '')));
+              const top = pages.map((p) => ({ url: p.url, score: [...ct].filter((t) => p.toks.has(t)).length })).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 3);
+              if (top.length) links[kw] = top.map((x) => x.url).join('\n');
+            }
+          } catch (e) { linkField = null; }
         }
-      } catch (e) { extras = null; /* push keywords without links */ }
-    }
+      }
+
+      // (c) Title / Description / Content Brief per keyword — reuse the writer-ready mapper.
+      const briefRows = airtable.mapGapBriefs(keywords.map((k) => ({ keyword: String(k).trim() })), briefField);
+      const byKw = new Map(briefRows.map((r) => [String(r.Keyword).trim().toLowerCase(), r]));
+      extras = {};
+      for (const rawK of keywords) {
+        const k = String(rawK).trim(); if (!k) continue;
+        const br = byKw.get(k.toLowerCase()) || {};
+        const row = {};
+        for (const fname of ['Title', 'Description', 'Primary Keyword', briefField]) {
+          if (fname && fieldNames.has(fname) && br[fname] != null && String(br[fname]).trim()) row[fname] = br[fname];
+        }
+        if (linkField && links && links[k]) row[linkField] = links[k];
+        if (Object.keys(row).length) extras[k] = row;
+      }
+      if (!Object.keys(extras).length) extras = null;
+    } catch (e) { extras = null; linkField = null; /* fall back to a bare keyword push */ }
 
     try {
       let res;
