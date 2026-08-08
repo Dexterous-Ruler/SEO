@@ -180,6 +180,13 @@
     // Inverse of auto-draft: read n8n-completed rows from the Article Writer, advance the matching
     // queued/in_review opportunities → published, and capture a drift baseline per published URL.
     engineSyncPublished(siteId) { return engine("/engine-sync-published", { siteId }); },
+    // Content Radar (Google-Alerts-style feeds → briefs)
+    radarSources(siteId) { return engine("/radar-sources", { siteId }); },
+    radarSourceSave(siteId, source) { return engine("/radar-source-save", { siteId, source }); },
+    radarSourceRemove(siteId, id) { return engine("/radar-source-remove", { siteId, id }); },
+    radarPoll(siteId) { return engine("/radar-poll", { siteId }); },
+    radarItems(siteId, limit) { return engine("/radar-items", { siteId, limit }); },
+    radarDraft(siteId, item, oppId) { return engine("/radar-draft", { siteId, item, oppId }); },
     trendingIntel(siteId, niche, db) { return engine("/trending-intel", { siteId, niche, db }); },
     peopleAlsoAsk(siteId, keyword, depth) { return engine("/people-also-ask", { siteId, keyword, depth }); },
     // Same route with push:true → sends each PAA question to the Airtable Article Writer; returns { ..., airtable }.

@@ -24,6 +24,7 @@ const SNAV_GROUPS = [
   { group:"Plan & Create Content", items:[
     { k:"plan",     label:"Content Plan", icon:"sparkles" },
     { k:"engine",   label:"Content Engine", icon:"layers" },
+    { k:"radar",    label:"Content Radar", icon:"radar" },
     { k:"content",  label:"Content Analysis", icon:"sparkles" },
     { k:"gsc",      label:"Content Decay", icon:"trend", tab:"decay" },
     { k:"geo",      label:"AI Search Visibility", icon:"globe" },
@@ -68,6 +69,7 @@ const NAV_INDEX = [
   { title:"Audit History", screen:"history", icon:"trend", kw:"audit history past audits score trend regression timeline" },
   { title:"Content Plan", screen:"plan", icon:"sparkles", kw:"content plan trending topics find opportunities keyword clusters gaps calendar ideas" },
   { title:"Content Engine", screen:"engine", icon:"layers", kw:"content engine unified worklist deduped scored opportunities keywords trending people also ask paa ai visibility geo one queue run ingest sources" },
+  { title:"Content Radar", screen:"radar", icon:"radar", kw:"content radar google alerts rss feed news outlet monitor trends fresh articles google news query draft brief article writer real news watch sources" },
   { title:"n8n Workflows", screen:"n8n", icon:"cog", kw:"n8n workflow automation edit prompts system prompt run execute trigger webhook node error execution writer article agent openai debug" },
   { title:"Content Intel", screen:"content", icon:"sparkles", kw:"content intelligence analyze content topic clusters suggestions" },
   { title:"AI Visibility (GEO)", screen:"geo", icon:"globe", kw:"ai visibility geo generative share of voice llms.txt ai robots chatgpt claude gemini perplexity citation competitors" },
@@ -1386,6 +1388,109 @@ function AdminScreen({ ctx }) {
         </div>
       )}
       </>)}
+    </div>
+  );
+}
+
+/* ---------------- Content Radar screen ----------------
+   Google-Alerts-style: add feed sources (Google Alert RSS / outlet RSS / Google
+   News query), poll them into the niche-scored opportunity queue, and one-click
+   draft any real news item into the Article Writer (Status BLANK — human-in-the-
+   loop, nothing auto-publishes). Replaces the flaky LLM "trending" with real news. */
+function RadarScreen({ ctx }){
+  const s = ctx.site;
+  const API = window.SentinelAPI;
+  const live = API && window.SENTINEL_LIVE;
+  const [sources,setSources] = useState([]);
+  const [items,setItems] = useState([]);
+  const [loading,setLoading] = useState(false);
+  const [polling,setPolling] = useState(false);
+  const [busyId,setBusyId] = useState("");
+  const [notProv,setNotProv] = useState(false);
+  const [form,setForm] = useState({ type:"google_news", url:"", query:"", label:"" });
+  const inp = { padding:"9px 12px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none", width:"100%", boxSizing:"border-box" };
+  const lbl = { fontSize:11.5, color:"var(--muted)", marginBottom:5, fontWeight:600 };
+  const TYPE_LABEL = { google_alert:"Google Alert RSS", outlet_rss:"Outlet RSS", google_news:"Google News query" };
+  const fmtDate = (d)=>{ if(!d) return ""; try{ return new Date(d).toLocaleDateString(undefined,{day:"numeric",month:"short",year:"numeric"}); }catch(e){ return String(d).slice(0,10); } };
+
+  const loadSources = ()=>{ if(!live) return; API.radarSources(s.id).then(r=>setSources((r&&r.sources)||[])).catch(()=>{}); };
+  const loadItems = ()=>{ if(!live) return; setLoading(true); API.radarItems(s.id).then(r=>{ if(r&&r.notProvisioned){ setNotProv(true); setItems([]); return; } setNotProv(false); setItems((r&&r.items)||[]); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setLoading(false)); };
+  useEffect(()=>{ setSources([]); setItems([]); setNotProv(false); if(live){ loadSources(); loadItems(); } },[s.id]);
+
+  const addSource = ()=>{
+    if(!live) return;
+    const src = { type:form.type, label:form.label };
+    if(form.type==="google_news"){ if(!form.query.trim()){ ctx.toast("Enter a search query","gold"); return; } src.query=form.query.trim(); }
+    else { if(!/^https?:\/\//i.test(form.url.trim())){ ctx.toast("Enter a valid feed URL (https://…)","gold"); return; } src.url=form.url.trim(); }
+    API.radarSourceSave(s.id, src).then(r=>{ if(r&&r.error){ ctx.toast(r.error,"clay"); return; } setSources((r&&r.sources)||[]); setForm({ type:form.type, url:"", query:"", label:"" }); ctx.toast("Source added ✓","teal"); }).catch(e=>ctx.toast(e.message,"clay"));
+  };
+  const removeSource = (id)=>{ API.radarSourceRemove(s.id, id).then(r=>setSources((r&&r.sources)||[])).catch(()=>{}); };
+  const poll = ()=>{
+    if(!live) return;
+    if(!sources.length){ ctx.toast("Add a source first","gold"); return; }
+    setPolling(true);
+    API.radarPoll(s.id).then(r=>{ if(r&&r.error){ ctx.toast("Radar: "+r.error,"clay"); return; } ctx.toast(((r.saved)||0)+" fresh item"+((r.saved===1)?"":"s")+" found ✓","teal"); loadItems(); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPolling(false));
+  };
+  const draft = (it)=>{
+    setBusyId(it.id);
+    API.radarDraft(s.id, { title:it.title, link:it.link, summary:it.summary, primaryKeyword:it.primaryKeyword }, it.id).then(r=>{ if(r&&r.error){ ctx.toast("Draft: "+r.error,"clay"); return; } setItems(x=>x.filter(y=>y.id!==it.id)); ctx.toast("Brief sent → Article Writer (flip Status to “Write Article” when ready)","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
+  };
+  const dismiss = (it)=>{ setBusyId(it.id); API.engineDismiss(it.id).then(()=>setItems(x=>x.filter(y=>y.id!==it.id))).catch(()=>{}).finally(()=>setBusyId("")); };
+
+  return (
+    <div>
+      <PageHead title="Content Radar" sub="Turn real news from your chosen sources — Google Alerts, outlet feeds, Google News — into article briefs. Nothing publishes until you approve it." />
+      <SoftCard style={{ marginBottom:18 }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+          <div style={{ fontWeight:700, fontSize:15 }}>Sources <span style={{ color:"var(--muted)", fontWeight:500 }}>· {sources.length}</span></div>
+          <NeoButton kind="primary" size="sm" icon={polling?undefined:"radar"} disabled={polling||!sources.length} onClick={poll}>{polling?"Polling…":"Poll now"}</NeoButton>
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"180px 1fr 160px auto", gap:10, alignItems:"end" }}>
+          <div><div style={lbl}>Type</div>
+            <select style={inp} value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}>
+              <option value="google_news">Google News query</option>
+              <option value="google_alert">Google Alert RSS</option>
+              <option value="outlet_rss">Outlet RSS feed</option>
+            </select></div>
+          {form.type==="google_news"
+            ? <div><div style={lbl}>Search query</div><input style={inp} placeholder="e.g. UK settlement agreement redundancy" value={form.query} onChange={e=>setForm(f=>({...f,query:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addSource()} /></div>
+            : <div><div style={lbl}>Feed URL</div><input style={inp} placeholder={form.type==="google_alert"?"https://www.google.com/alerts/feeds/…":"https://outlet.com/feed/"} value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addSource()} /></div>}
+          <div><div style={lbl}>Label (optional)</div><input style={inp} placeholder="e.g. Employment news" value={form.label} onChange={e=>setForm(f=>({...f,label:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addSource()} /></div>
+          <NeoButton kind="ghost" size="sm" onClick={addSource}>Add</NeoButton>
+        </div>
+        {form.type==="google_alert" && <div style={{ marginTop:9, fontSize:12, color:"var(--muted)" }}>Tip: in Google Alerts choose <b>Deliver to → RSS feed</b>, then paste that feed URL here.</div>}
+        {!!sources.length && <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginTop:14 }}>
+          {sources.map(src=>(
+            <div key={src.id} style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 11px", borderRadius:"var(--r-pill)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5 }}>
+              <Icon name="radar" size={13} />
+              <span style={{ fontWeight:600, maxWidth:220, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{src.label||src.query||src.url}</span>
+              <span style={{ color:"var(--muted)" }}>· {TYPE_LABEL[src.type]||src.type}</span>
+              <button onClick={()=>removeSource(src.id)} title="Remove" style={{ border:"none", background:"none", cursor:"pointer", color:"var(--muted)", padding:0, display:"flex" }}><Icon name="x" size={13} /></button>
+            </div>
+          ))}
+        </div>}
+      </SoftCard>
+
+      {notProv && <SoftCard tone="gold" style={{ marginBottom:16 }}>The content queue table isn’t provisioned yet — run <code>supabase/content-engine.sql</code>, then poll again.</SoftCard>}
+      {loading && <div style={{ color:"var(--muted)", padding:"12px 4px" }}>Loading…</div>}
+      {!loading && !items.length && !notProv && <SoftCard><div style={{ color:"var(--muted)", textAlign:"center", padding:"22px 0" }}>No radar items yet. Add a source above and hit <b>Poll now</b>.</div></SoftCard>}
+      <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+        {items.map(it=>(
+          <SoftCard key={it.id} hover={false}>
+            <div style={{ display:"flex", justifyContent:"space-between", gap:16 }}>
+              <div style={{ minWidth:0 }}>
+                <a href={it.link} target="_blank" rel="noopener noreferrer" style={{ fontWeight:700, fontSize:14.5, color:"var(--ink)", textDecoration:"none" }}>{it.title}</a>
+                <div style={{ fontSize:12, color:"var(--muted)", margin:"5px 0 8px" }}>{it.source}{it.published?" · "+fmtDate(it.published):""}</div>
+                {it.summary && <div style={{ fontSize:13, color:"var(--ink)", opacity:.82, lineHeight:1.5 }}>{String(it.summary).slice(0,220)}{String(it.summary).length>220?"…":""}</div>}
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8, alignItems:"flex-end", flexShrink:0 }}>
+                <NeoButton kind="primary" size="sm" icon="sparkles" disabled={busyId===it.id} onClick={()=>draft(it)}>{busyId===it.id?"…":"Draft brief"}</NeoButton>
+                <button onClick={()=>dismiss(it)} disabled={busyId===it.id} style={{ border:"none", background:"none", cursor:"pointer", color:"var(--muted)", fontSize:12 }}>Dismiss</button>
+              </div>
+            </div>
+          </SoftCard>
+        ))}
+      </div>
     </div>
   );
 }
@@ -6746,7 +6851,7 @@ function App() {
     },
   };
 
-  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, engine:ContentEngineScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen, experience:ExperienceScreen, uxactivation:UxActivationScreen, n8n:N8nScreen };
+  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, engine:ContentEngineScreen, radar:RadarScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen, experience:ExperienceScreen, uxactivation:UxActivationScreen, n8n:N8nScreen };
   const Screen = SCREENS[screen] || Dashboard;
 
   let content = <Screen ctx={ctx} run />;
