@@ -384,6 +384,9 @@ function rowFor(o) {
 // keyword/PAA/trending opportunities, niche-scored against the site's geo_context
 // (off-niche news sinks), and are drafted into the Article Writer one click each.
 // `sources` = [{ id, type:'google_alert'|'outlet_rss'|'google_news', url?, query?, label?, active? }].
+// Compact, stable hash of a URL → short dedupe key (djb2 + length, base36).
+function feedHash(s) { let h = 5381; const str = String(s || ''); for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0; return h.toString(36) + str.length.toString(36); }
+
 export async function ingestFeeds(siteId, sources) {
   const site = await db.getSite(siteId).catch(() => null);
   if (!site) return { error: 'Site not found.', saved: 0 };
@@ -396,8 +399,11 @@ export async function ingestFeeds(siteId, sources) {
     if (!url) { perSource.push({ id: src.id, label: src.label, error: 'no feed URL' }); continue; }
     const r = await feeds.fetchFeed(url).catch((e) => ({ error: String((e && e.message) || e), items: [] }));
     if (r.error) { perSource.push({ id: src.id, label: src.label || url, error: r.error, items: 0 }); continue; }
-    perSource.push({ id: src.id, label: src.label || r.feedTitle || url, items: (r.items || []).length });
-    for (const it of (r.items || [])) {
+    // Feeds are reverse-chronological; keep the freshest 40 per source so a busy
+    // Google News query doesn't flood the queue with stale back-catalogue.
+    const its = (r.items || []).slice(0, 40);
+    perSource.push({ id: src.id, label: src.label || r.feedTitle || url, items: its.length });
+    for (const it of its) {
       if (!it.title || !it.link) continue;
       const o = makeOpp(siteId, {
         source: 'feeds',
@@ -411,7 +417,11 @@ export async function ingestFeeds(siteId, sources) {
       });
       // Dedupe on the article URL (stable), NOT the title — the same story keeps
       // the same link across polls, so the upsert merges instead of duplicating.
-      o.dedupeKey = 'feed:' + String(it.link || it.guid || it.title).replace(/[#?].*$/, '').toLowerCase().slice(0, 280);
+      // HASH the URL to a short key: persist() pre-reads existing keys with a
+      // `dedupe_key=in.(...)` query, and dozens of full-URL keys blow past the URL
+      // length limit ("fetch failed"). A compact hash keeps that query small.
+      const canon = String(it.link || it.guid || it.title).replace(/[#?].*$/, '').toLowerCase();
+      o.dedupeKey = 'feed:' + feedHash(canon);
       score(o, scoreSite);
       raw.push(o);
     }
