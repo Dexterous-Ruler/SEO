@@ -33,6 +33,7 @@ import * as geo from './geo.js';
 import * as airtable from './airtable.js';
 import * as claude from './claude.js';
 import * as drift from './drift.js';
+import feeds from './feeds.js';
 
 const SB = process.env.SUPABASE_URL;
 const SRV = process.env.SUPABASE_SERVICE_ROLE;
@@ -375,6 +376,51 @@ function rowFor(o) {
   };
 }
 
+// ---- 5b) FEEDS producer (Content Radar) ------------------------------------
+// The Google-Alerts-style lane: fetch each of a site's radar sources (Google
+// Alert RSS, an outlet's RSS, or a Google News query), turn every fresh article
+// into a scored content_opportunity (source 'feeds'), deduped by the article URL
+// so re-polling never piles up the same story. These flow into the SAME queue as
+// keyword/PAA/trending opportunities, niche-scored against the site's geo_context
+// (off-niche news sinks), and are drafted into the Article Writer one click each.
+// `sources` = [{ id, type:'google_alert'|'outlet_rss'|'google_news', url?, query?, label?, active? }].
+export async function ingestFeeds(siteId, sources) {
+  const site = await db.getSite(siteId).catch(() => null);
+  if (!site) return { error: 'Site not found.', saved: 0 };
+  const scoreSite = { id: siteId, __nicheCtx: geoFor(siteId) || '' };
+  const active = (sources || []).filter((s) => s && s.active !== false);
+  const perSource = [];
+  const raw = [];
+  for (const src of active) {
+    const url = feeds.sourceToUrl(src);
+    if (!url) { perSource.push({ id: src.id, label: src.label, error: 'no feed URL' }); continue; }
+    const r = await feeds.fetchFeed(url).catch((e) => ({ error: String((e && e.message) || e), items: [] }));
+    if (r.error) { perSource.push({ id: src.id, label: src.label || url, error: r.error, items: 0 }); continue; }
+    perSource.push({ id: src.id, label: src.label || r.feedTitle || url, items: (r.items || []).length });
+    for (const it of (r.items || [])) {
+      if (!it.title || !it.link) continue;
+      const o = makeOpp(siteId, {
+        source: 'feeds',
+        sourceRef: src.id,
+        title: it.title,
+        primaryKeyword: it.title,
+        intent: 'informational',
+        actionType: 'article',
+        evidence: [{ source: 'feeds', detail: `${src.label || r.feedTitle || 'feed'}${it.published ? ' · ' + String(it.published).slice(0, 10) : ''}` }],
+        payload: { link: it.link, summary: it.summary || '', published: it.published || null, sourceLabel: src.label || r.feedTitle || '', sourceType: src.type || 'outlet_rss', sourceId: src.id, guid: it.guid || it.link, trending: true },
+      });
+      // Dedupe on the article URL (stable), NOT the title — the same story keeps
+      // the same link across polls, so the upsert merges instead of duplicating.
+      o.dedupeKey = 'feed:' + String(it.link || it.guid || it.title).replace(/[#?].*$/, '').toLowerCase().slice(0, 280);
+      score(o, scoreSite);
+      raw.push(o);
+    }
+  }
+  const merged = dedupeMerge(raw);
+  const res = await persist(siteId, merged);
+  return { saved: res.saved || 0, error: res.error, notProvisioned: res.notProvisioned, fetched: raw.length, unique: merged.length, perSource };
+}
+
 export async function persist(siteId, opps) {
   if (!SB || !SRV) return { ...NOT_PROVISIONED, error: 'Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE missing).' };
   const list = (opps || []).filter((o) => o && o.dedupeKey);
@@ -430,11 +476,12 @@ export async function persist(siteId, opps) {
 
 // ---- 6) worklist -----------------------------------------------------------
 // SELECT ordered by score desc, optionally filtered by status/actionType. Graceful.
-export async function worklist(siteId, { status, actionType, limit = 50 } = {}) {
+export async function worklist(siteId, { status, actionType, source, limit = 50 } = {}) {
   if (!SB || !SRV) return { ...NOT_PROVISIONED, error: 'Supabase not configured.', items: [] };
   const parts = [`site_id=eq.${encodeURIComponent(siteId)}`, 'select=*', 'order=score.desc', `limit=${Math.min(Math.max(Number(limit) || 50, 1), 500)}`];
   if (status) parts.push(`status=eq.${encodeURIComponent(status)}`);
   if (actionType) parts.push(`action_type=eq.${encodeURIComponent(actionType)}`);
+  if (source) parts.push(`source=eq.${encodeURIComponent(source)}`);
   try {
     const res = await fetch(`${SB}/rest/v1/content_opportunities?${parts.join('&')}`, { headers: headers() });
     const text = await res.text();

@@ -340,7 +340,7 @@ function authOk(req) {
 // The dashboard's kill switch was per-tab React state — another tab (or the API)
 // happily kept writing. Now it's persisted (app_secrets) and enforced HERE, at the
 // dispatcher, for every route that can mutate WordPress/Airtable/n8n. 10s cache.
-const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
+const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
 let _kill = { v: false, exp: 0 };
 async function killSwitchOn() {
   if (Date.now() < _kill.exp) return _kill.v;
@@ -525,6 +525,14 @@ function sampleFor(key, site) {
     'chat.assistant': { engine: 'claude', user: `Give me one concrete, high-impact SEO action for ${name} this week.` },
   };
   return M[key] || { engine: 'claude', user: `Briefly demonstrate how you respond to a typical request for ${name}.` };
+}
+
+// Content Radar: per-site RSS/alert source list, stored in the encrypted app_secret
+// KV (feed URLs are not secret, but the KV is the no-DDL per-site store available).
+async function radarSourcesFor(siteId) {
+  const raw = await db.getAppSecret('radar_sources:' + siteId).catch(() => null);
+  if (!raw) return [];
+  try { const a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch { return []; }
 }
 
 // --- route handlers --------------------------------------------------------
@@ -4562,6 +4570,95 @@ const routes = {
   'POST /engine-sync-published': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
     return engine.syncPublished(body.siteId);
+  },
+
+  // ── Content Radar (Google-Alerts-style feeds → briefs) ──────────────────────
+  // Karim's ask: a Google-Alerts-style radar — target keywords + specific news
+  // outlets, and turn fresh published articles into content briefs (the current
+  // "trending" is LLM-imagined, hence inconsistent; this is REAL published news).
+  // Google Alerts has no API but every alert exposes an RSS feed; outlets publish
+  // RSS; Google News offers a free RSS search. Source list is stored per-site in
+  // the encrypted app_secret KV (feed URLs, not secret — just the no-DDL store we
+  // have). Fetched items flow into the SAME content_opportunities queue (source
+  // 'feeds'), niche-scored + deduped, then one click drafts a brief into the
+  // Article Writer with Status BLANK (human-in-the-loop — nothing auto-publishes).
+  'POST /radar-sources': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    return { sources: await radarSourcesFor(body.siteId) };
+  },
+  'POST /radar-source-save': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const s = body.source || {};
+    const type = ['google_alert', 'outlet_rss', 'google_news'].includes(s.type) ? s.type : 'outlet_rss';
+    if (type === 'google_news') { if (!String(s.query || '').trim()) return { error: 'A search query is required for a Google News source.' }; }
+    else if (!/^https?:\/\//i.test(String(s.url || '').trim())) return { error: 'A valid feed URL (https://…) is required.' };
+    const list = await radarSourcesFor(body.siteId);
+    const id = s.id || ('src_' + Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4));
+    const entry = {
+      id, type,
+      url: type === 'google_news' ? '' : String(s.url || '').trim(),
+      query: type === 'google_news' ? String(s.query || '').trim() : '',
+      label: String(s.label || '').trim() || (type === 'google_news' ? String(s.query || '').trim() : ''),
+      active: s.active !== false,
+      addedAt: (list.find((x) => x.id === id) || {}).addedAt || new Date().toISOString(),
+    };
+    const i = list.findIndex((x) => x.id === id);
+    if (i >= 0) list[i] = { ...list[i], ...entry }; else list.push(entry);
+    await db.setAppSecret('radar_sources:' + body.siteId, JSON.stringify(list));
+    return { ok: true, sources: list };
+  },
+  'POST /radar-source-remove': async (body) => {
+    if (!body.siteId || !body.id) return { error: 'siteId + id required' };
+    const list = (await radarSourcesFor(body.siteId)).filter((x) => x.id !== body.id);
+    await db.setAppSecret('radar_sources:' + body.siteId, JSON.stringify(list));
+    return { ok: true, sources: list };
+  },
+  // Fetch all of a site's sources, ingest fresh items into the opportunity queue
+  // (scored + deduped by URL), and return what landed. Heavy-ish (N feed fetches)
+  // but each feed call is bounded (12s) and there are only a handful of sources.
+  'POST /radar-poll': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const sources = Array.isArray(body.sources) ? body.sources : await radarSourcesFor(body.siteId);
+    if (!sources.length) return { ok: true, saved: 0, perSource: [], note: 'No radar sources yet — add a Google Alert RSS, an outlet feed, or a Google News query.' };
+    const r = await engine.ingestFeeds(body.siteId, sources);
+    return { ok: !r.error, ...r };
+  },
+  // List the current, un-actioned radar items (source 'feeds'), freshest first.
+  'POST /radar-items': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const wl = await engine.worklist(body.siteId, { source: 'feeds', limit: Math.min(body.limit || 80, 200) }).catch(() => ({ items: [] }));
+    if (wl.notProvisioned) return { notProvisioned: true, items: [], note: wl.error };
+    const items = (wl.items || [])
+      .filter((o) => !['dismissed', 'queued', 'published'].includes(o.status))
+      .map((o) => ({ id: o.id, title: o.title, score: o.score, status: o.status, source: (o.payload && o.payload.sourceLabel) || 'feed', link: o.payload && o.payload.link, summary: o.payload && o.payload.summary, published: o.payload && o.payload.published, primaryKeyword: o.primary_keyword }))
+      .sort((a, b) => String(b.published || '').localeCompare(String(a.published || '')) || (b.score - a.score));
+    return { items };
+  },
+  // One radar item → a writer-ready brief in the Article Writer (Status BLANK).
+  // Reuses the proven opportunities → mapArticleBrief → pushToArticleWriter path.
+  'POST /radar-draft': async (body) => {
+    if (!body.siteId || !body.item) return { error: 'siteId + item required' };
+    const it = body.item;
+    const cluster = {
+      suggestedTitle: it.title,
+      primaryKeyword: it.primaryKeyword || it.title,
+      keyword: it.primaryKeyword || it.title,
+      label: it.title,
+      intent: 'informational',
+      isGap: true,
+      brief: {
+        title: it.title,
+        angle: `Write an ORIGINAL, in-depth article for our audience prompted by this news development: "${it.title}". Explain what happened and, more importantly, what it means for our readers/clients and what they should do. Do NOT copy the source — use it only as the news hook and verify facts independently.${it.link ? ' Source for reference: ' + it.link : ''}`,
+        metaDescription: String(it.summary || '').slice(0, 155),
+        keyFacts: it.summary ? [{ fact: String(it.summary).slice(0, 400), source: it.link || 'news source' }] : [],
+      },
+    };
+    let out;
+    try { out = await routes['POST /airtable-sync']({ siteId: body.siteId, kinds: ['opportunities'], clusters: [cluster] }); }
+    catch (e) { return { error: 'Push failed: ' + e.message }; }
+    if (out && out.error) return { error: out.error };
+    if (body.oppId) await engine.setStatus(body.oppId, 'queued').catch(() => {});
+    return { ok: true, pushed: (out && out.synced) || out };
   },
 
   // ── n8n control panel ──────────────────────────────────────────────────────

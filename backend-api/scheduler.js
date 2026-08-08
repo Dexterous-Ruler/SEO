@@ -333,8 +333,22 @@ async function jobUxPrune(site) {
   try { await sbReq(`ux_events?site_id=eq.${site.id}&received_at=lt.${cutoff}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }); } catch (e) {}
 }
 
+// ── Job: Content Radar poll (feeds → opportunity queue) ─────────────────────
+// Fetches each site's radar sources (Google Alert RSS / outlet RSS / Google News
+// queries) and ingests fresh articles into content_opportunities (source 'feeds',
+// niche-scored + URL-deduped). Human-in-the-loop: it only FILLS the queue — the
+// operator drafts. Cheap (a few bounded feed fetches) so it runs twice a day.
+async function jobRadarPoll(site) {
+  let sources = [];
+  try { const raw = await db.getAppSecret('radar_sources:' + site.id); if (raw) { const a = JSON.parse(raw); if (Array.isArray(a)) sources = a; } } catch (e) { return; }
+  if (!sources.filter((s) => s && s.active !== false).length) return;
+  const r = await engine.ingestFeeds(site.id, sources).catch(() => null);
+  if (r && r.saved) await note(site.id, `Content Radar: ${r.saved} fresh item(s) from ${sources.filter((s) => s.active !== false).length} source(s)`);
+}
+
 const JOBS = [
   { name: 'auto-index', every: DAY, run: jobAutoIndex },
+  { name: 'radar-poll', every: 12 * HOUR, run: jobRadarPoll },
   { name: 'gsc-health', every: DAY, run: jobGscHealth },
   { name: 'keyword-push', every: 7 * DAY, run: jobKeywordPush },
   { name: 'engine-refresh', every: 7 * DAY, run: jobEngineRefresh },
