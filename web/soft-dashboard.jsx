@@ -48,6 +48,21 @@ const SNAV_GROUPS = [
 const SNAV = SNAV_GROUPS.flatMap(g=>g.items);
 const SNAV_BY_KEY = Object.fromEntries(SNAV.map(it=>[it.k, it]));
 
+// Site-aware content types → the n8n Category the master switch routes on. GoodFor
+// does Blog/Recipe/Definition; go-legal.ai adds Definition; every other site is
+// Blog-only (picker hidden). The value ("recipe"/"definition"/"blog") is normalised
+// to the exact Category on the backend (airtable.normalizeCategory).
+function contentTypesFor(site){ const n=((((site&&site.name)||"")+" "+((site&&site.url)||"")).toLowerCase()); if(/good\s?for/.test(n)) return [["blog","Blog"],["recipe","Recipe"],["definition","Definition"]]; if(/go-?legal\.ai/.test(n)) return [["blog","Blog"],["definition","Definition"]]; return [["blog","Blog"]]; }
+// Compact "Create as: [type]" dropdown; renders nothing for Blog-only sites.
+function TypePicker({ site, value, onChange, label="Create as" }){
+  const types = contentTypesFor(site);
+  if(types.length<=1) return null;
+  return React.createElement("label",{ style:{ display:"inline-flex", alignItems:"center", gap:7, fontSize:12.5, color:"var(--muted)" } },
+    label,
+    React.createElement("select",{ value, onChange:e=>onChange(e.target.value), style:{ padding:"7px 10px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5, color:"var(--ink)", outline:"none" } },
+      types.map(([v,l])=>React.createElement("option",{ key:v, value:v },l))));
+}
+
 /* ---- Universal command index: every screen AND sub-tool, with synonyms, so
    the search bar can jump straight to any function (e.g. "speed" → Speed Test).
    `tab` deep-links into a screen's sub-tab via ctx.goto(screen, tab). ---- */
@@ -2157,6 +2172,7 @@ function OpportunitiesScreen({ ctx }) {
   const [ideaState,setIdeaState] = useState({});  // idea index -> { ignored?, pushed?, pushing?, edit?:{title,angle} }
   const [briefs,setBriefs] = useState({});   // clusterIndex → {brief, sources}
   const [briefBusy,setBriefBusy] = useState(-1);
+  const [draftType,setDraftType] = useState("blog");   // Blog/Recipe/Definition → n8n Category (GoodFor)
   const [paaSeed,setPaaSeed] = useState("");
   const [paa,setPaa] = useState(null);
   const [paaBusy,setPaaBusy] = useState(false);
@@ -2223,7 +2239,7 @@ function OpportunitiesScreen({ ctx }) {
     const kws=[...new Set(((trend&&trend.topics)||[]).map(t=>(t.keyword||t.title||"").trim()).filter(Boolean))];
     if(!kws.length){ ctx.toast("No trending topics to push — scan trends first","gold"); return; }
     setPushing("trend"); ctx.toast("Pushing "+kws.length+" trending topic(s) to Airtable…","teal");
-    API.airtablePushKeywords(s.id, kws).then(r=>{ if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
+    API.airtablePushKeywords(s.id, kws, draftType).then(r=>{ if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
       ctx.toast(r.pushed>0?("Pushed "+r.pushed+" trending topic(s) → Airtable ✓"+(r.skipped?" ("+r.skipped+" already there)":"")):"All trending topics already in Airtable", r.pushed>0?"teal":"gold");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(""));
   };
@@ -2235,7 +2251,7 @@ function OpportunitiesScreen({ ctx }) {
     const title=(ed&&ed.title)||idea.title;
     const angle=(ed&&ed.angle)||ideaPlan(idea);
     setIdea(i,{ pushing:true });
-    API.airtableSync(s.id,{ kinds:["article_brief"], cluster:{ suggestedTitle:title, primaryKeyword:idea.keyword||title }, brief:{ title, angle } }).then(r=>{
+    API.airtableSync(s.id,{ kinds:["article_brief"], category:draftType, cluster:{ suggestedTitle:title, primaryKeyword:idea.keyword||title }, brief:{ title, angle } }).then(r=>{
       const res=(r.synced&&r.synced.article_brief)||{};
       if(r.error||res.error){ ctx.toast("Push: "+(r.error||res.error),"clay"); setIdea(i,{ pushing:false }); return; }
       setIdea(i,{ pushing:false, pushed:true, edit:null });
@@ -2259,7 +2275,7 @@ function OpportunitiesScreen({ ctx }) {
     const kws=[...new Set((paaSel.size?all.filter(k=>paaSel.has(k)):all).map(k=>(k||"").trim()).filter(Boolean))];
     if(!kws.length){ ctx.toast("No questions to push — find questions first","gold"); return; }
     setPushing("paa"); ctx.toast("Pushing "+kws.length+" question(s) to Airtable…","teal");
-    API.airtablePushKeywords(s.id, kws).then(r=>{ if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
+    API.airtablePushKeywords(s.id, kws, draftType).then(r=>{ if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
       ctx.toast(r.pushed>0?("Pushed "+r.pushed+" question(s) → Airtable ✓"+(r.skipped?" ("+r.skipped+" already there)":"")):"All questions already in Airtable", r.pushed>0?"teal":"gold");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(""));
   };
@@ -2276,7 +2292,7 @@ function OpportunitiesScreen({ ctx }) {
     setPushing("paa-writer"); ctx.toast("Sending "+chosen.length+" question(s) to the Article Writer…","teal");
     // answer = Google's own PAA snippet → becomes the row's Description (real context for the writer)
     const clusters = chosen.map(q=>({ suggestedTitle:q.question, primaryKeyword:q.seed||fallbackSeed, keyword:q.seed||fallbackSeed, label:q.question, intent:q.pattern, format:q.snippetFormat, answer:q.answer }));
-    API.airtableSync(s.id,{ kinds:["opportunities"], clusters }).then(r=>{
+    API.airtableSync(s.id,{ kinds:["opportunities"], clusters, category:draftType }).then(r=>{
       if(r&&r.error){ ctx.toast("Push to writer: "+r.error,"clay"); return; }
       const o=(r&&r.synced&&r.synced.opportunities)||{};
       const n=(o.pushed||0)+(o.updated||0);
@@ -2309,7 +2325,7 @@ function OpportunitiesScreen({ ctx }) {
   const pushAirtable = (clusters,tag)=>{
     if(!clusters.length){ ctx.toast("Nothing to send","gold"); return; }
     setPushing(tag);
-    API.airtableSync(s.id,{kinds:["opportunities"],clusters:withBriefs(clusters)}).then(r=>{
+    API.airtableSync(s.id,{kinds:["opportunities"],clusters:withBriefs(clusters),category:draftType}).then(r=>{
       if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
       const res=(r.synced&&r.synced.opportunities)||{};
       if(res.error){ ctx.toast("Airtable: "+res.error,"clay"); return; }
@@ -2342,6 +2358,7 @@ function OpportunitiesScreen({ ctx }) {
       <PageHead title="Content Opportunities" sub="Keyword clusters from your rankings, competitors & live trends (in your target market) — gap-checked against your sitemap.">
         <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
           <CountrySelect value={dbVal} options={dbList} onChange={changeCountry} title="Target country for opportunities, trends & briefs — sets this site's market" />
+          <TypePicker site={s} value={draftType} onChange={setDraftType} />
           {data && <NeoButton kind="soft" size="sm" icon="layers" onClick={()=>pushAirtable(clusters.filter(c=>c.isGap),"gaps")} disabled={pushing==="gaps"}>{pushing==="gaps"&&<Icon name="cog" size={14} className="audit-spin" />}Send gaps → Airtable</NeoButton>}
           <NeoButton kind="primary" size="sm" icon={busy?undefined:"sparkles"} disabled={busy} onClick={load}>{busy&&<Icon name="cog" size={15} className="audit-spin" />}{busy?"Analyzing…":data?"Re-analyze":"Find opportunities"}</NeoButton>
         </div>
@@ -3175,6 +3192,7 @@ function ContentScreen({ ctx }) {
   const loading = ctx.intelLoading;
   const API = window.SentinelAPI;
   const [pushing,setPushing] = useState(false);
+  const [draftType,setDraftType] = useState("blog");   // Blog/Recipe/Definition → n8n Category (GoodFor)
   const strengthTone = { strong:"teal", moderate:"gold", thin:"clay" };
   const prioTone = { high:"clay", medium:"gold", low:"gray" };
   // Target country for content/intel/briefs/research — same per-site market as the
@@ -3225,7 +3243,7 @@ function ContentScreen({ ctx }) {
     ].map(k=>(k||"").trim()).filter(Boolean))];
     if(!kws.length){ ctx.toast("No keywords to push — analyze content first","gold"); return; }
     setPushing(true); ctx.toast("Pushing "+kws.length+" keyword(s) to Airtable…","teal");
-    API.airtablePushKeywords(s.id, kws).then(r=>{ if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
+    API.airtablePushKeywords(s.id, kws, draftType).then(r=>{ if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
       ctx.toast(r.pushed>0?("Pushed "+r.pushed+" new keyword(s) to Airtable ✓"+(r.skipped?" ("+r.skipped+" already there)":"")):"All keywords already in Airtable", r.pushed>0?"teal":"gold");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(false));
   };
@@ -3235,6 +3253,7 @@ function ContentScreen({ ctx }) {
       <PageHead title="Content Intelligence" sub={`Keyword clusters, content gaps & new-article ideas for ${s.name}.`}>
         <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
           <CountrySelect value={dbVal} options={dbList} onChange={changeCountry} title="Target country for content intel, briefs & research — sets this site's market" />
+          <TypePicker site={s} value={draftType} onChange={setDraftType} />
           {d && !d.error && !loading && <NeoButton kind="soft" size="sm" icon={pushing?undefined:"upload"} disabled={pushing} onClick={pushToAirtable}>{pushing&&<Icon name="cog" size={15} className="audit-spin" />}{pushing?"Pushing…":"Push to Airtable"}</NeoButton>}
           <NeoButton kind="primary" icon={loading?undefined:"sparkles"} disabled={loading} onClick={ctx.runContentIntel}>
             {loading && <Icon name="cog" size={17} className="audit-spin" />}{loading?"Analyzing…":d?"Re-analyze":"Analyze content"}
@@ -4923,6 +4942,7 @@ function SemrushScreen({ ctx }) {
   const [gapBusy,setGapBusy] = useState(false);
   const [gapPlan,setGapPlan] = useState(null);  // { keyword, loading?|brief?|error?|pushed?, title?, busy? }
   const [gapPlanFb,setGapPlanFb] = useState("");   // feedback for regenerating the title
+  const [draftType,setDraftType] = useState("blog");   // Blog/Recipe/Definition → n8n Category (GoodFor)
   const [striking,setStriking] = useState(null);
   const [strikeBusy,setStrikeBusy] = useState(false);
   const [tval,setTval] = useState(null);
@@ -5030,7 +5050,7 @@ function SemrushScreen({ ctx }) {
   const pushGapArticle = ()=>{
     if(!gapPlan||!gapPlan.brief) return;
     setGapPlan(p=>({ ...p, busy:"push" }));
-    API.gapPushArticle(s.id, gapPlan.keyword, (gapPlan.title||"").trim(), gapPlan.brief).then(r=>{
+    API.gapPushArticle(s.id, gapPlan.keyword, (gapPlan.title||"").trim(), gapPlan.brief, draftType).then(r=>{
       if(r&&r.error){ ctx.toast(r.error==="Airtable not connected"?"Connect Airtable first (Airtable Sync tab)":r.error,"clay"); setGapPlan(p=>({ ...p, busy:null })); return; }
       const o=(r&&r.synced&&r.synced.opportunities)||{};
       const ok=(o.pushed||0)+(o.updated||0)>0;
@@ -5042,7 +5062,7 @@ function SemrushScreen({ ctx }) {
     const list = (gaps&&gaps.gaps||[]).filter(g=>!only||only.has(g.keyword));
     if(!list.length) return;
     ctx.toast("Pushing "+list.length+" keyword(s) to the Article Writer…","teal");
-    API.airtableSync(s.id,{ kinds:["gaps"], gaps:list }).then(r=>{
+    API.airtableSync(s.id,{ kinds:["gaps"], gaps:list, category:draftType }).then(r=>{
       if(r.error){ ctx.toast(r.error==="Airtable not connected"?"Connect Airtable first (Airtable Sync tab)":r.error, "clay"); return; }
       const g=(r.synced&&r.synced.gaps)||{};
       const n=g.pushed||0;
@@ -5340,7 +5360,8 @@ function SemrushScreen({ ctx }) {
                                 <div style={{ marginTop:6, fontSize:11, color:"var(--faint)" }}>{Array.isArray(b.faqs)?b.faqs.length:0} FAQs · target ~{b.wordCount||"—"} words · {(gapPlan.sources||[]).length} sources</div>
                               </div>
                             ); })()}
-                            <div style={{ display:"flex", gap:9, marginTop:11, alignItems:"center" }}>
+                            <div style={{ display:"flex", gap:9, marginTop:11, alignItems:"center", flexWrap:"wrap" }}>
+                              <TypePicker site={s} value={draftType} onChange={setDraftType} />
                               <NeoButton kind="primary" size="sm" icon={gapPlan.busy==="push"?undefined:"upload"} disabled={gapPlan.busy==="push"||!(gapPlan.title||"").trim()} onClick={pushGapArticle}>{gapPlan.busy==="push"&&<Icon name="cog" size={13} className="audit-spin" />}{gapPlan.pushed?"Pushed ✓ — push again?":"Approve & push to Airtable"}</NeoButton>
                               {gapPlan.pushed && <span style={{ fontSize:11.5, color:"var(--t-700)" }}>In the Article Writer — set Status to “Write Article” to generate.</span>}
                             </div>

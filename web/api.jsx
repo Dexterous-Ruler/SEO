@@ -146,7 +146,7 @@
     // Keyword Gap → article planning
     gapTitle(siteId, keyword, opts) { return engine("/gap-title", Object.assign({ siteId, keyword }, opts || {})); },
     // Push one approved {keyword,title,brief} to the Article Writer (reuses the opportunities path).
-    gapPushArticle(siteId, keyword, title, brief) { return engine("/airtable-sync", { siteId, kinds: ["opportunities"], clusters: [{ primaryKeyword: keyword, keyword, suggestedTitle: title, brief: Object.assign({}, brief, { title }) }] }); },
+    gapPushArticle(siteId, keyword, title, brief, category) { return engine("/airtable-sync", { siteId, kinds: ["opportunities"], category, clusters: [{ primaryKeyword: keyword, keyword, suggestedTitle: title, brief: Object.assign({}, brief, { title }) }] }); },
     // Content Engine — one unified, de-duped, scored worklist from every content source
     // (keywords, trending, People Also Ask, AI-visibility). HEAVY/slow route (~20-60s).
     // notProvisioned until supabase/content-engine.sql is run.
@@ -329,7 +329,7 @@
     airtableTables(siteId, baseId) { return engine("/airtable-tables", { siteId, baseId }); },
     airtableConfig(siteId, opts) { return engine("/airtable-config", Object.assign({ siteId }, opts || {})); },
     airtableStatus(siteId) { return engine("/airtable-status", { siteId }); },
-    airtablePushKeywords(siteId, keywords) { return engine("/airtable-push-keywords", { siteId, keywords }); },
+    airtablePushKeywords(siteId, keywords, category) { return engine("/airtable-push-keywords", { siteId, keywords, category }); },
     // Embedded editable grid
     airtableRecords(siteId, opts) { return engine("/airtable-records", Object.assign({ siteId }, opts || {})); },
     airtableUpdateRecord(siteId, recordId, fields, table) { return engine("/airtable-update-record", { siteId, recordId, fields, table }); },
