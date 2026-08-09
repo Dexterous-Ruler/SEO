@@ -277,7 +277,7 @@ export function mapGaps(gaps, source, now) {
 // Gap keywords as WRITER-READY Article Writer rows (Title + Keyword + Content Brief),
 // not bare keyword rows whose stat fields get filtered away by the writer's field set.
 // This is what "push keyword gaps" should create: a row n8n can actually write from.
-export function mapGapBriefs(gaps, briefField) {
+export function mapGapBriefs(gaps, briefField, category) {
   return (gaps || []).map((g) => {
     if (!g || !g.keyword) return null;
     const kw = String(g.keyword).trim();
@@ -289,7 +289,7 @@ export function mapGapBriefs(gaps, briefField) {
       '',
       'Write the definitive page for this keyword: match the search intent, answer it better and more completely than the competitor page, and route readers to the relevant service/booking CTA.',
     ].filter((l) => l !== '');
-    const row = { Title: title, Keyword: kw, 'Primary Keyword': kw, Category: 'Blog' };
+    const row = { Title: title, Keyword: kw, 'Primary Keyword': kw, Category: category || 'Blog' };
     const desc = [
       `Target keyword: ${kw}` + (g.volume ? ` (~${Number(g.volume).toLocaleString()} searches/mo)` : ''),
       g.competitor ? `gap vs ${g.competitor}` + (g.competitorPos ? ` (ranks #${g.competitorPos})` : '') : '',
@@ -351,7 +351,19 @@ export function mapOpportunities(clusters, now) {
 // `fieldSet` (optional) = Set of field names that exist on the target table;
 // when given, the row is filtered to known fields so a differing per-site schema
 // can never cause an UNKNOWN_FIELD_NAME error.
-export function mapArticleBrief(cluster, brief, briefField, fieldSet) {
+// Map a friendly content-type to the EXACT Category value the GoodFor n8n master
+// Switch routes on (Blog inline / Recipes → Recipe sub / Ingredient Definitions →
+// Definition sub). Anything unknown → 'Blog' (the safe default branch). This is what
+// lets the dashboard create a Recipe or Definition, not only a Blog.
+export function normalizeCategory(type) {
+  const t = String(type || '').toLowerCase().trim();
+  if (/recipe/.test(t)) return 'Recipes';
+  if (/definition|ingredient|glossary|term/.test(t)) return 'Ingredient Definitions';
+  if (/how[\s-]?to/.test(t)) return 'How To Guide';
+  return 'Blog';
+}
+
+export function mapArticleBrief(cluster, brief, briefField, fieldSet, category) {
   const c = cluster || {};
   const b = (brief && typeof brief === 'object') ? brief : {};
   const title = b.title || c.suggestedTitle || c.label || c.primaryKeyword || c.keyword || '';
@@ -366,7 +378,7 @@ export function mapArticleBrief(cluster, brief, briefField, fieldSet) {
     Title: title,
     Keyword: keyword,
     'Primary Keyword': c.primaryKeyword || keyword,
-    Category: 'Blog',  // drives the n8n Category switch (Blog branch); user can change
+    Category: category || 'Blog',  // drives the n8n Category switch (Blog/Recipes/Ingredient Definitions)
   };
   if (b.angle) row['Goal of Article'] = b.angle;
   // Description: the generated meta when we have one, else a synthesised summary — never blank.
@@ -443,4 +455,4 @@ function clusterBriefText(c) {
   return lines.join('\n').trim();
 }
 
-export default { listBases, listTables, ensureTable, ensureField, createRecords, listRecords, updateRecord, createRecord, listFieldValues, pushKeywords, SCHEMAS, mapGaps, mapContent, mapGeo, mapCompetitors, mapGeoOpportunities, mapOpportunities, mapArticleBrief };
+export default { listBases, listTables, ensureTable, ensureField, createRecords, listRecords, updateRecord, createRecord, listFieldValues, pushKeywords, SCHEMAS, mapGaps, mapContent, mapGeo, mapCompetitors, mapGeoOpportunities, mapOpportunities, mapArticleBrief, mapGapBriefs, normalizeCategory };

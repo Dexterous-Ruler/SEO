@@ -3774,7 +3774,7 @@ const routes = {
       }
 
       // (c) Title / Description / Content Brief per keyword — reuse the writer-ready mapper.
-      const briefRows = airtable.mapGapBriefs(keywords.map((k) => ({ keyword: String(k).trim() })), briefField);
+      const briefRows = airtable.mapGapBriefs(keywords.map((k) => ({ keyword: String(k).trim() })), briefField, airtable.normalizeCategory(body.category));
       const byKw = new Map(briefRows.map((r) => [String(r.Keyword).trim().toLowerCase(), r]));
       extras = {};
       for (const rawK of keywords) {
@@ -3910,7 +3910,7 @@ const routes = {
       // stat fields get filtered away, leaving half-empty "ghost" rows in the master list.
       const aw = await articleWriterTarget();
       const rows = aw
-        ? airtable.mapGapBriefs(gaps || [], aw.briefField)
+        ? airtable.mapGapBriefs(gaps || [], aw.briefField, airtable.normalizeCategory(body.category))
         : airtable.mapGaps(gaps || [], 'DataForSEO', now);
       // Land keywords in the Article Writer table (de-duped by Keyword); only if that
       // table isn't configured do we fall back to a dedicated 'SEO Keyword Gaps' table.
@@ -3953,7 +3953,7 @@ const routes = {
       const aw = await articleWriterTarget();
       const clusters = body.clusters || [];
       if (aw) {
-        const rows = clusters.map((c) => airtable.mapArticleBrief(c, c.brief || null, aw.briefField, null));
+        const rows = clusters.map((c) => airtable.mapArticleBrief(c, c.brief || null, aw.briefField, null, airtable.normalizeCategory(c.category || body.category)));
         await pushToArticleWriter('opportunities', rows, 'Title', { upsert: true });
       } else {
         await push('opportunities', cfg.table_opportunities, airtable.mapOpportunities(clusters, now), airtable.SCHEMAS.opportunities);
@@ -4021,7 +4021,7 @@ const routes = {
       const aw = await articleWriterTarget();
       if (!aw) { out.article_brief = { error: 'No Article Writer table configured for this site.' }; }
       else {
-        const row = airtable.mapArticleBrief(body.cluster || {}, body.brief || null, aw.briefField, null);
+        const row = airtable.mapArticleBrief(body.cluster || {}, body.brief || null, aw.briefField, null, airtable.normalizeCategory(body.category));
         if (!row) { out.article_brief = { pushed: 0, note: 'no brief' }; }
         else { await pushToArticleWriter('article_brief', [row], 'Title', { upsert: true }); }
       }
@@ -4654,7 +4654,7 @@ const routes = {
       },
     };
     let out;
-    try { out = await routes['POST /airtable-sync']({ siteId: body.siteId, kinds: ['opportunities'], clusters: [cluster] }); }
+    try { out = await routes['POST /airtable-sync']({ siteId: body.siteId, kinds: ['opportunities'], clusters: [cluster], category: body.category }); }
     catch (e) { return { error: 'Push failed: ' + e.message }; }
     if (out && out.error) return { error: out.error };
     if (body.oppId) await engine.setStatus(body.oppId, 'queued').catch(() => {});

@@ -1408,6 +1408,10 @@ function RadarScreen({ ctx }){
   const [busyId,setBusyId] = useState("");
   const [notProv,setNotProv] = useState(false);
   const [form,setForm] = useState({ type:"google_news", url:"", query:"", label:"" });
+  // Site-aware content types → the n8n Category the master switch routes on. GoodFor
+  // does Blog/Recipe/Definition; go-legal.ai adds Definition; every other site is Blog-only.
+  const TYPES = (()=>{ const n=((s.name||"")+" "+(s.url||"")).toLowerCase(); if(/good\s?for/.test(n)) return [["blog","Blog"],["recipe","Recipe"],["definition","Definition"]]; if(/go-?legal\.ai/.test(n)) return [["blog","Blog"],["definition","Definition"]]; return [["blog","Blog"]]; })();
+  const [draftType,setDraftType] = useState("blog");
   const inp = { padding:"9px 12px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none", width:"100%", boxSizing:"border-box" };
   const lbl = { fontSize:11.5, color:"var(--muted)", marginBottom:5, fontWeight:600 };
   const TYPE_LABEL = { google_alert:"Google Alert RSS", outlet_rss:"Outlet RSS", google_news:"Google News query" };
@@ -1433,7 +1437,7 @@ function RadarScreen({ ctx }){
   };
   const draft = (it)=>{
     setBusyId(it.id);
-    API.radarDraft(s.id, { title:it.title, link:it.link, summary:it.summary, primaryKeyword:it.primaryKeyword }, it.id).then(r=>{ if(r&&r.error){ ctx.toast("Draft: "+r.error,"clay"); return; } setItems(x=>x.filter(y=>y.id!==it.id)); ctx.toast("Brief sent → Article Writer (flip Status to “Write Article” when ready)","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
+    API.radarDraft(s.id, { title:it.title, link:it.link, summary:it.summary, primaryKeyword:it.primaryKeyword }, it.id, draftType).then(r=>{ if(r&&r.error){ ctx.toast("Draft: "+r.error,"clay"); return; } setItems(x=>x.filter(y=>y.id!==it.id)); ctx.toast("Brief sent → Article Writer as "+(TYPES.find(t=>t[0]===draftType)||[])[1]+" (flip Status to “Write Article” when ready)","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
   };
   const dismiss = (it)=>{ setBusyId(it.id); API.engineDismiss(it.id).then(()=>setItems(x=>x.filter(y=>y.id!==it.id))).catch(()=>{}).finally(()=>setBusyId("")); };
 
@@ -1443,7 +1447,12 @@ function RadarScreen({ ctx }){
       <SoftCard style={{ marginBottom:18 }}>
         <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
           <div style={{ fontWeight:700, fontSize:15 }}>Sources <span style={{ color:"var(--muted)", fontWeight:500 }}>· {sources.length}</span></div>
-          <NeoButton kind="primary" size="sm" icon={polling?undefined:"radar"} disabled={polling||!sources.length} onClick={poll}>{polling?"Polling…":"Poll now"}</NeoButton>
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            {TYPES.length>1 && <label style={{ display:"flex", alignItems:"center", gap:7, fontSize:12.5, color:"var(--muted)" }}>Draft as
+              <select value={draftType} onChange={e=>setDraftType(e.target.value)} style={{ ...inp, width:"auto", padding:"7px 10px", fontSize:12.5 }}>{TYPES.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select>
+            </label>}
+            <NeoButton kind="primary" size="sm" icon={polling?undefined:"radar"} disabled={polling||!sources.length} onClick={poll}>{polling?"Polling…":"Poll now"}</NeoButton>
+          </div>
         </div>
         <div style={{ display:"grid", gridTemplateColumns:"180px 1fr 160px auto", gap:10, alignItems:"end" }}>
           <div><div style={lbl}>Type</div>

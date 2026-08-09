@@ -186,7 +186,7 @@
     radarSourceRemove(siteId, id) { return engine("/radar-source-remove", { siteId, id }); },
     radarPoll(siteId) { return engine("/radar-poll", { siteId }); },
     radarItems(siteId, limit) { return engine("/radar-items", { siteId, limit }); },
-    radarDraft(siteId, item, oppId) { return engine("/radar-draft", { siteId, item, oppId }); },
+    radarDraft(siteId, item, oppId, category) { return engine("/radar-draft", { siteId, item, oppId, category }); },
     trendingIntel(siteId, niche, db) { return engine("/trending-intel", { siteId, niche, db }); },
     peopleAlsoAsk(siteId, keyword, depth) { return engine("/people-also-ask", { siteId, keyword, depth }); },
     // Same route with push:true → sends each PAA question to the Airtable Article Writer; returns { ..., airtable }.
