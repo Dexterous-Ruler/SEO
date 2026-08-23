@@ -1433,7 +1433,12 @@ function RadarScreen({ ctx }){
   const [draftType,setDraftType] = useState("blog");
   const inp = { padding:"9px 12px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none", width:"100%", boxSizing:"border-box" };
   const lbl = { fontSize:11.5, color:"var(--muted)", marginBottom:5, fontWeight:600 };
-  const TYPE_LABEL = { google_alert:"Google Alert RSS", outlet_rss:"Outlet RSS", google_news:"Google News query" };
+  const TYPE_LABEL = { google_alert:"Google Alert", outlet_rss:"News site", google_news:"Topic search" };
+  const TYPE_HELP = {
+    google_news:"Easiest — just type a topic (e.g. “redundancy law UK”) and we watch Google News for new stories about it. No links needed.",
+    google_alert:"Paste a Google Alert link. Create one free at google.com/alerts, set “Deliver to → RSS feed”, then copy the link it gives you and paste it here.",
+    outlet_rss:"Follow one specific news website: paste its “latest articles” link (usually the site address followed by /feed/).",
+  };
   const fmtDate = (d)=>{ if(!d) return ""; try{ return new Date(d).toLocaleDateString(undefined,{day:"numeric",month:"short",year:"numeric"}); }catch(e){ return String(d).slice(0,10); } };
 
   const loadSources = ()=>{ if(!live) return; API.radarSources(s.id).then(r=>setSources((r&&r.sources)||[])).catch(()=>{}); };
@@ -1443,50 +1448,50 @@ function RadarScreen({ ctx }){
   const addSource = ()=>{
     if(!live) return;
     const src = { type:form.type, label:form.label };
-    if(form.type==="google_news"){ if(!form.query.trim()){ ctx.toast("Enter a search query","gold"); return; } src.query=form.query.trim(); }
-    else { if(!/^https?:\/\//i.test(form.url.trim())){ ctx.toast("Enter a valid feed URL (https://…)","gold"); return; } src.url=form.url.trim(); }
-    API.radarSourceSave(s.id, src).then(r=>{ if(r&&r.error){ ctx.toast(r.error,"clay"); return; } setSources((r&&r.sources)||[]); setForm({ type:form.type, url:"", query:"", label:"" }); ctx.toast("Source added ✓","teal"); }).catch(e=>ctx.toast(e.message,"clay"));
+    if(form.type==="google_news"){ if(!form.query.trim()){ ctx.toast("Type a topic to watch first","gold"); return; } src.query=form.query.trim(); }
+    else { if(!/^https?:\/\//i.test(form.url.trim())){ ctx.toast("Paste a link starting with https://","gold"); return; } src.url=form.url.trim(); }
+    API.radarSourceSave(s.id, src).then(r=>{ if(r&&r.error){ ctx.toast(r.error,"clay"); return; } setSources((r&&r.sources)||[]); setForm({ type:form.type, url:"", query:"", label:"" }); ctx.toast("Added — now click “Check for new stories”","teal"); }).catch(e=>ctx.toast(e.message,"clay"));
   };
   const removeSource = (id)=>{ API.radarSourceRemove(s.id, id).then(r=>setSources((r&&r.sources)||[])).catch(()=>{}); };
   const poll = ()=>{
     if(!live) return;
-    if(!sources.length){ ctx.toast("Add a source first","gold"); return; }
+    if(!sources.length){ ctx.toast("Add something to watch first","gold"); return; }
     setPolling(true);
-    API.radarPoll(s.id).then(r=>{ if(r&&r.error){ ctx.toast("Radar: "+r.error,"clay"); return; } ctx.toast(((r.saved)||0)+" fresh item"+((r.saved===1)?"":"s")+" found ✓","teal"); loadItems(); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPolling(false));
+    API.radarPoll(s.id).then(r=>{ if(r&&r.error){ ctx.toast("Couldn't check: "+r.error,"clay"); return; } const n=(r.saved)||0; ctx.toast(n>0?(n+" new stor"+(n===1?"y":"ies")+" found ✓"):"No new stories right now","teal"); loadItems(); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPolling(false));
   };
   const draft = (it)=>{
     setBusyId(it.id);
-    API.radarDraft(s.id, { title:it.title, link:it.link, summary:it.summary, primaryKeyword:it.primaryKeyword }, it.id, draftType).then(r=>{ if(r&&r.error){ ctx.toast("Draft: "+r.error,"clay"); return; } setItems(x=>x.filter(y=>y.id!==it.id)); ctx.toast("Brief sent → Article Writer as "+(TYPES.find(t=>t[0]===draftType)||[])[1]+" (flip Status to “Write Article” when ready)","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
+    API.radarDraft(s.id, { title:it.title, link:it.link, summary:it.summary, primaryKeyword:it.primaryKeyword }, it.id, draftType).then(r=>{ if(r&&r.error){ ctx.toast("Couldn't add: "+r.error,"clay"); return; } setItems(x=>x.filter(y=>y.id!==it.id)); ctx.toast("Added to the Article Writer as a "+((TYPES.find(t=>t[0]===draftType)||[])[1]||"draft")+" — open it there when you're ready to write it","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
   };
   const dismiss = (it)=>{ setBusyId(it.id); API.engineDismiss(it.id).then(()=>setItems(x=>x.filter(y=>y.id!==it.id))).catch(()=>{}).finally(()=>setBusyId("")); };
 
   return (
     <div>
-      <PageHead title="Content Radar" sub="Turn real news from your chosen sources — Google Alerts, outlet feeds, Google News — into article briefs. Nothing publishes until you approve it." />
+      <PageHead title="Content Radar" sub="Watch the news for topics you care about, and turn the best stories into article drafts. You review everything first — nothing publishes on its own." />
       <SoftCard style={{ marginBottom:18 }}>
         <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
-          <div style={{ fontWeight:700, fontSize:15 }}>Sources <span style={{ color:"var(--muted)", fontWeight:500 }}>· {sources.length}</span></div>
+          <div style={{ fontWeight:700, fontSize:15 }}>What you're watching <span style={{ color:"var(--muted)", fontWeight:500 }}>· {sources.length}</span></div>
           <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-            {TYPES.length>1 && <label style={{ display:"flex", alignItems:"center", gap:7, fontSize:12.5, color:"var(--muted)" }}>Draft as
+            {TYPES.length>1 && <label style={{ display:"flex", alignItems:"center", gap:7, fontSize:12.5, color:"var(--muted)" }}>Make each into a
               <select value={draftType} onChange={e=>setDraftType(e.target.value)} style={{ ...inp, width:"auto", padding:"7px 10px", fontSize:12.5 }}>{TYPES.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select>
             </label>}
-            <NeoButton kind="primary" size="sm" icon={polling?undefined:"radar"} disabled={polling||!sources.length} onClick={poll}>{polling?"Polling…":"Poll now"}</NeoButton>
+            <NeoButton kind="primary" size="sm" icon={polling?undefined:"radar"} disabled={polling||!sources.length} onClick={poll} title="Check all your sources right now for new stories (it also checks automatically twice a day)">{polling?"Checking…":"Check for new stories"}</NeoButton>
           </div>
         </div>
         <div style={{ display:"grid", gridTemplateColumns:"180px 1fr 160px auto", gap:10, alignItems:"end" }}>
-          <div><div style={lbl}>Type</div>
+          <div><div style={lbl}>What to watch</div>
             <select style={inp} value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}>
-              <option value="google_news">Google News query</option>
-              <option value="google_alert">Google Alert RSS</option>
-              <option value="outlet_rss">Outlet RSS feed</option>
+              <option value="google_news">A topic (easiest)</option>
+              <option value="google_alert">A Google Alert</option>
+              <option value="outlet_rss">A specific news site</option>
             </select></div>
           {form.type==="google_news"
-            ? <div><div style={lbl}>Search query</div><input style={inp} placeholder="e.g. UK settlement agreement redundancy" value={form.query} onChange={e=>setForm(f=>({...f,query:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addSource()} /></div>
-            : <div><div style={lbl}>Feed URL</div><input style={inp} placeholder={form.type==="google_alert"?"https://www.google.com/alerts/feeds/…":"https://outlet.com/feed/"} value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addSource()} /></div>}
-          <div><div style={lbl}>Label (optional)</div><input style={inp} placeholder="e.g. Employment news" value={form.label} onChange={e=>setForm(f=>({...f,label:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addSource()} /></div>
+            ? <div><div style={lbl}>Topic to watch</div><input style={inp} placeholder="e.g. UK settlement agreement redundancy" value={form.query} onChange={e=>setForm(f=>({...f,query:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addSource()} /></div>
+            : <div><div style={lbl}>Paste the link</div><input style={inp} placeholder={form.type==="google_alert"?"Paste your Google Alert link…":"e.g. https://www.lawgazette.co.uk/feed/"} value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addSource()} /></div>}
+          <div><div style={lbl}>Name (optional)</div><input style={inp} placeholder="e.g. Employment news" value={form.label} onChange={e=>setForm(f=>({...f,label:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addSource()} /></div>
           <NeoButton kind="ghost" size="sm" onClick={addSource}>Add</NeoButton>
         </div>
-        {form.type==="google_alert" && <div style={{ marginTop:9, fontSize:12, color:"var(--muted)" }}>Tip: in Google Alerts choose <b>Deliver to → RSS feed</b>, then paste that feed URL here.</div>}
+        <div style={{ marginTop:9, fontSize:12, color:"var(--muted)", lineHeight:1.5 }}>{TYPE_HELP[form.type]}</div>
         {!!sources.length && <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginTop:14 }}>
           {sources.map(src=>(
             <div key={src.id} style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 11px", borderRadius:"var(--r-pill)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5 }}>
@@ -1501,7 +1506,7 @@ function RadarScreen({ ctx }){
 
       {notProv && <SoftCard tone="gold" style={{ marginBottom:16 }}>The content queue table isn’t provisioned yet — run <code>supabase/content-engine.sql</code>, then poll again.</SoftCard>}
       {loading && <div style={{ color:"var(--muted)", padding:"12px 4px" }}>Loading…</div>}
-      {!loading && !items.length && !notProv && <SoftCard><div style={{ color:"var(--muted)", textAlign:"center", padding:"22px 0" }}>No radar items yet. Add a source above and hit <b>Poll now</b>.</div></SoftCard>}
+      {!loading && !items.length && !notProv && <SoftCard><div style={{ color:"var(--muted)", textAlign:"center", padding:"22px 0" }}>Nothing here yet. Add a topic or news source above, then click <b>Check for new stories</b>.</div></SoftCard>}
       <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
         {items.map(it=>(
           <SoftCard key={it.id} hover={false}>
@@ -1512,8 +1517,8 @@ function RadarScreen({ ctx }){
                 {it.summary && <div style={{ fontSize:13, color:"var(--ink)", opacity:.82, lineHeight:1.5 }}>{String(it.summary).slice(0,220)}{String(it.summary).length>220?"…":""}</div>}
               </div>
               <div style={{ display:"flex", flexDirection:"column", gap:8, alignItems:"flex-end", flexShrink:0 }}>
-                <NeoButton kind="primary" size="sm" icon="sparkles" disabled={busyId===it.id} onClick={()=>draft(it)}>{busyId===it.id?"…":"Draft brief"}</NeoButton>
-                <button onClick={()=>dismiss(it)} disabled={busyId===it.id} style={{ border:"none", background:"none", cursor:"pointer", color:"var(--muted)", fontSize:12 }}>Dismiss</button>
+                <NeoButton kind="primary" size="sm" icon="sparkles" disabled={busyId===it.id} onClick={()=>draft(it)} title="Send this story to the Article Writer as a draft topic — it won't write or publish until you set it going">{busyId===it.id?"…":"Turn into a draft"}</NeoButton>
+                <button onClick={()=>dismiss(it)} disabled={busyId===it.id} title="Hide this story" style={{ border:"none", background:"none", cursor:"pointer", color:"var(--muted)", fontSize:12 }}>Hide</button>
               </div>
             </div>
           </SoftCard>
