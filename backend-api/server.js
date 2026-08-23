@@ -124,19 +124,22 @@ function stripBannedContentBlocks(html) {
 // On long pages this exceeds the edge gateway's ~100s response cap → 504. So it runs in
 // the BACKGROUND (started via /content-rewrite {start:true}); the client polls
 // /content-rewrite-status. This helper does the generation and returns the preview.
-async function generateRewritePreview({ wp, found, page, site, siteId, brief, feedback, priorDraft }) {
+async function generateRewritePreview({ wp, found, page, site, siteId, brief, feedback, priorDraft, onProgress }) {
+  const step = (s) => { try { if (onProgress) onProgress(s); } catch (e) {} };
   const builder = (site && site.stack && site.stack.builder) || '';
+  step('Reading the current page');
   const post = await wp.request(`/${found.type}/${found.id}?context=edit&_fields=content,title`).catch(() => null);
   const rawHtml = (post && post.content && (post.content.raw != null ? post.content.raw : '')) || '';
   const rawText = rawHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   if (rawText.length < 60) return { status: 'manual', builder, reason: `This page has no editable post content to auto-rewrite${builder ? ` (it’s built with ${builder})` : ''} — generate the Brief and edit it directly in your builder.` };
   const title = (post && post.title && (post.title.raw || post.title.rendered)) || page.title || '';
   let br = brief;
-  if (!br) { try { br = await claude.decayBrief({ page, pageContext: { excerpt: rawText.slice(0, 4000) }, siteId }); } catch (e) { br = ''; } }
+  if (!br) { step('Auditing the page & writing the improvement brief'); try { br = await claude.decayBrief({ page, pageContext: { excerpt: rawText.slice(0, 4000) }, siteId }); } catch (e) { br = ''; } }
   // Real internal-link targets from THIS site's published pages/posts, so the refresh can
   // only link to URLs that actually exist (Karim: it was giving wrong internal URLs — the
   // model invents them when it has no real list to draw from).
   let linkCandidates = [];
+  step('Finding real internal links');
   try {
     const [pg, ps] = await Promise.all([
       wp.list('pages', { perPage: 100, fields: 'title,link' }).catch(() => []),
@@ -152,8 +155,10 @@ async function generateRewritePreview({ wp, found, page, site, siteId, brief, fe
     linkCandidates = linkCandidates.slice(0, 60);
   } catch (e) {}
   let newHtml = '';
+  step('Rewriting & refreshing the content');
   try { newHtml = await claude.refreshArticle({ page: { ...page, title }, currentContent: rawHtml || rawText, brief: br, linkCandidates, feedback, priorDraft, siteId }); }
   catch (e) { return { error: 'Rewrite failed: ' + e.message }; }
+  step('Finalising the draft');
   // Defensive: strip anything the style rules forbid, regardless of the model —
   //  • horizontal rules / divider lines (Karim: never section-break lines in content)
   //  • a trailing "Related Resources / Further Reading" link-dump section (Karim: no
@@ -3100,12 +3105,17 @@ const routes = {
     const jobId = `${body.siteId}:${found.id}`;
     if (body.start && !body.apply) {
       const prevJob = REWRITES.get(jobId);
-      if (prevJob && prevJob.status === 'running') return { started: true, jobId, postId: found.id, status: 'running' };
-      REWRITES.set(jobId, { status: 'running', at: Date.now() });
-      generateRewritePreview({ wp, found, page, site, siteId: body.siteId, brief: body.brief, feedback: body.feedback, priorDraft: body.priorDraft })
-        .then((r) => REWRITES.set(jobId, { status: (r && !r.error) ? 'done' : 'error', result: r, error: r && r.error, at: Date.now() }))
-        .catch((e) => REWRITES.set(jobId, { status: 'error', error: String(e.message || e), at: Date.now() }));
-      return { started: true, jobId, postId: found.id, status: 'running' };
+      if (prevJob && prevJob.status === 'running') return { started: true, jobId, postId: found.id, status: 'running', stage: prevJob.stage, startedAt: prevJob.startedAt };
+      const startedAt = Date.now();
+      REWRITES.set(jobId, { status: 'running', at: startedAt, startedAt, stage: 'Starting' });
+      // Report each stage so the UI shows live progress instead of a silent 3-minute spinner
+      // (the generation is 2 Claude calls + WP fetches ≈ 2-4 min — with no feedback it reads
+      // as "the update doesn't run").
+      const onProgress = (stage) => { const j = REWRITES.get(jobId); if (j && j.status === 'running') j.stage = stage; };
+      generateRewritePreview({ wp, found, page, site, siteId: body.siteId, brief: body.brief, feedback: body.feedback, priorDraft: body.priorDraft, onProgress })
+        .then((r) => REWRITES.set(jobId, { status: (r && !r.error) ? 'done' : 'error', result: r, error: r && r.error, at: Date.now(), startedAt }))
+        .catch((e) => REWRITES.set(jobId, { status: 'error', error: String(e.message || e), at: Date.now(), startedAt }));
+      return { started: true, jobId, postId: found.id, status: 'running', stage: 'Starting', startedAt };
     }
     // Synchronous generate (short pages / preview), or the generation half of an apply.
     const gen = await generateRewritePreview({ wp, found, page, site, siteId: body.siteId, brief: body.brief, feedback: body.feedback, priorDraft: body.priorDraft });
@@ -3132,7 +3142,7 @@ const routes = {
     if (!j) return { status: 'unknown', reason: 'job not found — it may have completed or been lost to a restart; re-run' };
     if (j.status === 'done') return { status: 'done', ...(j.result || {}) };
     if (j.status === 'error') return { status: 'error', error: j.error || 'generation failed' };
-    return { status: 'running', at: j.at };
+    return { status: 'running', at: j.at, stage: j.stage || 'Working', startedAt: j.startedAt || j.at };
   },
 
   // Append a responsive YouTube embed to a post/page (classic/Gutenberg HTML — e.g. the

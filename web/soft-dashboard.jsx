@@ -53,6 +53,10 @@ const SNAV_BY_KEY = Object.fromEntries(SNAV.map(it=>[it.k, it]));
 // Blog-only (picker hidden). The value ("recipe"/"definition"/"blog") is normalised
 // to the exact Category on the backend (airtable.normalizeCategory).
 function contentTypesFor(site){ const n=((((site&&site.name)||"")+" "+((site&&site.url)||"")).toLowerCase()); if(/good\s?for/.test(n)) return [["blog","Blog"],["recipe","Recipe"],["definition","Definition"]]; if(/go-?legal\.ai/.test(n)) return [["blog","Blog"],["definition","Definition"]]; return [["blog","Blog"]]; }
+// A decay URL is only "rewritable" if it maps to editable post content — PDFs, media
+// uploads and feeds don't, so we don't offer "Audit & refresh" on them (it would just
+// dead-end at "couldn't match this URL to a post").
+function isRewritableUrl(u){ const s=String(u||""); return !/(\.(pdf|docx?|xlsx?|pptx?|zip|jpe?g|png|gif|webp|svg|mp4|mp3))(\?|#|$)/i.test(s) && !/\/wp-content\/uploads\//i.test(s) && !/\/feed\/?(\?|#|$)/i.test(s); }
 // Compact "Create as: [type]" dropdown; renders nothing for Blog-only sites.
 function TypePicker({ site, value, onChange, label="Create as" }){
   const types = contentTypesFor(site);
@@ -4260,7 +4264,8 @@ function GscScreen({ ctx }) {
   const doRewrite = (d, feedback)=>{
     // When regenerating from feedback, carry the current draft so the model REVISES it.
     const priorDraft = (feedback && rewriteFor && rewriteFor.page===d.page && rewriteFor.preview && rewriteFor.preview.newHtml) || null;
-    setRewriteFor({ page:d.page, loading:true, feedbackApplied: feedback||null });
+    const startedAt = Date.now();
+    setRewriteFor({ page:d.page, loading:true, feedbackApplied: feedback||null, startedAt, stage:"Starting" });
     const handle=(r)=>{
       if(!r||r.error){ setRewriteFor({ page:d.page, error:(r&&r.error)||"Rewrite failed" }); ctx.toast("Rewrite: "+((r&&r.error)||"failed"),"clay"); return; }
       if(r.status==="manual"){ setRewriteFor({ page:d.page, manual:r }); ctx.toast(r.reason||"Edit this page in your builder","gold"); return; }
@@ -4274,10 +4279,10 @@ function GscScreen({ ctx }) {
       let tries=0;
       const poll=()=>{
         API.contentRewriteStatus(s.id, postId).then(st=>{
-          if(st && st.status==="running"){ if(++tries>110){ setRewriteFor({ page:d.page, error:"Rewrite timed out — try again." }); return; } setTimeout(poll,4000); return; }
+          if(st && st.status==="running"){ setRewriteFor(f=>({ ...(f||{}), page:d.page, loading:true, stage: st.stage||(f&&f.stage)||"Working", startedAt: (f&&f.startedAt)||startedAt })); if(++tries>150){ setRewriteFor({ page:d.page, error:"Rewrite timed out after ~10 min — try again." }); return; } setTimeout(poll,4000); return; }
           if(st && st.status==="unknown"){ setRewriteFor({ page:d.page, error: st.reason||"Rewrite job was lost (server restart) — run it again." }); return; }
           handle(st);
-        }).catch(e=>{ if(++tries>110){ setRewriteFor({ page:d.page, error:e.message }); return; } setTimeout(poll,4000); });
+        }).catch(e=>{ if(++tries>150){ setRewriteFor({ page:d.page, error:e.message }); return; } setTimeout(poll,4000); });
       };
       setTimeout(poll,3000);
     }).catch(e=>{ setRewriteFor({ page:d.page, error:e.message }); ctx.toast(e.message,"clay"); });
@@ -4723,11 +4728,21 @@ function GscScreen({ ctx }) {
                         <div style={{ display:"flex", alignItems:"center", gap:10, marginTop:7, flexWrap:"wrap" }}>
                           <span style={{ fontSize:11.5, color:"var(--muted)" }}>{d.priorClicks}→{d.recentClicks} clicks · pos {d.prevPosition}→{d.position} {d.positionDrift>0?<b style={{color:"var(--clay)"}}>(+{d.positionDrift})</b>:null}</span>
                           <span style={{ marginLeft:"auto", display:"inline-flex", gap:7 }}>
-                            <NeoButton kind="primary" size="sm" icon={(rewriteFor&&rewriteFor.page===d.page&&(rewriteFor.loading||rewriteFor.applying))?undefined:"sparkles"} disabled={rewriteFor&&rewriteFor.page===d.page&&(rewriteFor.loading||rewriteFor.applying)} onClick={()=>doRewrite(d)} title="Audits this page's content and refreshes it in place — updates stale info, fills ranking gaps, tightens intent (keeps the article, doesn't rewrite it). You review before it updates the live post.">{rewriteFor&&rewriteFor.page===d.page&&rewriteFor.loading&&<Icon name="cog" size={14} className="audit-spin" />}{rewriteFor&&rewriteFor.page===d.page&&rewriteFor.loading?"Auditing & refreshing…":"Audit & refresh"}</NeoButton>
+                            <NeoButton kind="primary" size="sm" icon={(rewriteFor&&rewriteFor.page===d.page&&(rewriteFor.loading||rewriteFor.applying))?undefined:"sparkles"} disabled={!isRewritableUrl(d.page) || (rewriteFor&&rewriteFor.page===d.page&&(rewriteFor.loading||rewriteFor.applying))} onClick={()=>doRewrite(d)} title={isRewritableUrl(d.page)?"Audits this page's content and refreshes it in place — updates stale info, fills ranking gaps, tightens intent (keeps the article, doesn't rewrite it). Takes 2–4 min; you review before it updates the live post.":"This URL is a PDF/upload/feed — there's no editable post content to rewrite."}>{rewriteFor&&rewriteFor.page===d.page&&rewriteFor.loading&&<Icon name="cog" size={14} className="audit-spin" />}{!isRewritableUrl(d.page)?"Not rewritable":(rewriteFor&&rewriteFor.page===d.page&&rewriteFor.loading?((rewriteFor.stage||"Auditing & refreshing")+"…"):"Audit & refresh")}</NeoButton>
                             <NeoButton kind="ghost" size="sm" icon="doc" onClick={()=>genBrief(d)}>Brief</NeoButton>
                             <NeoButton kind="soft" size="sm" icon={(refreshFor&&refreshFor.page===d.page&&refreshFor.loading)?undefined:"image"} disabled={refreshFor&&refreshFor.page===d.page&&refreshFor.loading} onClick={()=>doRefresh(d)} title="Lighter touch: optimise this page's images and bump its freshness date + re-index — no content change.">{refreshFor&&refreshFor.page===d.page&&refreshFor.loading&&<Icon name="cog" size={14} className="audit-spin" />}{refreshFor&&refreshFor.page===d.page&&refreshFor.loading?(refreshFor.step==="images"?"Optimising images…":"Refreshing…"):"Images + date"}</NeoButton>
                             <NeoButton kind="ghost" size="sm" disabled={restoreBusy===d.page} onClick={()=>doRestore(d)} title="Undo a bad apply — restore this page's previous WordPress version (fixes a layout an earlier rewrite broke)">{restoreBusy===d.page&&<Icon name="cog" size={13} className="audit-spin" />}Restore</NeoButton>
                           </span>
+                          {rewriteFor && rewriteFor.page===d.page && rewriteFor.loading && (
+                            <div style={{ marginTop:8, display:"flex", alignItems:"center", gap:8, fontSize:11.5, color:"var(--muted)", flexWrap:"wrap" }}>
+                              <Icon name="cog" size={12} className="audit-spin" />
+                              <span><b>{rewriteFor.stage||"Working"}</b>{rewriteFor.startedAt?" · "+Math.round((Date.now()-rewriteFor.startedAt)/1000)+"s":""}</span>
+                              <span style={{ color:"var(--faint)" }}>— a full rewrite takes 2–4 min; leave this open</span>
+                            </div>
+                          )}
+                          {rewriteFor && rewriteFor.page===d.page && rewriteFor.error && !rewriteFor.preview && (
+                            <div style={{ marginTop:8, fontSize:11.5, color:"var(--clay)", display:"flex", alignItems:"center", gap:6 }}><Icon name="alert" size={12} />{rewriteFor.error}</div>
+                          )}
                         </div>
                         {/* One-click refresh result */}
                         {refreshFor && refreshFor.page===d.page && refreshFor.result && (()=>{ const r=refreshFor.result; const ok=r.status==="applied"; const manual=r.status==="manual"; const blocked=r.status==="blocked"; const failed=r.error||r.status==="silent-failure";
