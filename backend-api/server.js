@@ -345,7 +345,7 @@ function authOk(req) {
 // The dashboard's kill switch was per-tab React state — another tab (or the API)
 // happily kept writing. Now it's persisted (app_secrets) and enforced HERE, at the
 // dispatcher, for every route that can mutate WordPress/Airtable/n8n. 10s cache.
-const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
+const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|engine-clean-negatives|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
 let _kill = { v: false, exp: 0 };
 async function killSwitchOn() {
   if (Date.now() < _kill.exp) return _kill.v;
@@ -4580,6 +4580,13 @@ const routes = {
   'POST /engine-sync-published': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
     return engine.syncPublished(body.siteId);
+  },
+  // Remove already-saved opportunities that fall in the site's excluded areas
+  // (negative_keywords) — clears off-niche topics (e.g. immigration on a disputes firm)
+  // that were saved before the niche-bleed guard existed. Re-runnable.
+  'POST /engine-clean-negatives': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    return engine.cleanNegatives(body.siteId);
   },
 
   // ── Content Radar (Google-Alerts-style feeds → briefs) ──────────────────────

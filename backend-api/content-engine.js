@@ -554,6 +554,34 @@ export async function setStatus(id, status) {
 
 export async function dismiss(id) { return setStatus(id, 'dismissed'); }
 
+// Purge saved opportunities that fall in the site's EXCLUDED areas (negative_keywords).
+// Needed because the niche-bleed fix only stops NEW off-niche items — rows saved before it
+// (e.g. 35 immigration topics on a disputes firm) linger in the worklist until cleared.
+// Whole-word matched, service-role delete, re-runnable whenever the negatives change.
+export async function cleanNegatives(siteId) {
+  if (!SB || !SRV) return { error: 'Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE).' };
+  const site = await db.getSite(siteId).catch(() => null);
+  const negatives = (site && Array.isArray(site.negative_keywords) ? site.negative_keywords : []).map((n) => String(n || '').toLowerCase().trim()).filter(Boolean);
+  if (!negatives.length) return { deleted: 0, scanned: 0, note: 'No excluded areas set for this site — add negative keywords first.' };
+  let rows = [];
+  try {
+    const res = await fetch(`${SB}/rest/v1/content_opportunities?site_id=eq.${encodeURIComponent(siteId)}&select=id,title,primary_keyword`, { headers: headers() });
+    const text = await res.text();
+    if (!res.ok) { if (isMissingTable(res.status, text)) return NOT_PROVISIONED; return { error: `read → ${res.status} ${text.slice(0, 150)}` }; }
+    rows = JSON.parse(text) || [];
+  } catch (e) { return { error: String(e.message || e) }; }
+  const hit = rows.filter((r) => hitsNeg((r.title || '') + ' ' + (r.primary_keyword || ''), negatives));
+  if (!hit.length) return { deleted: 0, scanned: rows.length };
+  const ids = hit.map((r) => `"${String(r.id).replace(/"/g, '')}"`).join(',');
+  try {
+    const res = await fetch(`${SB}/rest/v1/content_opportunities?id=in.(${encodeURIComponent(ids)})`, { method: 'DELETE', headers: headers({ Prefer: 'return=representation' }) });
+    const text = await res.text();
+    if (!res.ok) return { error: `delete → ${res.status} ${text.slice(0, 150)}` };
+    let data; try { data = JSON.parse(text); } catch { data = []; }
+    return { deleted: Array.isArray(data) ? data.length : hit.length, scanned: rows.length };
+  } catch (e) { return { error: String(e.message || e) }; }
+}
+
 // ---- 8) mirrorToAirtable ---------------------------------------------------
 // OPTIONAL best-effort: if the site has an Airtable PAT + base configured,
 // upsert a unified "Content Command" table (Title, Source(s), Action, Score,
