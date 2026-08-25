@@ -20,6 +20,21 @@ import * as claude from './claude.js';
 const STOP = new Set('the a an and or of for to in on with your you our how what why best top guide vs is are can do does will near me uk'.split(' '));
 function tokens(s) { return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !STOP.has(t)); }
 function cleanTitle(t) { return (t || '').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim(); }
+// Whole-word match of a keyword against the site's negative (excluded) terms, so "visa"
+// blocks "spouse visa" but NOT "advisable". negs are pre-lowercased; text may be mixed case.
+function hitsNegative(text, negs) {
+  if (!negs || !negs.length) return false;
+  const t = ' ' + String(text || '').toLowerCase() + ' ';
+  return negs.some((n) => {
+    if (!n) return false;
+    let i = -1;
+    while ((i = t.indexOf(n, i + 1)) !== -1) {
+      const before = t[i - 1], after = t[i + n.length];
+      if (!/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after)) return true;
+    }
+    return false;
+  });
+}
 
 // Deterministic fallback clustering — used when the Claude clustering call fails or
 // returns nothing, so a run never discards the (paid) keyword data it just gathered.
@@ -133,6 +148,14 @@ export async function findOpportunities(siteId, { db: region, maxKeywords = 160,
       try { const ideas = await dfs.keywordIdeas(seeds, { db: dbRegion, limit: 120 }); ideas.forEach((k) => add(k, 'trending')); sources.trending = ideas.length; } catch (e) { sources.trendingError = String(e.message || e); }
     }
   }
+
+  // Hard-drop the site's EXCLUDED areas (negative_keywords) BEFORE scoring/filtering. The
+  // niche context frequently NAMES excluded practice areas ("Go Legal does NOT do immigration,
+  // conveyancing, family…") — and the token-based niche-fit would then CREDIT those very words
+  // and surface exactly the topics the firm doesn't handle (immigration keywords for a disputes
+  // firm). A deterministic drop is far more reliable than hoping the LLM filter reads the negation.
+  const negs = (Array.isArray(site.negative_keywords) ? site.negative_keywords : []).map((n) => String(n || '').toLowerCase().trim()).filter(Boolean);
+  if (negs.length) { let dropped = 0; for (const key of [...pool.keys()]) { if (hitsNegative(key, negs)) { pool.delete(key); dropped++; } } sources.negativesDropped = dropped; }
 
   if (pool.size < 3) return { error: 'Not enough keyword data — connect Search Console or DataForSEO, and add competitors.', sources, clusters: [] };
 

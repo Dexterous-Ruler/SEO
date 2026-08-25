@@ -53,6 +53,18 @@ function isMissingTable(status, body) {
 // ---- token/dedupe helpers (reuse content-opportunities.js's tokens()/STOP) --
 const STOP = new Set('the a an and or of for for to in on with your you our how what why best top guide vs is are can do does will near me uk'.split(' '));
 export function tokens(s) { return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !STOP.has(t)); }
+// Whole-word match against a site's negative (excluded) terms — "visa" blocks "spouse visa"
+// but not "advisable". negs are pre-lowercased.
+function hitsNeg(text, negs) {
+  if (!negs || !negs.length) return false;
+  const t = ' ' + String(text || '').toLowerCase() + ' ';
+  return negs.some((n) => {
+    if (!n) return false;
+    let i = -1;
+    while ((i = t.indexOf(n, i + 1)) !== -1) { const b = t[i - 1], a = t[i + n.length]; if (!/[a-z0-9]/.test(b) && !/[a-z0-9]/.test(a)) return true; }
+    return false;
+  });
+}
 function cleanTitle(t) { return (t || '').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim(); }
 
 // Normalized token SIGNATURE: lowercase, strip stopwords/punct, sort the
@@ -130,14 +142,22 @@ export function score(opp, site) {
   const nSources = new Set((opp.evidence || []).map((e) => e && e.source).filter(Boolean)).size || 1;
   const multiSrc = nSources >= 3 ? 1.5 : nSources === 2 ? 1.25 : 1;
 
-  const raw = baseline * nicheFit * actionVal * freshness * gapBonus * multiSrc;
+  // Excluded-area guard: a topic matching the site's negative_keywords is OFF-niche whatever
+  // tokens it shares with the context. The niche context often NAMES excluded practice areas
+  // ("does not do immigration/conveyancing…") to warn the writer off them, which the token
+  // overlap above would otherwise REWARD — so sink anything that hits a negative.
+  const negs = (site && site.__negatives) || [];
+  const negHit = hitsNeg(opp.title || opp.primaryKeyword, negs);
+  const negPenalty = negHit ? 0.03 : 1;
+
+  const raw = baseline * nicheFit * actionVal * freshness * gapBonus * multiSrc * negPenalty;
   const value = Math.round(raw * 100) / 100;
   opp.scoreBreakdown = {
     baseline: Math.round(baseline * 100) / 100,
     volume,
     nicheFit: Math.round(nicheFit * 100) / 100,
     nicheHitFrac: Math.round(fitFrac * 100) / 100,
-    actionVal, freshness, gapBonus, multiSrc, nSources,
+    actionVal, freshness, gapBonus, multiSrc, nSources, negHit,
     value,
   };
   opp.score = value;
@@ -228,7 +248,8 @@ export async function ingest(siteId, { db: region, includeTrending = true, inclu
   const site = await db.getSite(siteId).catch(() => null);
   if (!site) return { error: 'Site not found.', opps: [], sources: {} };
   const nicheCtx = geoFor(siteId) || '';
-  const scoreSite = { id: siteId, __nicheCtx: nicheCtx };
+  const negatives = (Array.isArray(site.negative_keywords) ? site.negative_keywords : []).map((n) => String(n || '').toLowerCase().trim()).filter(Boolean);
+  const scoreSite = { id: siteId, __nicheCtx: nicheCtx, __negatives: negatives };
   const sources = {};
   const raw = [];
 
@@ -344,7 +365,11 @@ export async function ingest(siteId, { db: region, includeTrending = true, inclu
   }
 
   // Dedupe + merge across producers, then score (multi-source bonus now applies).
-  const merged = fuzzyMerge(dedupeMerge(raw));
+  // Belt-and-suspenders: drop any producer's items (trending / PAA / AI-visibility) that land
+  // in the site's EXCLUDED areas, so off-niche topics can't reach the queue at all.
+  const cleaned = negatives.length ? raw.filter((o) => !hitsNeg(o.title || o.primaryKeyword, negatives)) : raw;
+  if (negatives.length) sources.negativesDropped = raw.length - cleaned.length;
+  const merged = fuzzyMerge(dedupeMerge(cleaned));
   for (const o of merged) score(o, scoreSite);
   merged.sort((a, b) => b.score - a.score);
 
@@ -390,7 +415,7 @@ function feedHash(s) { let h = 5381; const str = String(s || ''); for (let i = 0
 export async function ingestFeeds(siteId, sources) {
   const site = await db.getSite(siteId).catch(() => null);
   if (!site) return { error: 'Site not found.', saved: 0 };
-  const scoreSite = { id: siteId, __nicheCtx: geoFor(siteId) || '' };
+  const scoreSite = { id: siteId, __nicheCtx: geoFor(siteId) || '', __negatives: (Array.isArray(site.negative_keywords) ? site.negative_keywords : []).map((n) => String(n || '').toLowerCase().trim()).filter(Boolean) };
   const active = (sources || []).filter((s) => s && s.active !== false);
   const perSource = [];
   const raw = [];
