@@ -499,6 +499,11 @@ function suggestTypeFor(site, title, url) {
     if (/what is|is .* (good|bad) for|benefits of|side effects|meaning|definition|explained|ingredient/.test(t)) return 'definition';
     return 'blog';
   }
+  // Law-firm / service sites (go-legal.co.uk, go-visa, settlement, fast-ila…): what a
+  // competitor publishes is a case study, an expertise/service page, a guide, or an article.
+  if (/case[\s-]?stud|our-cases|success[\s-]?stor|client[\s-]?stor|case[\s-]?result|recent[\s-]?cases|testimonial/.test(t)) return 'case_study';
+  if (/\/(expertise|services?|practice-areas?|areas?-of-(law|practice|expertise)|what-we-do|specialisms?|specialities|solutions|our-services|legal-services)(\/|$)/.test(t)) return 'expertise';
+  if (/how[\s-]?to|step[\s-]?by[\s-]?step|guide|checklist|explained|faq/.test(t)) return 'how-to-guide';
   return 'blog';
 }
 

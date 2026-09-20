@@ -53,7 +53,7 @@ const SNAV_BY_KEY = Object.fromEntries(SNAV.map(it=>[it.k, it]));
 // does Blog/Recipe/Definition; go-legal.ai adds Definition; every other site is
 // Blog-only (picker hidden). The value ("recipe"/"definition"/"blog") is normalised
 // to the exact Category on the backend (airtable.normalizeCategory).
-function contentTypesFor(site){ const n=((((site&&site.name)||"")+" "+((site&&site.url)||"")).toLowerCase()); if(/good\s?for/.test(n)) return [["blog","Blog"],["recipe","Recipe"],["definition","Definition"]]; if(/go-?legal\.ai/.test(n)) return [["blog","Blog"],["smart_template","Smart template"],["legal_definition","Legal definition"],["how-to-guide","How-to guide"],["legal_pathway","Legal pathway"]]; return [["blog","Blog"]]; }
+function contentTypesFor(site){ const n=((((site&&site.name)||"")+" "+((site&&site.url)||"")).toLowerCase()); if(/good\s?for/.test(n)) return [["blog","Blog"],["recipe","Recipe"],["definition","Definition"]]; if(/go-?legal\.ai/.test(n)) return [["blog","Blog"],["smart_template","Smart template"],["legal_definition","Legal definition"],["how-to-guide","How-to guide"],["legal_pathway","Legal pathway"]]; /* law-firm / service sites (go-legal.co.uk, go-visa, settlement, fast-ila…): what competitors publish */ return [["blog","Article"],["case_study","Case study"],["expertise","Expertise page"],["how-to-guide","Guide"]]; }
 // A decay URL is only "rewritable" if it maps to editable post content — PDFs, media
 // uploads and feeds don't, so we don't offer "Audit & refresh" on them (it would just
 // dead-end at "couldn't match this URL to a post").

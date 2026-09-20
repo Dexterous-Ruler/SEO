@@ -366,6 +366,9 @@ export function normalizeCategory(type) {
   if (/smart[\s_-]?template/.test(t)) return 'Smart Template';
   if (/legal[\s_-]?pathway|pathway/.test(t)) return 'Legal Pathway';
   if (/legal[\s_-]?definition/.test(t)) return 'Legal Definition';
+  // Law-firm / service sites: competitors publish case studies + expertise/service pages too.
+  if (/case[\s_-]?stud/.test(t)) return 'Case Study';
+  if (/expertise|practice[\s_-]?area|service[\s_-]?page/.test(t)) return 'Expertise Page';
   if (/definition|ingredient|glossary|term/.test(t)) return 'Ingredient Definitions';
   if (/how[\s_-]?to/.test(t)) return 'How To Guide';
   return 'Blog';
