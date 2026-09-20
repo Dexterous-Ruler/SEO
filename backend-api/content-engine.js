@@ -475,30 +475,60 @@ function slugTitle(u) {
       .replace(/(^|\s)\S/g, (c) => c.toUpperCase());
   } catch { return ''; }
 }
-const CSM_NONCONTENT = /\/(wp-content|wp-admin|wp-json|wp-includes|cart|checkout|my-account|account|login|tag|category|author|feed|comments|attachment|page\/\d)/i;
+// Skip a competitor's non-article pages (site chrome, legal boilerplate, listings,
+// auth/commerce, media) so the list is what they PUBLISH, not their nav.
+const CSM_NONCONTENT = /\/(wp-content|wp-admin|wp-json|wp-includes|cart|checkout|my-account|account|login|log-in|signin|sign-in|signup|sign-up|register|tag|tags|category|categories|author|feed|comments|attachment|page\/\d+|search|sitemap|about|about-us|contact|contact-us|pricing|plans|privacy|privacy-policy|terms|terms-of-service|terms-and-conditions|cookie|cookies|cookie-policy|careers|jobs|team|our-team|faq|faqs|support|help|demo|book-a-demo|press|partners|affiliates|thank-you|thanks|unsubscribe|legal-notice|disclaimer|refund|shipping|testimonials|reviews|features|integrations|changelog|status)(\/|$|\?|#)/i;
+// A competitor's homepage / bare section index is not an article either.
+function isIndexUrl(u) { try { const p = new URL(u).pathname.replace(/\/+$/, ''); return p.split('/').filter(Boolean).length === 0; } catch { return true; } }
 
+// Auto-categorise a competitor topic for THIS site's content types (the same values
+// the dashboard's "Create as" picker uses → airtable.normalizeCategory). Heuristic on
+// the slug/title — good enough as a default the user can change before pushing.
+function suggestTypeFor(site, title, url) {
+  const t = (String(title || '') + ' ' + String(url || '')).toLowerCase();
+  const n = ((site && site.name) || '') + ' ' + ((site && site.url) || '');
+  if (/go-?legal\.ai/i.test(n)) {
+    if (/how[\s-]?to|step[\s-]?by[\s-]?step|guide|tutorial|checklist for/.test(t)) return 'how-to-guide';
+    if (/template|agreement|contract|\bform\b|\bletter\b|notice|policy|\bdeed\b|clause|nda|terms of|checklist|generator|\bwill\b|invoice/.test(t)) return 'smart_template';
+    if (/what is|what are|meaning|definition|glossary|explained|difference between|\bvs\b|versus|defined/.test(t)) return 'legal_definition';
+    if (/pathway|process|procedure|steps to|how does .* work|claim|dispute|litigation|tribunal|court|appeal|complaint/.test(t)) return 'legal_pathway';
+    return 'blog';
+  }
+  if (/good\s?for/i.test(n)) {
+    if (/recipe|how to make|how to cook|ingredients for|homemade|\bbake\b|baked|roast|smoothie|salad|soup|curry|pasta|breakfast|dinner|dessert/.test(t)) return 'recipe';
+    if (/what is|is .* (good|bad) for|benefits of|side effects|meaning|definition|explained|ingredient/.test(t)) return 'definition';
+    return 'blog';
+  }
+  return 'blog';
+}
+
+// `inputs` = saved competitor sources [{ id, url, label }] (or plain URL strings).
+// Returns per-source stats keyed back by id so the caller can record lastScan/lastFound.
 export async function ingestCompetitorSitemap(siteId, inputs) {
   const site = await db.getSite(siteId).catch(() => null);
   if (!site) return { error: 'Site not found.', saved: 0 };
-  // Explicit URLs win; otherwise fall back to the competitors already saved for this site.
   let list = (Array.isArray(inputs) && inputs.length) ? inputs : (Array.isArray(site.competitors) ? site.competitors : []);
-  list = [...new Set(list.map((x) => String(x || '').trim()).filter(Boolean))].slice(0, 4);
+  list = list.map((x) => (typeof x === 'string' ? { url: x } : (x && x.url ? x : null))).filter((x) => x && String(x.url || '').trim());
+  // Dedupe by host, cap the batch so one click never fans out beyond the request budget.
+  const seenHost = new Set();
+  list = list.filter((x) => { let h = String(x.url).trim(); try { h = new URL(h.startsWith('http') ? h : 'https://' + h).hostname.replace(/^www\./, ''); } catch {} if (seenHost.has(h)) return false; seenHost.add(h); x.__host = h; return true; }).slice(0, 6);
   if (!list.length) return { error: 'No competitor website/sitemap URL provided (and none saved for this site).', saved: 0, needsInput: true };
   const scoreSite = { id: siteId, __nicheCtx: geoFor(siteId) || '', __negatives: (Array.isArray(site.negative_keywords) ? site.negative_keywords : []).map((n) => String(n || '').toLowerCase().trim()).filter(Boolean) };
   const raw = [];
   // Fetch every competitor's sitemap CONCURRENTLY (each is internally bounded) so the
   // whole run stays inside the gateway request budget.
-  const fetched = await Promise.all(list.map((input) => feeds.fetchSitemap(input, { maxUrls: 250, maxChildren: 10 }).catch((e) => ({ error: String((e && e.message) || e), urls: [] }))));
+  const fetched = await Promise.all(list.map((src) => feeds.fetchSitemap(src.url, { maxUrls: 300, maxChildren: 10 }).catch((e) => ({ error: String((e && e.message) || e), urls: [] }))));
   const perSource = [];
   for (let i = 0; i < list.length; i++) {
-    const input = list[i]; const sm = fetched[i] || { urls: [] };
-    let comp = input; try { comp = new URL(input.startsWith('http') ? input : 'https://' + input).hostname.replace(/^www\./, ''); } catch {}
-    if (sm.error) { perSource.push({ input, competitor: comp, error: sm.error, urls: 0, made: 0 }); continue; }
-    const urls = (sm.urls || []).filter((u) => !CSM_NONCONTENT.test(u));
+    const src = list[i]; const sm = fetched[i] || { urls: [] };
+    const comp = src.__host || src.url;
+    if (sm.error) { perSource.push({ id: src.id, input: src.url, competitor: comp, error: sm.error, urls: 0, made: 0 }); continue; }
+    const urls = (sm.urls || []).filter((u) => !CSM_NONCONTENT.test(u) && !isIndexUrl(u));
     let made = 0;
     for (const u of urls) {
       const title = slugTitle(u);
-      if (!title || title.length < 6) continue;
+      if (!title || title.length < 8 || title.split(' ').length < 2) continue;   // "About", "Blog" etc. are not topics
+      const suggestedType = suggestTypeFor(site, title, u);
       const o = makeOpp(siteId, {
         source: 'competitor_sitemap',
         sourceRef: comp,
@@ -507,14 +537,14 @@ export async function ingestCompetitorSitemap(siteId, inputs) {
         intent: 'informational',
         actionType: 'article',
         evidence: [{ source: 'competitor_sitemap', detail: `A competitor covers this: ${comp}` }],
-        payload: { link: u, competitor: comp, fromCompetitor: true, sourceType: 'competitor_sitemap' },
+        payload: { link: u, competitor: comp, competitorSourceId: src.id || null, fromCompetitor: true, sourceType: 'competitor_sitemap', suggestedType },
       });
       o.dedupeKey = 'csm:' + feedHash(String(u).replace(/[#?].*$/, '').toLowerCase());
       score(o, scoreSite);
       raw.push(o);
-      if (++made >= 180) break;
+      if (++made >= 200) break;
     }
-    perSource.push({ input, competitor: comp, sitemap: sm.sitemapUrl, urls: urls.length, made });
+    perSource.push({ id: src.id, input: src.url, competitor: comp, sitemap: sm.sitemapUrl, urls: urls.length, made });
   }
   const merged = dedupeMerge(raw);
   const res = await persist(siteId, merged);
@@ -576,12 +606,13 @@ export async function persist(siteId, opps) {
 
 // ---- 6) worklist -----------------------------------------------------------
 // SELECT ordered by score desc, optionally filtered by status/actionType. Graceful.
-export async function worklist(siteId, { status, actionType, source, limit = 50 } = {}) {
+export async function worklist(siteId, { status, actionType, source, excludeSource, limit = 50 } = {}) {
   if (!SB || !SRV) return { ...NOT_PROVISIONED, error: 'Supabase not configured.', items: [] };
   const parts = [`site_id=eq.${encodeURIComponent(siteId)}`, 'select=*', 'order=score.desc', `limit=${Math.min(Math.max(Number(limit) || 50, 1), 500)}`];
   if (status) parts.push(`status=eq.${encodeURIComponent(status)}`);
   if (actionType) parts.push(`action_type=eq.${encodeURIComponent(actionType)}`);
   if (source) parts.push(`source=eq.${encodeURIComponent(source)}`);
+  if (excludeSource) parts.push(`source=neq.${encodeURIComponent(excludeSource)}`);   // e.g. keep competitor items on their own screen
   try {
     const res = await fetch(`${SB}/rest/v1/content_opportunities?${parts.join('&')}`, { headers: headers() });
     const text = await res.text();
@@ -839,7 +870,7 @@ async function draftAnswerBlocks(siteId, n) {
   return { drafted: inReview, inReview, failed, candidates: items.length, kind: 'answer_block' };
 }
 
-export async function autoDraft(siteId, { topN = 5, actionType, ids } = {}) {
+export async function autoDraft(siteId, { topN = 5, actionType, ids, category } = {}) {
   if (!siteId) return { error: 'No site selected.' };
   const n = Math.min(Math.max(Number(topN) || 5, 1), 50);
   const idList = Array.isArray(ids) ? ids.filter(Boolean) : (ids ? [ids] : []);
@@ -902,7 +933,9 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids } = {}) {
   for (const it of items) {
     const cluster = oppToCluster(it);
     const brief = (it.payload && it.payload.brief && typeof it.payload.brief === 'object') ? it.payload.brief : {};
-    const row = airtable.mapArticleBrief(cluster, brief, briefField, names, airtable.normalizeCategory((it.payload && it.payload.category) || (cluster && cluster.category)), market);
+    // `category` (per-push override, e.g. the type picked on the Competitors screen) wins over
+    // anything stored on the opportunity; else the auto-suggested type; else Blog.
+    const row = airtable.mapArticleBrief(cluster, brief, briefField, names, airtable.normalizeCategory(category || (it.payload && (it.payload.category || it.payload.suggestedType)) || (cluster && cluster.category)), market);
     if (row && row.Keyword) rowById.set(it.id, { row, keyword: String(row.Keyword).trim().toLowerCase() });
   }
   if (!rowById.size) return { drafted: 0, skipped: true, reason: 'nothing mappable to draft', candidates: items.length };

@@ -24,6 +24,7 @@ const SNAV_GROUPS = [
   { group:"Plan & Create Content", items:[
     { k:"plan",     label:"Content Plan", icon:"sparkles" },
     { k:"engine",   label:"Content Engine", icon:"layers" },
+    { k:"competitors", label:"Competitors", icon:"flag" },
     { k:"radar",    label:"Content Radar", icon:"radar" },
     { k:"content",  label:"Content Analysis", icon:"sparkles" },
     { k:"gsc",      label:"Content Decay", icon:"trend", tab:"decay" },
@@ -88,6 +89,7 @@ const NAV_INDEX = [
   { title:"Audit History", screen:"history", icon:"trend", kw:"audit history past audits score trend regression timeline" },
   { title:"Content Plan", screen:"plan", icon:"sparkles", kw:"content plan trending topics find opportunities keyword clusters gaps calendar ideas" },
   { title:"Content Engine", screen:"engine", icon:"layers", kw:"content engine unified worklist deduped scored opportunities keywords trending people also ask paa ai visibility geo one queue run ingest sources" },
+  { title:"Competitors", screen:"competitors", icon:"flag", kw:"competitors competitor sitemap scan scrape what they publish out-rank outrank replicate copy topics rival website upload sitemap push writer done" },
   { title:"Content Radar", screen:"radar", icon:"radar", kw:"content radar google alerts rss feed news outlet monitor trends fresh articles google news query draft brief article writer real news watch sources" },
   { title:"n8n Workflows", screen:"n8n", icon:"cog", kw:"n8n workflow automation edit prompts system prompt run execute trigger webhook node error execution writer article agent openai debug" },
   { title:"Content Intel", screen:"content", icon:"sparkles", kw:"content intelligence analyze content topic clusters suggestions" },
@@ -1943,6 +1945,191 @@ function N8nScreen({ ctx }){
   );
 }
 
+/* ---------------- Competitors ----------------
+   Karim's spec (plain English): save competitor websites/sitemaps so I can come back to
+   them; scan what they publish; see each topic with where it came from; pick the content
+   type; push it → it's marked done; everything stays here so I can track done vs not. */
+function CompetitorsScreen({ ctx }) {
+  const s = ctx.site;
+  const API = window.SentinelAPI;
+  const live = API && window.SENTINEL_LIVE;
+  const [sources,setSources] = useState([]);
+  const [items,setItems] = useState([]);
+  const [counts,setCounts] = useState({});
+  const [url,setUrl] = useState("");
+  const [adding,setAdding] = useState(false);
+  const [scanning,setScanning] = useState("");     // source id being scanned, or "all"
+  const [loading,setLoading] = useState(false);
+  const [notProv,setNotProv] = useState(false);
+  const [filter,setFilter] = useState("new");      // new | pushed | hidden | all
+  const [compFilter,setCompFilter] = useState("");
+  const [types,setTypes] = useState({});            // item id → content type chosen before push
+  const [busyId,setBusyId] = useState("");
+  const TYPES = contentTypesFor(s);
+  const typeLabel = (v)=>{ const t=TYPES.find(x=>x[0]===v); return t?t[1]:v; };
+  const isPushed = (st)=>["queued","in_review","published","done"].includes(st);
+
+  const loadSources = ()=>{ if(!live) return; API.competitorSources(s.id).then(r=>setSources((r&&r.sources)||[])).catch(()=>{}); };
+  const loadItems = ()=>{
+    if(!live) return;
+    setLoading(true);
+    API.competitorSitemapItems(s.id).then(r=>{
+      if(r && r.notProvisioned){ setNotProv(true); setItems([]); return; }
+      setNotProv(false); setItems((r&&r.items)||[]); setCounts((r&&r.counts)||{});
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setLoading(false));
+  };
+  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setFilter("new"); if(live){ loadSources(); loadItems(); } },[s.id]);
+
+  const add = ()=>{
+    const u=url.trim();
+    if(!u){ ctx.toast("Paste a competitor's website or sitemap link first","gold"); return; }
+    setAdding(true);
+    API.competitorSourceSave(s.id,u).then(r=>{
+      if(r && r.error){ ctx.toast(r.error,"clay"); return; }
+      setSources((r&&r.sources)||[]); setUrl("");
+      ctx.toast(r&&r.note?r.note:"Competitor saved — click Scan to see what they publish","teal");
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setAdding(false));
+  };
+  const remove = (src)=>{
+    API.competitorSourceRemove(s.id,src.id).then(r=>{ setSources((r&&r.sources)||[]); ctx.toast("Removed "+src.host,"teal"); }).catch(e=>ctx.toast(e.message,"clay"));
+  };
+  const scan = (src)=>{
+    if(scanning) return;
+    setScanning(src?src.id:"all");
+    ctx.toast(src?("Scanning "+src.host+"…"):"Scanning all competitors…","teal");
+    API.competitorSitemapPoll(s.id, src?{id:src.id}:{}).then(r=>{
+      if(r && r.notProvisioned){ setNotProv(true); return; }
+      if(r && r.error && !r.saved){ ctx.toast("Scan: "+r.error,"clay"); }
+      else {
+        const found=(r&&r.fetched)||0, added=(r&&r.saved)||0;
+        const errs=((r&&r.perSource)||[]).filter(p=>p.error);
+        ctx.toast(found?("Found "+found+" topics — "+added+" new added"+(errs.length?(" · "+errs.length+" site(s) couldn't be read"):"")):"No topics found — that site may not have a public sitemap", found?"teal":"gold");
+      }
+      if(r && r.sources) setSources(r.sources);
+      loadItems();
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setScanning(""));
+  };
+  // Push ONE topic to the Article Writer as the chosen type → the row is created in Airtable
+  // and the topic flips to "Pushed ✓" here (its status becomes queued), i.e. marked done.
+  const push = (it)=>{
+    if(busyId) return;
+    const type = types[it.id] || it.suggestedType || (TYPES[0]&&TYPES[0][0]) || "blog";
+    setBusyId(it.id);
+    API.engineAutodraft(s.id,{ ids:[it.id], category:type }).then(r=>{
+      if(r && r.notProvisioned){ setNotProv(true); return; }
+      if(r && r.skipped){ ctx.toast(r.reason||"Couldn't push — connect the Airtable Article Writer first","gold"); loadItems(); return; }
+      if(r && r.error){ ctx.toast("Push: "+r.error,"clay"); return; }
+      const n=(r&&r.drafted!=null)?r.drafted:0;
+      ctx.toast(n>0?("Pushed to the writer as "+typeLabel(type)+" ✓ — marked done"):(r&&r.skippedDup?"Already in the Article Writer — marked done":"Nothing pushed"), n>0?"teal":"gold");
+      loadItems();
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
+  };
+  const hide = (it)=>{ setBusyId(it.id); API.engineDismiss(it.id).then(()=>loadItems()).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId("")); };
+  const unhide = (it)=>{ setBusyId(it.id); API.engineSetStatus(it.id,"scored").then(()=>loadItems()).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId("")); };
+
+  const visible = items
+    .filter(it=> filter==="all" || (filter==="new"&&it.status==="scored") || (filter==="pushed"&&isPushed(it.status)) || (filter==="hidden"&&it.status==="dismissed"))
+    .filter(it=> !compFilter || it.competitor===compFilter);
+  const comps = [...new Set(items.map(i=>i.competitor).filter(Boolean))].sort();
+  const fmtDate = (d)=>{ if(!d) return "never"; try{ return new Date(d).toLocaleDateString(undefined,{ day:"numeric", month:"short" }); }catch(e){ return ""; } };
+  const inp = { padding:"10px 13px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none" };
+  const sel = { padding:"7px 10px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5, color:"var(--ink)", outline:"none" };
+  const FilterBtn = ({k,label,n})=>(
+    <button onClick={()=>setFilter(k)} className="neo-btn" style={{ padding:"6px 12px", borderRadius:"var(--r-pill)", border:"none", cursor:"pointer", fontSize:12, fontWeight:700, background:filter===k?"var(--t-100)":"var(--bg)", boxShadow:"var(--neo-in)", color:filter===k?"var(--t-700)":"var(--muted)" }}>
+      {label}{n!=null?" · "+n:""}
+    </button>
+  );
+
+  return (
+    <div className="rise">
+      <PageHead title="Competitors" sub="Save your competitors, scan what they publish, and pick the pieces to write for your own site. Everything stays here so you can see what you've already pushed.">
+        <NeoButton kind="primary" icon={scanning?undefined:"radar"} disabled={!live||!!scanning||!sources.length} onClick={()=>scan(null)} title={!sources.length?"Add a competitor first":"Scan every saved competitor for new topics"}>
+          {scanning==="all"&&<Icon name="cog" size={16} className="audit-spin" />}{scanning==="all"?"Scanning…":"Scan all competitors"}
+        </NeoButton>
+      </PageHead>
+
+      {!live && <SoftCard hover={false}><div style={{ padding:"12px 4px", color:"var(--muted)", fontSize:13.5 }}>Connect a live WordPress site to use Competitors.</div></SoftCard>}
+
+      {live && notProv && (
+        <div style={{ display:"flex", alignItems:"flex-start", gap:10, padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--gold-bg)", boxShadow:"var(--neo-in)", borderLeft:"3px solid var(--gold)" }}>
+          <Icon name="alert" size={16} style={{ color:"var(--gold)", flexShrink:0, marginTop:1 }} />
+          <div style={{ fontSize:12.5, color:"var(--ink)", lineHeight:1.5 }}>Run <b>supabase/content-engine.sql</b> in Supabase to enable this screen.</div>
+        </div>
+      )}
+
+      {live && (
+        <SoftCard hover={false}>
+          <div style={{ fontSize:14, fontWeight:800, color:"var(--ink)", marginBottom:2 }}>Your competitors</div>
+          <div style={{ fontSize:12.5, color:"var(--muted)", marginBottom:12, lineHeight:1.45 }}>Paste a competitor's website (or their sitemap link). We save it here and read every topic they publish when you scan.</div>
+          <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap", marginBottom:12 }}>
+            <input value={url} onChange={e=>setUrl(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder="e.g. competitor.com or https://competitor.com/sitemap.xml" disabled={adding} style={{ ...inp, flex:"1 1 320px" }} />
+            <NeoButton kind="soft" icon={adding?undefined:"plus"} disabled={adding} onClick={add}>{adding?"Saving…":"Add competitor"}</NeoButton>
+          </div>
+          {!sources.length && <div style={{ fontSize:13, color:"var(--muted)", padding:"6px 2px" }}>No competitors saved yet — add one above.</div>}
+          {sources.map(src=>(
+            <div key={src.id} style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", padding:"9px 4px", borderTop:"1px solid var(--line)" }}>
+              <div style={{ flex:"1 1 260px", minWidth:0 }}>
+                <div style={{ fontSize:13.5, fontWeight:700, color:"var(--ink)" }}>{src.label||src.host}</div>
+                <div style={{ fontSize:12, color:"var(--muted)" }}>
+                  Last scanned {fmtDate(src.lastScanAt)}{src.lastScanAt?(" · "+(src.lastFound||0)+" topics found"):""}{src.lastError?(" · couldn't read it ("+src.lastError+")"):""}
+                </div>
+              </div>
+              <NeoButton kind="soft" size="sm" disabled={!!scanning} onClick={()=>scan(src)}>{scanning===src.id?"Scanning…":"Scan"}</NeoButton>
+              <NeoButton kind="ghost" size="sm" disabled={!!scanning} onClick={()=>remove(src)} title="Remove this competitor from your list">Remove</NeoButton>
+            </div>
+          ))}
+        </SoftCard>
+      )}
+
+      {live && !notProv && (
+        <SoftCard hover={false}>
+          <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:10 }}>
+            <div style={{ fontSize:14, fontWeight:800, color:"var(--ink)", marginRight:6 }}>What they publish</div>
+            <FilterBtn k="new" label="New" n={counts.new} />
+            <FilterBtn k="pushed" label="Pushed" n={counts.pushed} />
+            <FilterBtn k="hidden" label="Hidden" n={counts.hidden} />
+            <FilterBtn k="all" label="All" n={counts.total} />
+            {comps.length>1 && (
+              <select value={compFilter} onChange={e=>setCompFilter(e.target.value)} style={{ ...sel, marginLeft:"auto" }} title="Show topics from one competitor only">
+                <option value="">All competitors</option>
+                {comps.map(c=><option key={c} value={c}>{c}</option>)}
+              </select>
+            )}
+          </div>
+          <div style={{ fontSize:12, color:"var(--muted)", marginBottom:8 }}>Each topic shows which competitor it came from. Pick a content type, then <b>Push to writer</b> — it moves to <b>Pushed</b> so you know it's done.</div>
+          {loading && <div style={{ fontSize:13, color:"var(--muted)", padding:"8px 2px" }}>Loading…</div>}
+          {!loading && !visible.length && (
+            <div style={{ fontSize:13, color:"var(--muted)", padding:"8px 2px" }}>{items.length?"Nothing here for this filter.":"Nothing scanned yet — click Scan on a competitor above."}</div>
+          )}
+          {visible.map(it=>(
+            <div key={it.id} style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", padding:"10px 4px", borderTop:"1px solid var(--line)" }}>
+              <div style={{ flex:"1 1 340px", minWidth:0 }}>
+                <div style={{ fontSize:13.5, fontWeight:700, color:"var(--ink)", lineHeight:1.35 }}>{it.title}</div>
+                <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>
+                  from <b>{it.competitor||"competitor"}</b>
+                  {it.link && <a href={it.link} target="_blank" rel="noopener noreferrer" style={{ marginLeft:8, color:"var(--t-700)", fontWeight:600 }}>view their page ↗</a>}
+                </div>
+              </div>
+              {it.status==="scored" && TYPES.length>1 && (
+                <label style={{ display:"inline-flex", alignItems:"center", gap:6, fontSize:12, color:"var(--muted)" }}>Create as
+                  <select value={types[it.id]||it.suggestedType||TYPES[0][0]} onChange={e=>setTypes(p=>Object.assign({},p,{[it.id]:e.target.value}))} style={sel}>
+                    {TYPES.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+                  </select>
+                </label>
+              )}
+              {isPushed(it.status) && <span style={{ fontSize:12, fontWeight:700, color:"var(--t-700)", background:"var(--t-50)", padding:"5px 10px", borderRadius:"var(--r-pill)" }}>Pushed ✓</span>}
+              {it.status==="dismissed" && <span style={{ fontSize:12, fontWeight:700, color:"var(--muted)", background:"var(--bg)", padding:"5px 10px", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-in)" }}>Hidden</span>}
+              {it.status==="scored" && <NeoButton kind="primary" size="sm" disabled={busyId===it.id} onClick={()=>push(it)} title="Create this in your Article Writer and mark it done here">{busyId===it.id?"Pushing…":"Push to writer"}</NeoButton>}
+              {it.status==="scored" && <NeoButton kind="ghost" size="sm" disabled={busyId===it.id} onClick={()=>hide(it)} title="Not interested — hide it">Hide</NeoButton>}
+              {it.status==="dismissed" && <NeoButton kind="ghost" size="sm" disabled={busyId===it.id} onClick={()=>unhide(it)}>Unhide</NeoButton>}
+            </div>
+          ))}
+        </SoftCard>
+      )}
+    </div>
+  );
+}
+
 function ContentEngineScreen({ ctx }) {
   const s = ctx.site;
   const API = window.SentinelAPI;
@@ -1956,8 +2143,6 @@ function ContentEngineScreen({ ctx }) {
   const [draftingAns,setDraftingAns] = useState(false);   // draft top-5 answer blocks in place
   const [syncing,setSyncing] = useState(false);   // sync published → monitor in flight
   const [openDraft,setOpenDraft] = useState("");   // in_review row id whose answer-block draft is expanded
-  const [csmUrl,setCsmUrl] = useState("");          // competitor website/sitemap URL to mine for topics
-  const [csmBusy,setCsmBusy] = useState(false);
 
   const load = ()=>{
     if(!live) return;
@@ -2067,24 +2252,6 @@ function ContentEngineScreen({ ctx }) {
       setItems(prev=>prev.map(x=>x.id===item.id?Object.assign({},x,next):x));
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
   };
-  // Competitor sitemap → "out-rank them": scrape a competitor's sitemap, add the
-  // topics that fit this site's niche/jurisdiction into the worklist below.
-  const runCompetitorSitemap = ()=>{
-    if(!live||csmBusy) return;
-    const url=csmUrl.trim();
-    if(!url){ ctx.toast("Paste a competitor's website or sitemap URL first","gold"); return; }
-    setCsmBusy(true);
-    ctx.toast("Scanning "+url.replace(/^https?:\/\//,"").slice(0,40)+" for topics to out-rank…","teal");
-    API.competitorSitemapPoll(s.id, url).then(r=>{
-      if(r && r.notProvisioned){ setNotProv(true); return; }
-      if(r && r.error && !r.saved){ ctx.toast("Sitemap: "+r.error,"clay"); return; }
-      const n=(r&&r.saved)||0, found=(r&&r.fetched)||0;
-      ctx.toast(n>0?("Found "+found+" competitor topics — added "+n+" new to the worklist ✓"):"No new competitor topics found (already listed, or none matched your niche/jurisdiction)", n>0?"teal":"gold");
-      setCsmUrl("");
-      load();
-    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setCsmBusy(false));
-  };
-
   // action_type → distinct tone; intent → tone (mirrors OpportunitiesScreen).
   const actionTone = { article:"teal", answer_block:"plum", geo:"gold" };
   const actionLabel = { article:"Article", answer_block:"Answer block", geo:"GEO" };
@@ -2136,19 +2303,9 @@ function ContentEngineScreen({ ctx }) {
       )}
 
       {live && !notProv && (
-        <SoftCard hover={false}>
-          <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap", padding:"2px 2px" }}>
-            <div style={{ minWidth:220, flex:"1 1 300px" }}>
-              <div style={{ fontSize:13, fontWeight:800, color:"var(--ink)", marginBottom:2 }}>Out-rank a competitor</div>
-              <div style={{ fontSize:12, color:"var(--muted)", lineHeight:1.45 }}>Paste a competitor's website (or their sitemap URL). We read every topic they cover and add the ones that fit this site's niche &amp; jurisdiction to the worklist below — then pick a content type and push the ones you want to beat.</div>
-            </div>
-            <input value={csmUrl} onChange={e=>setCsmUrl(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") runCompetitorSitemap(); }} placeholder="e.g. competitor.com" disabled={csmBusy}
-              style={{ flex:"1 1 240px", padding:"10px 13px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none" }} />
-            <NeoButton kind="primary" icon={csmBusy?undefined:"search"} disabled={csmBusy||!live} onClick={runCompetitorSitemap}>
-              {csmBusy&&<Icon name="cog" size={16} className="audit-spin" />}{csmBusy?"Scanning…":"Find articles to out-rank"}
-            </NeoButton>
-          </div>
-        </SoftCard>
+        <div style={{ fontSize:12.5, color:"var(--muted)", margin:"-2px 4px 2px" }}>
+          Looking for competitor topics? They now live on the <a href="#" onClick={e=>{ e.preventDefault(); ctx.goto("competitors"); }} style={{ color:"var(--t-700)", fontWeight:700 }}>Competitors</a> screen — save competitors, scan what they publish, and push the pieces you want to write.
+        </div>
       )}
 
       {!live && <SoftCard hover={false}><div style={{ padding:"12px 4px", color:"var(--muted)", fontSize:13.5 }}>Connect a live WordPress site to run the Content Engine.</div></SoftCard>}
@@ -6968,7 +7125,7 @@ function App() {
     },
   };
 
-  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, engine:ContentEngineScreen, radar:RadarScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen, experience:ExperienceScreen, uxactivation:UxActivationScreen, n8n:N8nScreen };
+  const SCREENS = { playbook:PlaybookScreen, overview:Dashboard, exec:ExecScreen, sites:SitesScreen, audits:AuditsScreen, history:HistoryScreen, plan:OpportunitiesScreen, engine:ContentEngineScreen, competitors:CompetitorsScreen, radar:RadarScreen, content:ContentScreen, optimize:OptimizeScreen, chat:ChatScreen, geo:GeoScreen, gsc:GscScreen, semrush:SemrushScreen, airtable:AirtableScreen, review:ReviewScreen, activity:ActivityScreen, admin:AdminScreen, settings:SettingsScreen, experience:ExperienceScreen, uxactivation:UxActivationScreen, n8n:N8nScreen };
   const Screen = SCREENS[screen] || Dashboard;
 
   let content = <Screen ctx={ctx} run />;

@@ -345,7 +345,7 @@ function authOk(req) {
 // The dashboard's kill switch was per-tab React state — another tab (or the API)
 // happily kept writing. Now it's persisted (app_secrets) and enforced HERE, at the
 // dispatcher, for every route that can mutate WordPress/Airtable/n8n. 10s cache.
-const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|engine-clean-negatives|competitor-sitemap-poll|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
+const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|engine-clean-negatives|competitor-sitemap-poll|competitor-source-save|competitor-source-remove|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
 let _kill = { v: false, exp: 0 };
 async function killSwitchOn() {
   if (Date.now() < _kill.exp) return _kill.v;
@@ -539,6 +539,31 @@ async function radarSourcesFor(siteId) {
   if (!raw) return [];
   try { const a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch { return []; }
 }
+
+// Competitors screen: per-site list of saved competitor websites/sitemaps, same KV
+// pattern. Seeded ONCE from the competitors already saved on the site (sites.competitors)
+// so the screen isn't empty on first open. Each: { id, url, host, label, addedAt,
+// lastScanAt, lastFound, lastError }.
+const hostOf = (u) => { let s = String(u || '').trim(); try { return new URL(s.startsWith('http') ? s : 'https://' + s).hostname.replace(/^www\./, '').toLowerCase(); } catch { return s.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '').toLowerCase(); } };
+function competitorSourceFrom(url, extra) {
+  const host = hostOf(url);
+  return Object.assign({ id: 'cmp_' + Math.random().toString(36).slice(2, 11), url: String(url).trim(), host, label: host, addedAt: new Date().toISOString(), lastScanAt: null, lastFound: 0, lastError: null }, extra || {});
+}
+async function competitorSourcesFor(siteId) {
+  const raw = await db.getAppSecret('competitor_sources:' + siteId).catch(() => null);
+  if (raw) { try { const a = JSON.parse(raw); if (Array.isArray(a)) return a; } catch {} }
+  // First open: seed from the site's saved competitors so it's never blank.
+  const site = await db.getSite(siteId).catch(() => null);
+  const seed = [];
+  const seen = new Set();
+  for (const c of (site && Array.isArray(site.competitors) ? site.competitors : [])) {
+    const h = hostOf(c); if (!h || seen.has(h)) continue; seen.add(h);
+    seed.push(competitorSourceFrom(c));
+  }
+  if (seed.length) await db.setAppSecret('competitor_sources:' + siteId, JSON.stringify(seed)).catch(() => {});
+  return seed;
+}
+async function saveCompetitorSources(siteId, list) { await db.setAppSecret('competitor_sources:' + siteId, JSON.stringify(list)); return list; }
 
 // --- route handlers --------------------------------------------------------
 const routes = {
@@ -4564,7 +4589,9 @@ const routes = {
   // straight through so the UI can prompt the operator to run the migration.
   'POST /engine-worklist': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    return engine.worklist(body.siteId, { status: body.status, actionType: body.actionType, limit: body.limit });
+    // Competitor-sitemap items live on their own Competitors screen — keep them out of the
+    // general worklist so hundreds of low-scored competitor topics don't bury everything.
+    return engine.worklist(body.siteId, { status: body.status, actionType: body.actionType, limit: body.limit, source: body.source, excludeSource: body.source ? undefined : 'competitor_sitemap' });
   },
 
   // Set the status of one opportunity (e.g. queued / in_progress / published).
@@ -4589,7 +4616,7 @@ const routes = {
   // → { drafted, queued, skippedDup, candidates, table } | { skipped, reason } | { notProvisioned }.
   'POST /engine-autodraft': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    return engine.autoDraft(body.siteId, { topN: body.topN, actionType: body.actionType, ids: body.ids });
+    return engine.autoDraft(body.siteId, { topN: body.topN, actionType: body.actionType, ids: body.ids, category: body.category });
   },
 
   // Close the loop opposite autodraft: read the n8n-watched Article Writer table
@@ -4678,22 +4705,69 @@ const routes = {
   // worklist (source 'competitor_sitemap'), so you can target the same topics and
   // out-rank them. Bounded + concurrent (stays under the gateway timeout). `urls`
   // (array) / `url` (single) override the competitors already saved for the site.
+  // Saved competitors for this site (seeded from sites.competitors on first open).
+  'POST /competitor-sources': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    return { sources: await competitorSourcesFor(body.siteId) };
+  },
+  // Add a competitor website or sitemap URL (de-duped by host). Returns the full list.
+  'POST /competitor-source-save': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const url = String(body.url || '').trim();
+    const host = hostOf(url);
+    if (!url || !host || !/\./.test(host)) return { error: 'Paste a competitor website or sitemap link (e.g. competitor.com).' };
+    const list = await competitorSourcesFor(body.siteId);
+    const existing = list.find((x) => x.host === host);
+    if (existing) return { ok: true, sources: list, existing: existing.id, note: host + ' is already saved.' };
+    list.push(competitorSourceFrom(url, body.label ? { label: String(body.label).trim() } : null));
+    await saveCompetitorSources(body.siteId, list);
+    return { ok: true, sources: list };
+  },
+  'POST /competitor-source-remove': async (body) => {
+    if (!body.siteId || !body.id) return { error: 'siteId + id required' };
+    const list = (await competitorSourcesFor(body.siteId)).filter((x) => x.id !== body.id);
+    await saveCompetitorSources(body.siteId, list);
+    return { ok: true, sources: list };
+  },
+  // Scan ONE saved competitor (body.id) or ALL saved ones: walk the sitemap(s), turn every
+  // topic they publish into a persisted, attributed opportunity (source 'competitor_sitemap')
+  // with an auto-suggested content type. Records lastScanAt/lastFound per competitor so the
+  // list shows what's been scanned. Bounded + concurrent (stays under the gateway timeout).
+  // A one-off `url` (not saved) is also accepted for quick checks.
   'POST /competitor-sitemap-poll': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    const inputs = Array.isArray(body.urls) ? body.urls : (body.url ? [body.url] : null);
-    const r = await engine.ingestCompetitorSitemap(body.siteId, inputs);
-    return { ok: !r.error, ...r };
+    const list = await competitorSourcesFor(body.siteId);
+    let targets;
+    if (body.url) targets = [{ url: String(body.url).trim() }];
+    else if (body.id) { const one = list.find((x) => x.id === body.id); if (!one) return { error: 'That competitor is no longer saved.' }; targets = [one]; }
+    else targets = list;
+    if (!targets.length) return { ok: true, saved: 0, perSource: [], note: 'No competitors saved yet — add a competitor website above.' };
+    const r = await engine.ingestCompetitorSitemap(body.siteId, targets);
+    // Record scan stats back onto the saved sources.
+    if (!body.url && Array.isArray(r.perSource)) {
+      const now = new Date().toISOString();
+      for (const ps of r.perSource) {
+        const s = list.find((x) => x.id === ps.id); if (!s) continue;
+        s.lastScanAt = now; s.lastFound = ps.made || 0; s.lastError = ps.error || null; s.sitemap = ps.sitemap || s.sitemap || null;
+      }
+      await saveCompetitorSources(body.siteId, list).catch(() => {});
+    }
+    return { ok: !r.error, ...r, sources: list };
   },
-  // List this site's competitor-sitemap opportunities (source 'competitor_sitemap').
+  // Everything scanned from competitors (source 'competitor_sitemap'), EVERY status —
+  // so the user can see what's new vs already pushed vs hidden. Optional competitor filter.
   'POST /competitor-sitemap-items': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    const wl = await engine.worklist(body.siteId, { source: 'competitor_sitemap', limit: Math.min(body.limit || 120, 300) }).catch(() => ({ items: [] }));
+    const wl = await engine.worklist(body.siteId, { source: 'competitor_sitemap', limit: Math.min(body.limit || 400, 500) }).catch(() => ({ items: [] }));
     if (wl.notProvisioned) return { notProvisioned: true, items: [], note: wl.error };
+    const want = body.competitor ? String(body.competitor).toLowerCase() : '';
+    const order = { scored: 0, in_review: 1, queued: 2, published: 3, done: 3, dismissed: 4 };
     const items = (wl.items || [])
-      .filter((o) => !['dismissed', 'queued', 'published'].includes(o.status))
-      .map((o) => ({ id: o.id, title: o.title, score: o.score, status: o.status, competitor: (o.payload && o.payload.competitor) || '', link: o.payload && o.payload.link, primaryKeyword: o.primary_keyword }))
-      .sort((a, b) => (b.score - a.score));
-    return { items };
+      .map((o) => ({ id: o.id, title: o.title, score: o.score, status: o.status, competitor: (o.payload && o.payload.competitor) || '', link: o.payload && o.payload.link, suggestedType: (o.payload && (o.payload.category || o.payload.suggestedType)) || 'blog', primaryKeyword: o.primary_keyword, createdAt: o.created_at || null, updatedAt: o.updated_at || null }))
+      .filter((o) => !want || String(o.competitor).toLowerCase() === want)
+      .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || (b.score - a.score));
+    const counts = { total: items.length, new: items.filter((i) => i.status === 'scored').length, pushed: items.filter((i) => ['queued', 'in_review', 'published', 'done'].includes(i.status)).length, hidden: items.filter((i) => i.status === 'dismissed').length };
+    return { items, counts };
   },
 
   // One radar item → a writer-ready brief in the Article Writer (Status BLANK).
