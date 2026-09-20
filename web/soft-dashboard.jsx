@@ -2102,7 +2102,7 @@ function CompetitorsScreen({ ctx }) {
           <div key={c.id} style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", padding:"8px 0", borderTop:"1px solid var(--line)" }}>
             <div style={{ flex:"1 1 320px", minWidth:0 }}>
               <div style={{ fontSize:13, fontWeight:700, color:"var(--ink)", lineHeight:1.35 }}>{c.title}</div>
-              <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:2 }}>{(c.keywords||[]).slice(0,6).map(k=>k.keyword+(k.volume?(" ("+Number(k.volume).toLocaleString()+")"):"")).join(" · ")}{c.totalVolume?(" · ~"+Number(c.totalVolume).toLocaleString()+" searches/mo"):(c.volumesReal?"":" · volumes unverified")}</div>
+              <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:2 }}>{(c.keywords||[]).slice(0,6).map(k=>k.keyword+(k.volume?(" ("+Number(k.volume).toLocaleString()+"/mo)"):" (unverified)")).join(" · ")}{c.totalVolume?(" · ~"+Number(c.totalVolume).toLocaleString()+" searches/mo"):""}</div>
               {c.angle && <div style={{ fontSize:11.5, color:"var(--ink-2)", marginTop:2, fontStyle:"italic" }}>{c.angle}</div>}
             </div>
             {c.status==="scored" && TYPES.length>1 && (

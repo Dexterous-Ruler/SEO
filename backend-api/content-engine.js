@@ -661,17 +661,29 @@ export async function expandCompetitorTopic(siteId, oppId, { count = 4 } = {}) {
   const negatives = (Array.isArray(site.negative_keywords) ? site.negative_keywords : []).map((n) => String(n || '').toLowerCase().trim()).filter(Boolean);
   const scoreSite = { id: siteId, __nicheCtx: nicheCtx, __negatives: negatives };
 
-  // 1) Real keyword pool (volumes) — both DataForSEO expansions, each best-effort.
+  // 1) Real keyword pool (volumes) — DataForSEO expansions, each best-effort. Expand from
+  //    the full topic AND its head phrase ("amendment to service agreement" → "service
+  //    agreement"), then keep ONLY keywords that share the topic's words: keyword_ideas
+  //    matches single words, so "service agreement" otherwise floods with "dvla customer
+  //    service" / "audi service plan" (exactly what went wrong in the first live test).
+  const STOPW = new Set(['a', 'an', 'the', 'to', 'of', 'for', 'and', 'or', 'in', 'on', 'at', 'by', 'with', 'how', 'what', 'is', 'are', 'your', 'our', 'vs', 'uk', 'from', 'into']);
+  const toks = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !STOPW.has(t));
+  const topicToks = toks(seed);
+  const head = topicToks.slice(-2).join(' ');
+  const seeds = [...new Set([seed.toLowerCase(), head].filter(Boolean))];
+  const need = Math.min(2, topicToks.length || 1);
+  const onTopic = (kw) => { const kt = new Set(toks(kw)); let n = 0; for (const t of topicToks) if (kt.has(t)) n++; return n >= need || (head && kw.includes(head)); };
   const pool = new Map();
   const dfsErrors = [];
   if (dfs.hasKey() && seed) {
     const [rel, ideas] = await Promise.all([
-      dfs.relatedKeywords(seed, { db: site.semrush_db, limit: 60, depth: 2 }).catch((e) => { dfsErrors.push(String((e && e.message) || e)); return []; }),
-      dfs.keywordIdeas([seed], { db: site.semrush_db, limit: 60 }).catch((e) => { dfsErrors.push(String((e && e.message) || e)); return []; }),
+      dfs.relatedKeywords(seed, { db: site.semrush_db, limit: 80, depth: 2 }).catch((e) => { dfsErrors.push(String((e && e.message) || e)); return []; }),
+      dfs.keywordIdeas(seeds, { db: site.semrush_db, limit: 120 }).catch((e) => { dfsErrors.push(String((e && e.message) || e)); return []; }),
     ]);
     for (const k of [...rel, ...ideas]) {
       const kw = String(k.keyword || '').toLowerCase().trim(); if (!kw) continue;
       if (hitsNeg(kw, negatives)) continue;                 // never build clusters in an excluded area
+      if (!onTopic(kw)) continue;                            // drop word-match noise
       const prev = pool.get(kw); if (!prev || (k.volume || 0) > (prev.volume || 0)) pool.set(kw, { keyword: kw, volume: Number(k.volume) || 0 });
     }
   }
