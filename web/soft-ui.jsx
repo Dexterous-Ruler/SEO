@@ -558,7 +558,7 @@ function CountrySelect({ value, options, onChange, title }) {
         <span style={{ color: "var(--muted)", fontSize: 10, marginLeft: -1 }}>▾</span>
       </button>
       {open && (
-        <div style={{ position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 200, width: 250, background: "var(--surface)", borderRadius: "var(--r-md)", boxShadow: "0 14px 38px rgba(0,0,0,.18)", padding: 8 }}>
+        <div style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 4000, width: 250, maxWidth: "80vw", background: "var(--surface)", borderRadius: "var(--r-md)", boxShadow: "0 14px 38px rgba(0,0,0,.18)", padding: 8 }}>
           <div style={{ position: "relative", marginBottom: 6 }}>
             <Icon name="search" size={13} style={{ color: "var(--faint)", position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)" }} />
             <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search countries…"

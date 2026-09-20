@@ -401,11 +401,12 @@ function NotifBell({ ctx }) {
 // and the jurisdiction/language pushed to the Article Writer. Country list is
 // static, so fetch once and cache on window.
 function GlobalJurisdiction({ ctx }) {
+  const API = window.SentinelAPI;   // was missing → siteDatabase() threw → dropdown only ever showed the current country
   const s = ctx.site;
   const [opts, setOpts] = useState(window.__DB_COUNTRIES || null);
   useEffect(() => {
-    if (opts || !s || !s.id) return;
-    try { API.siteDatabase(s.id).then((r) => { if (r && r.countries) { window.__DB_COUNTRIES = r.countries; setOpts(r.countries); } }).catch(() => {}); } catch (e) {}
+    if (opts || !s || !s.id || !API || !API.siteDatabase) return;
+    API.siteDatabase(s.id).then((r) => { if (r && r.countries && r.countries.length) { window.__DB_COUNTRIES = r.countries; setOpts(r.countries); } }).catch(() => {});
   }, [s && s.id]);
   if (!s) return null;
   const val = s.semrush_db || "uk";
