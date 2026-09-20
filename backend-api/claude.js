@@ -572,23 +572,36 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
   const scope = (market && market.scope) ? market.scope + '\n\n' : '';
   // Competitors screen: the brief must OUT-DO the competitor's own article (we read it).
   const compBlock = (competitor && competitor.text)
-    ? `\n\n=== COMPETITOR ARTICLE TO OUT-DO (${competitor.url || ''}) ===\nTitle: ${competitor.title || ''}\n${String(competitor.text).slice(0, 6000)}\n\nThis brief MUST out-do that competitor article: cover everything it covers, then add what it misses (depth, worked examples, current ${country} rules and figures, common mistakes, FAQs). Never copy its wording.`
+    ? `\n\n=== COMPETITOR ARTICLE TO OUT-DO (${competitor.url || ''}) ===\nTitle: ${competitor.title || ''}\n${String(competitor.text).slice(0, 6000)}\n\nThis brief MUST out-do that competitor article: cover everything it covers, then add what it misses (depth, worked examples, current ${country} rules and figures, common mistakes, FAQs). Never copy its wording. Keep the JSON compact enough to finish: outline 5-8 sections × 2-4 points, keyFacts 5-8, faqs 3-5, internalLinks ≤5.`
     : '';
-  const txt = await complete({
+  const userMsg = `${scope}TARGET MARKET: ${country}\nKEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}${compBlock}\n\nWrite the ${country} content brief as JSON.`;
+  // Strip ```json fences, slice the outer object, parse. null on failure (truncated JSON).
+  const parse = (t) => {
+    let s = String(t || '').trim();
+    const f = s.match(/```(?:json)?\s*([\s\S]*?)```/); if (f) s = f[1].trim();
+    const a = s.indexOf('{'); const z = s.lastIndexOf('}');
+    if (a < 0 || z <= a) return null;
+    try { return JSON.parse(s.slice(a, z + 1)); } catch { return null; }
+  };
+  const call = (maxTokens, content) => complete({
     system: sys('content.brief', siteId),
     promptKey: 'content.brief',
-    maxTokens: 3000,
-    // Runs inside the /content-brief-start background job (not bound by the ~95s request
-    // cap), so give the synthesis room: 3000 tokens of structured JSON over dense research
-    // regularly ran past the default 60s attempt and then failed on a 34s retry sliver.
+    maxTokens,
+    // Runs inside a background job (not bound by the ~95s request cap), so give the
+    // synthesis room: dense research + a competitor block make a LONG brief — 3000 tokens
+    // truncated the JSON on the first competitor-aware run.
     timeoutMs: 85000, deadlineMs: 170000,
-    messages: [{ role: 'user', content: `${scope}TARGET MARKET: ${country}\nKEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}${compBlock}\n\nWrite the ${country} content brief as JSON.` }],
+    messages: [{ role: 'user', content }],
   });
-  try {
-    const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
-    o.sources = research.sources || [];
-    return o;
-  } catch (e) { return { title: keyword, error: 'brief synthesis parse failed', sources: research.sources || [], _raw: txt.slice(0, 400) }; }
+  let txt = await call(competitor ? 5000 : 3000, userMsg);
+  let o = parse(txt);
+  if (!o) {
+    // Truncated / non-JSON → ONE compact retry with more room.
+    txt = await call(6000, userMsg + '\n\nIMPORTANT: your previous answer was not complete, valid JSON. Return ONLY valid JSON — compact (outline ≤8 sections × ≤4 points, keyFacts ≤8, faqs ≤5, internalLinks ≤5) — no prose, no code fences.');
+    o = parse(txt);
+  }
+  if (o) { o.sources = research.sources || []; return o; }
+  return { title: keyword, error: 'brief synthesis parse failed', sources: research.sources || [], _raw: String(txt || '').slice(0, 400), _tail: String(txt || '').slice(-200) };
 }
 
 // AEO answer-first block. For a TARGET QUERY + page, produce a question-format

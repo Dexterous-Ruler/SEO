@@ -4803,7 +4803,7 @@ const routes = {
       r = await research.contentBrief({ keyword, intent: opp.intent, siteName: site.name, niche: site.niche || (site.stack && site.stack.type), excludeDomain, internalLinkCandidates, siteId: body.siteId, db: market.db, now: Date.now(), competitor });
     } catch (e) { return { error: 'Brief research failed: ' + String((e && e.message) || e) }; }
     if (!r || r.error) return { error: (r && r.error) || 'Brief research failed.' };
-    if (!r.brief || r.brief.error) return { error: 'Brief could not be structured — try again.' };
+    if (!r.brief || r.brief.error) return { error: 'Brief could not be structured — try again.' + (r.brief && r.brief._tail ? ' (output ended: …' + String(r.brief._tail).slice(-140).replace(/\s+/g, ' ') + ')' : '') };
     const briefSources = (r.sources || []).slice(0, 10).map((x) => ({ title: x.title || '', url: x.url }));
     await engine.updateOpp(opp.id, { payload: Object.assign({}, payload, { brief: r.brief, briefSources, briefAt: new Date().toISOString(), briefFor: market.country, briefCompetitorRead: !!competitor, briefEngines: r.engines || null }) }).catch(() => {});
     return { brief: r.brief, sources: briefSources, briefFor: market.country, competitorRead: !!competitor, engines: r.engines };
