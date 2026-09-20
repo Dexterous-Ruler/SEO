@@ -52,7 +52,7 @@ const SNAV_BY_KEY = Object.fromEntries(SNAV.map(it=>[it.k, it]));
 // does Blog/Recipe/Definition; go-legal.ai adds Definition; every other site is
 // Blog-only (picker hidden). The value ("recipe"/"definition"/"blog") is normalised
 // to the exact Category on the backend (airtable.normalizeCategory).
-function contentTypesFor(site){ const n=((((site&&site.name)||"")+" "+((site&&site.url)||"")).toLowerCase()); if(/good\s?for/.test(n)) return [["blog","Blog"],["recipe","Recipe"],["definition","Definition"]]; if(/go-?legal\.ai/.test(n)) return [["blog","Blog"],["definition","Definition"]]; return [["blog","Blog"]]; }
+function contentTypesFor(site){ const n=((((site&&site.name)||"")+" "+((site&&site.url)||"")).toLowerCase()); if(/good\s?for/.test(n)) return [["blog","Blog"],["recipe","Recipe"],["definition","Definition"]]; if(/go-?legal\.ai/.test(n)) return [["blog","Blog"],["smart_template","Smart template"],["legal_definition","Legal definition"],["how-to-guide","How-to guide"],["legal_pathway","Legal pathway"]]; return [["blog","Blog"]]; }
 // A decay URL is only "rewritable" if it maps to editable post content — PDFs, media
 // uploads and feeds don't, so we don't offer "Audit & refresh" on them (it would just
 // dead-end at "couldn't match this URL to a post").
@@ -395,11 +395,36 @@ function NotifBell({ ctx }) {
   );
 }
 
+// Global jurisdiction picker — always visible in the top bar, bound to the active
+// site's market (semrush_db). This is the single "set the country" control Karim
+// asked for: it drives the Content Engine, AI Visibility, Chat, keyword research
+// and the jurisdiction/language pushed to the Article Writer. Country list is
+// static, so fetch once and cache on window.
+function GlobalJurisdiction({ ctx }) {
+  const s = ctx.site;
+  const [opts, setOpts] = useState(window.__DB_COUNTRIES || null);
+  useEffect(() => {
+    if (opts || !s || !s.id) return;
+    try { API.siteDatabase(s.id).then((r) => { if (r && r.countries) { window.__DB_COUNTRIES = r.countries; setOpts(r.countries); } }).catch(() => {}); } catch (e) {}
+  }, [s && s.id]);
+  if (!s) return null;
+  const val = s.semrush_db || "uk";
+  return (
+    <div style={{ display:"inline-flex", alignItems:"center", gap:7 }}
+      title="Jurisdiction — the country this site's content, keyword research, AI-visibility checks and new articles target. Also sets the language sent to the writer.">
+      <span style={{ fontSize:11.5, fontWeight:700, color:"var(--muted)" }}>Jurisdiction</span>
+      <CountrySelect value={val} options={opts || [{ db: val, label: String(val).toUpperCase() }]}
+        onChange={(db) => ctx.setJurisdiction(db)} title="Set the target country / jurisdiction for this site" />
+    </div>
+  );
+}
+
 function TopBar({ ctx }) {
   const armed = ctx.site.writeArmed && !ctx.killSwitch;
   return (
     <div className="topbar" style={{ display:"flex", alignItems:"center", gap:16, padding:"20px 30px 16px" }}>
       <SiteSwitcher ctx={ctx} />
+      <GlobalJurisdiction ctx={ctx} />
       <div style={{ flex:1 }} />
       <SearchBox ctx={ctx} />
       <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 14px", borderRadius:"var(--r-pill)",
@@ -1427,9 +1452,11 @@ function RadarScreen({ ctx }){
   const [busyId,setBusyId] = useState("");
   const [notProv,setNotProv] = useState(false);
   const [form,setForm] = useState({ type:"google_news", url:"", query:"", label:"" });
-  // Site-aware content types → the n8n Category the master switch routes on. GoodFor
-  // does Blog/Recipe/Definition; go-legal.ai adds Definition; every other site is Blog-only.
-  const TYPES = (()=>{ const n=((s.name||"")+" "+(s.url||"")).toLowerCase(); if(/good\s?for/.test(n)) return [["blog","Blog"],["recipe","Recipe"],["definition","Definition"]]; if(/go-?legal\.ai/.test(n)) return [["blog","Blog"],["definition","Definition"]]; return [["blog","Blog"]]; })();
+  // Site-aware content types → the n8n Category the master switch routes on.
+  // Single source of truth: contentTypesFor() (module-level) so Radar stays in sync
+  // with the Content Plan / Keyword-Gap pickers (GoodFor: Blog/Recipe/Definition;
+  // Go Legal AI: Blog/Smart template/Legal definition/How-to guide/Legal pathway).
+  const TYPES = contentTypesFor(s);
   const [draftType,setDraftType] = useState("blog");
   const inp = { padding:"9px 12px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none", width:"100%", boxSizing:"border-box" };
   const lbl = { fontSize:11.5, color:"var(--muted)", marginBottom:5, fontWeight:600 };
@@ -6534,6 +6561,10 @@ function App() {
       toast(ok?"Activity trail exported (CSV)":"Nothing to export yet","teal");
     },
     switchSite:(id)=>{ const x=sites.find(s=>s.id===id); if(x.status!=="connected"){ setAddSiteFor(x); setAddSiteOpen(true); return; } setSiteId(id); setProposals([]); if(isLive()){ API.listProposals(id).then(rows=>{ window.PROPOSALS=(rows||[]).map(window.mapProposalRow||(y=>y)); setProposals(window.PROPOSALS); }).catch(()=>{}); } toast("Switched to "+x.name,"teal"); },
+    // Global jurisdiction/market for the ACTIVE site (semrush_db). Persists per-site and
+    // re-renders the app so every screen (Content Engine, AI Visibility, Chat, Content Plan,
+    // Keyword Gap) targets this country — and the country + language flow into Airtable on push.
+    setJurisdiction:(db)=>{ db=String(db||"").toLowerCase(); if(!db||(site&&site.semrush_db===db)) return; if(site) site.semrush_db=db; const w=window.SITES.find(x=>x.id===siteId); if(w) w.semrush_db=db; forceTick(t=>t+1); if(isLive()) API.siteDatabase(siteId, db).then(()=>toast("Jurisdiction set to "+db.toUpperCase()+" — keyword research, AI visibility & new articles now target this market","teal")).catch(()=>toast("Couldn't save the jurisdiction — try again","clay")); else toast("Jurisdiction set to "+db.toUpperCase(),"teal"); },
     runAudit:(scope)=>{
       // A stuck `auditing` flag used to make every later click a SILENT no-op — the modal
       // sat at 92% forever and the operator concluded "audits don't work". Now a run that
