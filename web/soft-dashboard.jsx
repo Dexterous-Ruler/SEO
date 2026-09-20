@@ -1965,6 +1965,7 @@ function CompetitorsScreen({ ctx }) {
   const [compFilter,setCompFilter] = useState("");
   const [types,setTypes] = useState({});            // item id → content type chosen before push
   const [busyId,setBusyId] = useState("");
+  const [shown,setShown] = useState(100);          // rows rendered so far (client-side "Show more" — the list itself is unlimited)
   const TYPES = contentTypesFor(s);
   const typeLabel = (v)=>{ const t=TYPES.find(x=>x[0]===v); return t?t[1]:v; };
   const isPushed = (st)=>["queued","in_review","published","done"].includes(st);
@@ -1978,7 +1979,8 @@ function CompetitorsScreen({ ctx }) {
       setNotProv(false); setItems((r&&r.items)||[]); setCounts((r&&r.counts)||{});
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setLoading(false));
   };
-  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setFilter("new"); if(live){ loadSources(); loadItems(); } },[s.id]);
+  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setFilter("new"); setShown(100); if(live){ loadSources(); loadItems(); } },[s.id]);
+  useEffect(()=>{ setShown(100); },[filter,compFilter]);
 
   const add = ()=>{
     const u=url.trim();
@@ -2084,7 +2086,7 @@ function CompetitorsScreen({ ctx }) {
       {live && !notProv && (
         <SoftCard hover={false}>
           <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:10 }}>
-            <div style={{ fontSize:14, fontWeight:800, color:"var(--ink)", marginRight:6 }}>What they publish</div>
+            <div style={{ fontSize:14, fontWeight:800, color:"var(--ink)", marginRight:6 }}>What they publish{counts.total!=null?<span style={{ fontWeight:600, color:"var(--muted)" }}> · {Number(counts.total).toLocaleString()} topics</span>:null}</div>
             <FilterBtn k="new" label="New" n={counts.new} />
             <FilterBtn k="pushed" label="Pushed" n={counts.pushed} />
             <FilterBtn k="hidden" label="Hidden" n={counts.hidden} />
@@ -2101,7 +2103,7 @@ function CompetitorsScreen({ ctx }) {
           {!loading && !visible.length && (
             <div style={{ fontSize:13, color:"var(--muted)", padding:"8px 2px" }}>{items.length?"Nothing here for this filter.":"Nothing scanned yet — click Scan on a competitor above."}</div>
           )}
-          {visible.map(it=>(
+          {visible.slice(0,shown).map(it=>(
             <div key={it.id} style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", padding:"10px 4px", borderTop:"1px solid var(--line)" }}>
               <div style={{ flex:"1 1 340px", minWidth:0 }}>
                 <div style={{ fontSize:13.5, fontWeight:700, color:"var(--ink)", lineHeight:1.35 }}>{it.title}</div>
@@ -2124,6 +2126,11 @@ function CompetitorsScreen({ ctx }) {
               {it.status==="dismissed" && <NeoButton kind="ghost" size="sm" disabled={busyId===it.id} onClick={()=>unhide(it)}>Unhide</NeoButton>}
             </div>
           ))}
+          {visible.length>shown && (
+            <div style={{ display:"flex", justifyContent:"center", padding:"12px 0 4px" }}>
+              <NeoButton kind="soft" onClick={()=>setShown(n=>n+200)}>Show more ({Math.min(200, visible.length-shown).toLocaleString()} of {(visible.length-shown).toLocaleString()} remaining)</NeoButton>
+            </div>
+          )}
         </SoftCard>
       )}
     </div>

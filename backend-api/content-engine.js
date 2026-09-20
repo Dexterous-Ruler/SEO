@@ -517,7 +517,9 @@ export async function ingestCompetitorSitemap(siteId, inputs) {
   const raw = [];
   // Fetch every competitor's sitemap CONCURRENTLY (each is internally bounded) so the
   // whole run stays inside the gateway request budget.
-  const fetched = await Promise.all(list.map((src) => feeds.fetchSitemap(src.url, { maxUrls: 300, maxChildren: 10 }).catch((e) => ({ error: String((e && e.message) || e), urls: [] }))));
+  // Read the WHOLE sitemap (big WordPress sites split posts across many child sitemaps),
+  // not just the first few hundred URLs — Karim noticed results capping at 200/competitor.
+  const fetched = await Promise.all(list.map((src) => feeds.fetchSitemap(src.url, { maxUrls: 2000, maxChildren: 20 }).catch((e) => ({ error: String((e && e.message) || e), urls: [] }))));
   const perSource = [];
   for (let i = 0; i < list.length; i++) {
     const src = list[i]; const sm = fetched[i] || { urls: [] };
@@ -542,13 +544,22 @@ export async function ingestCompetitorSitemap(siteId, inputs) {
       o.dedupeKey = 'csm:' + feedHash(String(u).replace(/[#?].*$/, '').toLowerCase());
       score(o, scoreSite);
       raw.push(o);
-      if (++made >= 200) break;
+      if (++made >= 1500) break;   // hard safety bound per competitor per scan (was 200)
     }
     perSource.push({ id: src.id, input: src.url, competitor: comp, sitemap: sm.sitemapUrl, urls: urls.length, made });
   }
   const merged = dedupeMerge(raw);
-  const res = await persist(siteId, merged);
-  return { saved: res.saved || 0, error: res.error, notProvisioned: res.notProvisioned, fetched: raw.length, unique: merged.length, perSource };
+  // Persist in CHUNKS: persist() pre-reads existing keys with ONE `dedupe_key=in.(...)`
+  // query, and thousands of keys would exceed the URL length limit. 150/chunk keeps every
+  // request small; chunks run sequentially so a big competitor still lands completely.
+  let saved = 0, error = null, notProvisioned = false;
+  for (let i = 0; i < merged.length; i += 150) {
+    const res = await persist(siteId, merged.slice(i, i + 150));
+    if (res.notProvisioned) { notProvisioned = true; error = res.error; break; }
+    if (res.error && !error) error = res.error;
+    saved += res.saved || 0;
+  }
+  return { saved, error, notProvisioned, fetched: raw.length, unique: merged.length, perSource };
 }
 
 export async function persist(siteId, opps) {
@@ -606,9 +617,11 @@ export async function persist(siteId, opps) {
 
 // ---- 6) worklist -----------------------------------------------------------
 // SELECT ordered by score desc, optionally filtered by status/actionType. Graceful.
-export async function worklist(siteId, { status, actionType, source, excludeSource, limit = 50 } = {}) {
+export async function worklist(siteId, { status, actionType, source, excludeSource, limit = 50, offset = 0 } = {}) {
   if (!SB || !SRV) return { ...NOT_PROVISIONED, error: 'Supabase not configured.', items: [] };
-  const parts = [`site_id=eq.${encodeURIComponent(siteId)}`, 'select=*', 'order=score.desc', `limit=${Math.min(Math.max(Number(limit) || 50, 1), 500)}`];
+  // `id.asc` tie-break keeps paging (offset) stable when many rows share a score.
+  const parts = [`site_id=eq.${encodeURIComponent(siteId)}`, 'select=*', 'order=score.desc,id.asc', `limit=${Math.min(Math.max(Number(limit) || 50, 1), 500)}`];
+  if (offset) parts.push(`offset=${Math.max(0, Number(offset) || 0)}`);
   if (status) parts.push(`status=eq.${encodeURIComponent(status)}`);
   if (actionType) parts.push(`action_type=eq.${encodeURIComponent(actionType)}`);
   if (source) parts.push(`source=eq.${encodeURIComponent(source)}`);

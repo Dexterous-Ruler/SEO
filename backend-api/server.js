@@ -4758,8 +4758,16 @@ const routes = {
   // so the user can see what's new vs already pushed vs hidden. Optional competitor filter.
   'POST /competitor-sitemap-items': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    const wl = await engine.worklist(body.siteId, { source: 'competitor_sitemap', limit: Math.min(body.limit || 400, 500) }).catch(() => ({ items: [] }));
-    if (wl.notProvisioned) return { notProvisioned: true, items: [], note: wl.error };
+    // Page through ALL competitor items (no 400 cap): worklist() returns ≤500 per call.
+    const all = []; let notProv = false, note = '';
+    for (let off = 0; off < 10000; off += 500) {
+      const page = await engine.worklist(body.siteId, { source: 'competitor_sitemap', limit: 500, offset: off }).catch(() => ({ items: [] }));
+      if (page.notProvisioned) { notProv = true; note = page.error; break; }
+      const rows = page.items || []; all.push(...rows);
+      if (rows.length < 500) break;
+    }
+    if (notProv) return { notProvisioned: true, items: [], note };
+    const wl = { items: all };
     const want = body.competitor ? String(body.competitor).toLowerCase() : '';
     const order = { scored: 0, in_review: 1, queued: 2, published: 3, done: 3, dismissed: 4 };
     const items = (wl.items || [])
