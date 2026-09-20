@@ -502,39 +502,61 @@ function suggestTypeFor(site, title, url) {
   return 'blog';
 }
 
-// Best-effort jurisdiction of a competitor page (Karim: "the content doesn't tell me which
-// jurisdiction the competitor wrote it for"). Signals, strongest first: a locale segment in
-// the URL (/uk/, /en-us/…), a country word in the title, then the domain's country TLD
-// (.co.uk, .com.au…). "Not stated" when nothing signals it (.com/.io with no other hint).
-const JX_PATH = { 'en-gb': 'UK', 'uk': 'UK', 'gb': 'UK', 'en-us': 'US', 'us': 'US', 'usa': 'US', 'en-ca': 'Canada', 'ca': 'Canada', 'en-au': 'Australia', 'au': 'Australia', 'en-in': 'India', 'in': 'India', 'en-ie': 'Ireland', 'ie': 'Ireland', 'en-nz': 'New Zealand', 'nz': 'New Zealand', 'en-ae': 'UAE', 'ae': 'UAE', 'en-sg': 'Singapore', 'sg': 'Singapore', 'en-za': 'South Africa', 'za': 'South Africa', 'de-de': 'Germany', 'de': 'Germany', 'fr-fr': 'France', 'fr': 'France', 'es-es': 'Spain', 'es': 'Spain', 'it-it': 'Italy', 'it': 'Italy', 'nl-nl': 'Netherlands', 'nl': 'Netherlands' };
-const JX_TLD = { 'co.uk': 'UK', 'org.uk': 'UK', 'me.uk': 'UK', 'uk': 'UK', 'ie': 'Ireland', 'com.au': 'Australia', 'net.au': 'Australia', 'au': 'Australia', 'co.nz': 'New Zealand', 'nz': 'New Zealand', 'ca': 'Canada', 'co.in': 'India', 'in': 'India', 'ae': 'UAE', 'sg': 'Singapore', 'com.sg': 'Singapore', 'co.za': 'South Africa', 'za': 'South Africa', 'de': 'Germany', 'fr': 'France', 'es': 'Spain', 'it': 'Italy', 'nl': 'Netherlands', 'us': 'US' };
+// Which jurisdiction a competitor page was written for (Karim: "genieai.co has ~20+
+// jurisdictions — usually it's in the URL"). Labels are the SAME strings as the top-bar
+// market list (dataforseo COUNTRIES labels, e.g. "United Kingdom", "UAE") so the list can
+// follow the selected jurisdiction exactly. Signals, strongest first:
+//   1. a locale segment in the URL — `xx-yy` (en-au, en-gb, pt-br, gb-au…: the COUNTRY is
+//      whichever half is a country code) or a bare country code (/uk/, /us/, /au/…)
+//   2. a country word in the title ("… Agreement UK")
+//   3. the domain's country TLD (.co.uk, .com.au…)
+// Otherwise "Not stated" — honest for .com/.co pages with no signal; never guessed.
+const ISO_COUNTRY = {
+  gb: 'United Kingdom', uk: 'United Kingdom', us: 'United States', ca: 'Canada', au: 'Australia', ie: 'Ireland', nz: 'New Zealand',
+  in: 'India', ae: 'UAE', za: 'South Africa', sg: 'Singapore', de: 'Germany', fr: 'France', es: 'Spain', it: 'Italy', nl: 'Netherlands',
+  se: 'Sweden', no: 'Norway', dk: 'Denmark', fi: 'Finland', pl: 'Poland', pt: 'Portugal', ch: 'Switzerland', at: 'Austria', tr: 'Turkey',
+  br: 'Brazil', mx: 'Mexico', co: 'Colombia', ar: 'Argentina', jp: 'Japan', hk: 'Hong Kong', my: 'Malaysia', ph: 'Philippines',
+  pk: 'Pakistan', sa: 'Saudi Arabia', ng: 'Nigeria', id: 'Indonesia', qa: 'Qatar', be: 'Belgium', gr: 'Greece', cz: 'Czechia',
+  hu: 'Hungary', ro: 'Romania', il: 'Israel', eg: 'Egypt', ke: 'Kenya', th: 'Thailand', vn: 'Vietnam', kr: 'South Korea', cn: 'China',
+  cl: 'Chile', pe: 'Peru', bh: 'Bahrain', kw: 'Kuwait', om: 'Oman', cy: 'Cyprus', mt: 'Malta', lu: 'Luxembourg', ru: 'Russia',
+  ua: 'Ukraine', tw: 'Taiwan', bd: 'Bangladesh', lk: 'Sri Lanka', gh: 'Ghana',
+};
+// Bare 2-letter path segments that are also English words / abbreviations — never treat
+// these as a country on their own (they still resolve inside `xx-yy`, e.g. en-in → India).
+const AMBIGUOUS_BARE = new Set(['it', 'in', 'me', 'no', 'at', 'be', 'is', 'to', 'by', 'do', 'so', 'on', 'or', 'as', 'an', 'if', 'of', 'up', 'us']);
+const JX_TLD = { 'co.uk': 'gb', 'org.uk': 'gb', 'me.uk': 'gb', 'ac.uk': 'gb', 'uk': 'gb', 'com.au': 'au', 'net.au': 'au', 'org.au': 'au', 'co.nz': 'nz', 'co.in': 'in', 'com.sg': 'sg', 'co.za': 'za', 'com.br': 'br', 'com.mx': 'mx', 'co.jp': 'jp', 'com.hk': 'hk', 'com.my': 'my', 'com.ph': 'ph', 'com.pk': 'pk', 'com.sa': 'sa', 'com.ng': 'ng', 'co.id': 'id', 'com.tr': 'tr', 'co.kr': 'kr', 'com.cn': 'cn' };
+const GENERIC_TLD = new Set(['com', 'net', 'org', 'io', 'co', 'app', 'ai', 'legal', 'law', 'info', 'biz', 'me', 'xyz', 'online', 'site', 'dev', 'tech', 'cloud', 'digital', 'agency', 'ltd', 'llc', 'inc', 'global', 'world', 'eu']);
 const JX_WORDS = [
-  [/\b(uk|united kingdom|england|wales|scotland|british|hmrc|companies house|england and wales)\b/i, 'UK'],
-  [/\b(usa|united states|american|california|texas|new york|florida|delaware|irs)\b/i, 'US'],
-  [/\b(australia|australian|nsw|queensland)\b/i, 'Australia'],
-  [/\b(canada|canadian|ontario|british columbia|quebec)\b/i, 'Canada'],
-  [/\b(india|indian)\b/i, 'India'], [/\b(ireland|irish)\b/i, 'Ireland'],
-  [/\b(uae|dubai|abu dhabi|emirates)\b/i, 'UAE'], [/\b(new zealand)\b/i, 'New Zealand'],
-  [/\b(singapore)\b/i, 'Singapore'], [/\b(south africa)\b/i, 'South Africa'],
+  [/\b(uk|united kingdom|england|wales|scotland|british|hmrc|companies house|england and wales)\b/i, 'gb'],
+  [/\b(usa|united states|american|california|texas|new york|florida|delaware|irs)\b/i, 'us'],
+  [/\b(australia|australian|nsw|queensland)\b/i, 'au'], [/\b(canada|canadian|ontario|british columbia|quebec)\b/i, 'ca'],
+  [/\b(india|indian)\b/i, 'in'], [/\b(ireland|irish)\b/i, 'ie'], [/\b(uae|dubai|abu dhabi|emirates)\b/i, 'ae'],
+  [/\b(new zealand)\b/i, 'nz'], [/\b(singapore)\b/i, 'sg'], [/\b(south africa)\b/i, 'za'], [/\b(malaysia)\b/i, 'my'],
+  [/\b(hong kong)\b/i, 'hk'], [/\b(saudi)\b/i, 'sa'], [/\b(nigeria)\b/i, 'ng'], [/\b(philippines)\b/i, 'ph'], [/\b(pakistan)\b/i, 'pk'],
 ];
-const GENERIC_TLD = new Set(['com', 'net', 'org', 'io', 'co', 'app', 'ai', 'legal', 'law', 'info', 'biz', 'me', 'xyz', 'online', 'site', 'dev']);
-function inferJurisdiction(host, url, title) {
+const isCountryCode = (c) => !!ISO_COUNTRY[c];
+export function inferJurisdiction(host, url, title) {
   try {
     const segs = new URL(url).pathname.toLowerCase().split('/').filter(Boolean);
-    for (const seg of segs.slice(0, 2)) if (JX_PATH[seg]) return JX_PATH[seg];
+    for (const seg of segs.slice(0, 2)) {
+      const m = seg.match(/^([a-z]{2})-([a-z]{2})$/);        // xx-yy: country is whichever half is a country code (en-au, gb-au, pt-br)
+      if (m) { if (isCountryCode(m[2])) return ISO_COUNTRY[m[2]]; if (isCountryCode(m[1])) return ISO_COUNTRY[m[1]]; continue; }
+      if (/^[a-z]{2}$/.test(seg) && isCountryCode(seg) && !AMBIGUOUS_BARE.has(seg)) return ISO_COUNTRY[seg];   // /uk/ /au/
+      if (seg === 'usa') return ISO_COUNTRY.us;
+    }
   } catch {}
   const t = String(title || '');
-  for (const [re, j] of JX_WORDS) if (re.test(t)) return j;
+  for (const [re, code] of JX_WORDS) if (re.test(t)) return ISO_COUNTRY[code];
   const parts = String(host || '').toLowerCase().split('.');
   const two = parts.slice(-2).join('.'); const one = parts.slice(-1)[0];
-  if (JX_TLD[two]) return JX_TLD[two];
-  if (!GENERIC_TLD.has(one) && JX_TLD[one]) return JX_TLD[one];
+  if (JX_TLD[two]) return ISO_COUNTRY[JX_TLD[two]];
+  if (!GENERIC_TLD.has(one) && isCountryCode(one)) return ISO_COUNTRY[one];   // .de .fr .ie …
   return 'Not stated';
 }
 
 // `inputs` = saved competitor sources [{ id, url, label }] (or plain URL strings).
 // Returns per-source stats keyed back by id so the caller can record lastScan/lastFound.
-export async function ingestCompetitorSitemap(siteId, inputs) {
+export async function ingestCompetitorSitemap(siteId, inputs, opts) {
   const site = await db.getSite(siteId).catch(() => null);
   if (!site) return { error: 'Site not found.', saved: 0 };
   let list = (Array.isArray(inputs) && inputs.length) ? inputs : (Array.isArray(site.competitors) ? site.competitors : []);
@@ -543,23 +565,41 @@ export async function ingestCompetitorSitemap(siteId, inputs) {
   const seenHost = new Set();
   list = list.filter((x) => { let h = String(x.url).trim(); try { h = new URL(h.startsWith('http') ? h : 'https://' + h).hostname.replace(/^www\./, ''); } catch {} if (seenHost.has(h)) return false; seenHost.add(h); x.__host = h; return true; }).slice(0, 6);
   if (!list.length) return { error: 'No competitor website/sitemap URL provided (and none saved for this site).', saved: 0, needsInput: true };
+  // SCAN PER JURISDICTION. Big competitors publish the same catalogue for 20+ countries
+  // (genieai.co: 100k+ pages, 26 locales) — ingesting all of it is useless. We read the whole
+  // sitemap (fast) to learn which countries they cover, then keep only the pages written
+  // for the jurisdiction the user selected (default: the site's top-bar market), plus
+  // unlabelled pages (a .com blog with no country signal may still be relevant).
+  const wanted = String((opts && opts.jurisdiction) || marketFor(site && site.semrush_db).country || 'United Kingdom');
   const scoreSite = { id: siteId, __nicheCtx: geoFor(siteId) || '', __negatives: (Array.isArray(site.negative_keywords) ? site.negative_keywords : []).map((n) => String(n || '').toLowerCase().trim()).filter(Boolean) };
   const raw = [];
   // Fetch every competitor's sitemap CONCURRENTLY (each is internally bounded) so the
   // whole run stays inside the gateway request budget.
   // Read the WHOLE sitemap (big WordPress sites split posts across many child sitemaps),
   // not just the first few hundred URLs — Karim noticed results capping at 200/competitor.
-  const fetched = await Promise.all(list.map((src) => feeds.fetchSitemap(src.url, { maxUrls: 3000, maxChildren: 25 }).catch((e) => ({ error: String((e && e.message) || e), urls: [] }))));
+  // Read the WHOLE sitemap (100k URLs ≈ 3s; it's the persist that's expensive, and that is
+  // bounded below AFTER the jurisdiction filter) so no country's pages are cut off.
+  const fetched = await Promise.all(list.map((src) => feeds.fetchSitemap(src.url, { maxUrls: 200000, maxChildren: 600 }).catch((e) => ({ error: String((e && e.message) || e), urls: [] }))));
   const perSource = [];
   for (let i = 0; i < list.length; i++) {
     const src = list[i]; const sm = fetched[i] || { urls: [] };
     const comp = src.__host || src.url;
     if (sm.error) { perSource.push({ id: src.id, input: src.url, competitor: comp, error: sm.error, urls: 0, made: 0 }); continue; }
     const urls = (sm.urls || []).filter((u) => !CSM_NONCONTENT.test(u) && !isIndexUrl(u));
+    // 1) Tally which jurisdictions this competitor covers (the whole site, not just what we keep).
+    const tally = {};
+    const labelled = urls.map((u) => { const j = inferJurisdiction(comp, u, ''); tally[j] = (tally[j] || 0) + 1; return [u, j]; });
+    const jurisdictions = Object.entries(tally).filter(([j]) => j !== 'Not stated').sort((a, b) => b[1] - a[1]).map(([j, n]) => ({ jurisdiction: j, pages: n }));
+    // 2) Keep the pages written for the wanted jurisdiction (+ unlabelled ones).
+    const kept = labelled.filter(([, j]) => j === wanted || j === 'Not stated');
+    const matched = kept.length;
     let made = 0;
-    for (const u of urls) {
+    for (const [u, j0] of kept) {
       const title = slugTitle(u);
       if (!title || title.length < 8 || title.split(' ').length < 2) continue;   // "About", "Blog" etc. are not topics
+      // An unlabelled URL may still name its country in the title ("… Agreement UK").
+      const jurisdiction = j0 === 'Not stated' ? inferJurisdiction(comp, u, title) : j0;
+      if (jurisdiction !== wanted && jurisdiction !== 'Not stated') continue;
       const suggestedType = suggestTypeFor(site, title, u);
       const o = makeOpp(siteId, {
         source: 'competitor_sitemap',
@@ -569,14 +609,15 @@ export async function ingestCompetitorSitemap(siteId, inputs) {
         intent: 'informational',
         actionType: 'article',
         evidence: [{ source: 'competitor_sitemap', detail: `A competitor covers this: ${comp}` }],
-        payload: { link: u, competitor: comp, competitorSourceId: src.id || null, fromCompetitor: true, sourceType: 'competitor_sitemap', suggestedType, jurisdiction: inferJurisdiction(comp, u, title) },
+        payload: { link: u, competitor: comp, competitorSourceId: src.id || null, fromCompetitor: true, sourceType: 'competitor_sitemap', suggestedType, jurisdiction },
       });
       o.dedupeKey = 'csm:' + feedHash(String(u).replace(/[#?].*$/, '').toLowerCase());
       score(o, scoreSite);
       raw.push(o);
-      if (++made >= 3000) break;   // hard safety bound per competitor per scan (was 200 → 1500; real competitors have ~2000 pages; a 3000 scan persists in ~10s)
+      if (++made >= 3000) break;   // hard bound per competitor per scan (a 3000-row chunked persist ≈ 10s)
     }
-    perSource.push({ id: src.id, input: src.url, competitor: comp, sitemap: sm.sitemapUrl, urls: urls.length, made });
+    const others = jurisdictions.map((x) => x.jurisdiction).filter((j) => j !== wanted);
+    perSource.push({ id: src.id, input: src.url, competitor: comp, sitemap: sm.sitemapUrl, urls: urls.length, scannedFor: wanted, matched, made, capped: made >= 3000 && matched > made, jurisdictions, others });
   }
   const merged = dedupeMerge(raw);
   // Persist in CHUNKS: persist() pre-reads existing keys with ONE `dedupe_key=in.(...)`
@@ -589,7 +630,7 @@ export async function ingestCompetitorSitemap(siteId, inputs) {
     if (res.error && !error) error = res.error;
     saved += res.saved || 0;
   }
-  return { saved, error, notProvisioned, fetched: raw.length, unique: merged.length, perSource };
+  return { saved, error, notProvisioned, fetched: raw.length, unique: merged.length, scannedFor: wanted, perSource };
 }
 
 export async function persist(siteId, opps) {

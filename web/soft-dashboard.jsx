@@ -1971,21 +1971,22 @@ function CompetitorsScreen({ ctx }) {
   const TYPES = contentTypesFor(s);
   const typeLabel = (v)=>{ const t=TYPES.find(x=>x[0]===v); return t?t[1]:v; };
   const isPushed = (st)=>["queued","in_review","published","done"].includes(st);
-  // The site's current jurisdiction (top-bar picker → semrush_db) as the label the
-  // competitor pieces are tagged with, so the list can follow "I changed the jurisdiction".
-  const JX_OF_DB = { uk:"UK", us:"US", in:"India", ae:"UAE", au:"Australia", ca:"Canada", ie:"Ireland", nz:"New Zealand", sg:"Singapore", za:"South Africa", de:"Germany", fr:"France", es:"Spain", it:"Italy", nl:"Netherlands" };
-  const siteJx = JX_OF_DB[String(s.semrush_db||"uk").toLowerCase()] || "";
+  // The site's current jurisdiction (top-bar picker → semrush_db), as the backend labels it —
+  // the SAME label competitor pieces are tagged with, so scans + the list follow the top bar.
+  const [siteJx,setSiteJx] = useState("");
 
-  const loadSources = ()=>{ if(!live) return; API.competitorSources(s.id).then(r=>setSources((r&&r.sources)||[])).catch(()=>{}); };
+  const loadSources = ()=>{ if(!live) return; API.competitorSources(s.id).then(r=>{ setSources((r&&r.sources)||[]); if(r&&r.siteJurisdiction) setSiteJx(r.siteJurisdiction); }).catch(()=>{}); };
   const loadItems = ()=>{
     if(!live) return;
     setLoading(true);
     API.competitorSitemapItems(s.id).then(r=>{
       if(r && r.notProvisioned){ setNotProv(true); setItems([]); return; }
-      setNotProv(false); setItems((r&&r.items)||[]); setCounts((r&&r.counts)||{});
+      setNotProv(false); setItems((r&&r.items)||[]); setCounts((r&&r.counts)||{}); if(r&&r.siteJurisdiction) setSiteJx(r.siteJurisdiction);
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setLoading(false));
   };
   useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setJxFilter(""); setFilter("new"); setShown(100); if(live){ loadSources(); loadItems(); } },[s.id]);
+  // Top-bar jurisdiction changed → refresh the label (and the auto filter follows it).
+  useEffect(()=>{ if(live) loadSources(); },[s.semrush_db]);
   useEffect(()=>{ setShown(100); },[filter,compFilter,jxFilter]);
   // Follow the top-bar Jurisdiction: when it changes, go back to auto mode…
   useEffect(()=>{ setJxTouched(false); },[s.semrush_db]);
@@ -1995,7 +1996,7 @@ function CompetitorsScreen({ ctx }) {
     if(jxTouched) return;
     const d = (siteJx && items.some(i=>(i.jurisdiction||"")===siteJx)) ? siteJx : "";
     if(d!==jxFilter) setJxFilter(d);
-  },[items,s.semrush_db,jxTouched]);
+  },[items,s.semrush_db,jxTouched,siteJx]);
 
   const add = ()=>{
     const u=url.trim();
@@ -2010,19 +2011,28 @@ function CompetitorsScreen({ ctx }) {
   const remove = (src)=>{
     API.competitorSourceRemove(s.id,src.id).then(r=>{ setSources((r&&r.sources)||[]); ctx.toast("Removed "+src.host,"teal"); }).catch(e=>ctx.toast(e.message,"clay"));
   };
+  // Scan = "what did this competitor publish for the jurisdiction in the top bar?"
   const scan = (src)=>{
     if(scanning) return;
     setScanning(src?src.id:"all");
-    ctx.toast(src?("Scanning "+src.host+"…"):"Scanning all competitors…","teal");
-    API.competitorSitemapPoll(s.id, src?{id:src.id}:{}).then(r=>{
+    ctx.toast((src?("Scanning "+src.host):"Scanning all competitors")+(siteJx?(" for "+siteJx):"")+"…","teal");
+    API.competitorSitemapPoll(s.id, Object.assign(src?{id:src.id}:{}, siteJx?{jurisdiction:siteJx}:{})).then(r=>{
       if(r && r.notProvisioned){ setNotProv(true); return; }
       if(r && r.error && !r.saved){ ctx.toast("Scan: "+r.error,"clay"); }
       else {
-        const found=(r&&r.fetched)||0, added=(r&&r.saved)||0;
-        const errs=((r&&r.perSource)||[]).filter(p=>p.error);
-        ctx.toast(found?("Found "+found+" topics — "+added+" new added"+(errs.length?(" · "+errs.length+" site(s) couldn't be read"):"")):"No topics found — that site may not have a public sitemap", found?"teal":"gold");
+        const ps=(r&&r.perSource)||[];
+        const jx=(r&&r.siteJurisdiction)||siteJx||"this jurisdiction";
+        const lines=ps.map(p=>{
+          if(p.error) return p.competitor+": couldn't read it";
+          const n=Number(p.matched||0), m=Number(p.made||0);
+          const oth=(p.others||[]);
+          return p.competitor+": "+n.toLocaleString()+" page"+(n===1?"":"s")+" for "+jx+(m<n?(" — took the first "+m.toLocaleString()):"")+(oth.length?(" · also covers "+oth.slice(0,3).join(", ")+(oth.length>3?(" +"+(oth.length-3)+" more"):"")):"");
+        });
+        const any=ps.some(p=>(p.matched||0)>0);
+        ctx.toast(lines.length?lines.join("  |  "):"Nothing found", any?"teal":"gold");
       }
       if(r && r.sources) setSources(r.sources);
+      if(r && r.siteJurisdiction) setSiteJx(r.siteJurisdiction);
       loadItems();
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setScanning(""));
   };
@@ -2061,9 +2071,9 @@ function CompetitorsScreen({ ctx }) {
 
   return (
     <div className="rise">
-      <PageHead title="Competitors" sub="Save your competitors, scan what they publish, and pick the pieces to write for your own site. Everything stays here so you can see what you've already pushed.">
-        <NeoButton kind="primary" icon={scanning?undefined:"radar"} disabled={!live||!!scanning||!sources.length} onClick={()=>scan(null)} title={!sources.length?"Add a competitor first":"Scan every saved competitor for new topics"}>
-          {scanning==="all"&&<Icon name="cog" size={16} className="audit-spin" />}{scanning==="all"?"Scanning…":"Scan all competitors"}
+      <PageHead title="Competitors" sub={"Save your competitors, scan what they publish"+(siteJx?(" for "+siteJx):"")+", and pick the pieces to write for your own site. Everything stays here so you can see what you've already pushed. To see another country's content, change the Jurisdiction in the top bar and scan again."}>
+        <NeoButton kind="primary" icon={scanning?undefined:"radar"} disabled={!live||!!scanning||!sources.length} onClick={()=>scan(null)} title={!sources.length?"Add a competitor first":("Read what every saved competitor publishes for "+(siteJx||"your jurisdiction"))}>
+          {scanning==="all"&&<Icon name="cog" size={16} className="audit-spin" />}{scanning==="all"?"Scanning…":("Scan all"+(siteJx?(" for "+siteJx):""))}
         </NeoButton>
       </PageHead>
 
@@ -2090,10 +2100,18 @@ function CompetitorsScreen({ ctx }) {
               <div style={{ flex:"1 1 260px", minWidth:0 }}>
                 <div style={{ fontSize:13.5, fontWeight:700, color:"var(--ink)" }}>{src.label||src.host}</div>
                 <div style={{ fontSize:12, color:"var(--muted)" }}>
-                  Last scanned {fmtDate(src.lastScanAt)}{src.lastScanAt?(" · "+(src.lastFound||0)+" topics found"):""}{src.lastError?(" · couldn't read it ("+src.lastError+")"):""}
+                  {src.lastScanAt
+                    ? ("Last scanned "+fmtDate(src.lastScanAt)+(src.lastScanFor?(" for "+src.lastScanFor):"")+" · "+Number(src.lastFound||0).toLocaleString()+" topics"+(src.lastMatched&&src.lastMatched>src.lastFound?(" of "+Number(src.lastMatched).toLocaleString()):""))
+                    : "Not scanned yet"}
+                  {src.lastError?(" · couldn't read it ("+src.lastError+")"):""}
                 </div>
+                {Array.isArray(src.jurisdictions) && src.jurisdictions.length>0 && (
+                  <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }} title={src.jurisdictions.map(j=>j.jurisdiction+" ("+Number(j.pages).toLocaleString()+" pages)").join(" · ")}>
+                    <Icon name="globe" size={11} /> Covers {src.jurisdictions.length} {src.jurisdictions.length===1?"country":"countries"}: {src.jurisdictions.slice(0,6).map(j=>j.jurisdiction).join(", ")}{src.jurisdictions.length>6?(" +"+(src.jurisdictions.length-6)+" more"):""}
+                  </div>
+                )}
               </div>
-              <NeoButton kind="soft" size="sm" disabled={!!scanning} onClick={()=>scan(src)}>{scanning===src.id?"Scanning…":"Scan"}</NeoButton>
+              <NeoButton kind="soft" size="sm" disabled={!!scanning} onClick={()=>scan(src)} title={"Read what "+src.host+" publishes for "+(siteJx||"your jurisdiction")}>{scanning===src.id?"Scanning…":("Scan"+(siteJx?(" for "+siteJx):""))}</NeoButton>
               <NeoButton kind="ghost" size="sm" disabled={!!scanning} onClick={()=>remove(src)} title="Remove this competitor from your list">Remove</NeoButton>
             </div>
           ))}

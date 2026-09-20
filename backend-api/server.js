@@ -4708,7 +4708,8 @@ const routes = {
   // Saved competitors for this site (seeded from sites.competitors on first open).
   'POST /competitor-sources': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    return { sources: await competitorSourcesFor(body.siteId) };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    return { sources: await competitorSourcesFor(body.siteId), siteJurisdiction: marketFor(site && site.semrush_db).country };
   },
   // Add a competitor website or sitemap URL (de-duped by host). Returns the full list.
   'POST /competitor-source-save': async (body) => {
@@ -4742,17 +4743,22 @@ const routes = {
     else if (body.id) { const one = list.find((x) => x.id === body.id); if (!one) return { error: 'That competitor is no longer saved.' }; targets = [one]; }
     else targets = list;
     if (!targets.length) return { ok: true, saved: 0, perSource: [], note: 'No competitors saved yet — add a competitor website above.' };
-    const r = await engine.ingestCompetitorSitemap(body.siteId, targets);
-    // Record scan stats back onto the saved sources.
+    // Scan for ONE jurisdiction: body.jurisdiction (a top-bar market label) or the site's current market.
+    const pollSite = await db.getSite(body.siteId).catch(() => null);
+    const jurisdiction = String(body.jurisdiction || marketFor(pollSite && pollSite.semrush_db).country);
+    const r = await engine.ingestCompetitorSitemap(body.siteId, targets, { jurisdiction });
+    // Record scan stats back onto the saved sources (incl. every jurisdiction they cover).
     if (!body.url && Array.isArray(r.perSource)) {
       const now = new Date().toISOString();
       for (const ps of r.perSource) {
         const s = list.find((x) => x.id === ps.id); if (!s) continue;
-        s.lastScanAt = now; s.lastFound = ps.made || 0; s.lastError = ps.error || null; s.sitemap = ps.sitemap || s.sitemap || null;
+        s.lastScanAt = now; s.lastScanFor = ps.scannedFor || jurisdiction; s.lastFound = ps.made || 0; s.lastMatched = ps.matched || 0; s.lastError = ps.error || null; s.sitemap = ps.sitemap || s.sitemap || null;
+        if (Array.isArray(ps.jurisdictions)) s.jurisdictions = ps.jurisdictions.slice(0, 40);
+        s.scannedFor = [...new Set([...(Array.isArray(s.scannedFor) ? s.scannedFor : []), ps.scannedFor || jurisdiction])];
       }
       await saveCompetitorSources(body.siteId, list).catch(() => {});
     }
-    return { ok: !r.error, ...r, sources: list };
+    return { ok: !r.error, ...r, sources: list, siteJurisdiction: jurisdiction };
   },
   // Everything scanned from competitors (source 'competitor_sitemap'), EVERY status —
   // so the user can see what's new vs already pushed vs hidden. Optional competitor filter.
@@ -4775,7 +4781,8 @@ const routes = {
       .filter((o) => !want || String(o.competitor).toLowerCase() === want)
       .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || (b.score - a.score));
     const counts = { total: items.length, new: items.filter((i) => i.status === 'scored').length, pushed: items.filter((i) => ['queued', 'in_review', 'published', 'done'].includes(i.status)).length, hidden: items.filter((i) => i.status === 'dismissed').length };
-    return { items, counts };
+    const itemsSite = await db.getSite(body.siteId).catch(() => null);
+    return { items, counts, siteJurisdiction: marketFor(itemsSite && itemsSite.semrush_db).country };
   },
 
   // One radar item → a writer-ready brief in the Article Writer (Status BLANK).
