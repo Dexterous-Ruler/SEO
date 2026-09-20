@@ -1965,6 +1965,7 @@ function CompetitorsScreen({ ctx }) {
   const [compFilter,setCompFilter] = useState("");
   const [jxFilter,setJxFilter] = useState("");      // jurisdiction the competitor wrote the piece for
   const [jxTouched,setJxTouched] = useState(false); // user picked a jurisdiction filter themselves (stop auto-following the top bar)
+  const [typeFilter,setTypeFilter] = useState("");  // content type (smart template, legal definition…) — split the list by what you're working on
   const [types,setTypes] = useState({});            // item id → content type chosen before push
   const [busyId,setBusyId] = useState("");
   const [shown,setShown] = useState(100);          // rows rendered so far (client-side "Show more" — the list itself is unlimited)
@@ -1989,10 +1990,10 @@ function CompetitorsScreen({ ctx }) {
       setNotProv(false); setItems((r&&r.items)||[]); setCounts((r&&r.counts)||{}); if(r&&r.siteJurisdiction) setSiteJx(r.siteJurisdiction);
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setLoading(false));
   };
-  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setJxFilter(""); setFilter("new"); setShown(100); setPushJx([]); setPushOpen(false); if(live){ loadSources(); loadItems(); } },[s.id]);
+  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setJxFilter(""); setTypeFilter(""); setFilter("new"); setShown(100); setPushJx([]); setPushOpen(false); if(live){ loadSources(); loadItems(); } },[s.id]);
   // Top-bar jurisdiction changed → refresh the label (and the auto filter follows it).
   useEffect(()=>{ if(live) loadSources(); },[s.semrush_db]);
-  useEffect(()=>{ setShown(100); },[filter,compFilter,jxFilter]);
+  useEffect(()=>{ setShown(100); },[filter,compFilter,jxFilter,typeFilter]);
   // Follow the top-bar Jurisdiction: when it changes, go back to auto mode…
   useEffect(()=>{ setJxTouched(false); },[s.semrush_db]);
   // …and in auto mode, pre-filter to the site's jurisdiction when any pieces carry it
@@ -2065,8 +2066,10 @@ function CompetitorsScreen({ ctx }) {
   const visible = items
     .filter(it=> filter==="all" || (filter==="new"&&it.status==="scored") || (filter==="pushed"&&isPushed(it.status)) || (filter==="hidden"&&it.status==="dismissed"))
     .filter(it=> !compFilter || it.competitor===compFilter)
-    .filter(it=> !jxFilter || (it.jurisdiction||"Not stated")===jxFilter);
+    .filter(it=> !jxFilter || (it.jurisdiction||"Not stated")===jxFilter)
+    .filter(it=> !typeFilter || (types[it.id]||it.suggestedType||"blog")===typeFilter);
   const comps = [...new Set(items.map(i=>i.competitor).filter(Boolean))].sort();
+  const typeCounts = {}; for(const it of items){ const t=types[it.id]||it.suggestedType||"blog"; typeCounts[t]=(typeCounts[t]||0)+1; }
   const jxs = [...new Set(items.map(i=>i.jurisdiction||"Not stated"))].sort((a,b)=>(a==="Not stated")-(b==="Not stated")||a.localeCompare(b));
   const fmtDate = (d)=>{ if(!d) return "never"; try{ return new Date(d).toLocaleDateString(undefined,{ day:"numeric", month:"short" }); }catch(e){ return ""; } };
   const inp = { padding:"10px 13px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none" };
@@ -2135,6 +2138,12 @@ function CompetitorsScreen({ ctx }) {
             <FilterBtn k="hidden" label="Hidden" n={counts.hidden} />
             <FilterBtn k="all" label="All" n={counts.total} />
             <div style={{ display:"inline-flex", gap:8, marginLeft:"auto", flexWrap:"wrap" }}>
+              {TYPES.length>1 && (
+                <select value={typeFilter} onChange={e=>setTypeFilter(e.target.value)} style={sel} title="Show one content type only — split the list by what you're working on">
+                  <option value="">All types</option>
+                  {TYPES.map(([v,l])=><option key={v} value={v}>{l}{typeCounts[v]?(" · "+Number(typeCounts[v]).toLocaleString()):""}</option>)}
+                </select>
+              )}
               {comps.length>1 && (
                 <select value={compFilter} onChange={e=>setCompFilter(e.target.value)} style={sel} title="Show topics from one competitor only">
                   <option value="">All competitors</option>
