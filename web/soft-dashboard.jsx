@@ -1974,8 +1974,13 @@ function CompetitorsScreen({ ctx }) {
   // The site's current jurisdiction (top-bar picker → semrush_db), as the backend labels it —
   // the SAME label competitor pieces are tagged with, so scans + the list follow the top bar.
   const [siteJx,setSiteJx] = useState("");
+  // Push each topic to these jurisdictions (one Article Writer row per country, written in
+  // that country's language by the n8n writer). Defaults to the current top-bar jurisdiction.
+  const [jxOptions,setJxOptions] = useState([]);   // [{db,label,language}] the writer can produce
+  const [pushJx,setPushJx] = useState([]);         // labels currently selected
+  const [pushOpen,setPushOpen] = useState(false);
 
-  const loadSources = ()=>{ if(!live) return; API.competitorSources(s.id).then(r=>{ setSources((r&&r.sources)||[]); if(r&&r.siteJurisdiction) setSiteJx(r.siteJurisdiction); }).catch(()=>{}); };
+  const loadSources = ()=>{ if(!live) return; API.competitorSources(s.id).then(r=>{ setSources((r&&r.sources)||[]); if(r&&r.siteJurisdiction){ setSiteJx(r.siteJurisdiction); setPushJx(p=>p.length?p:[r.siteJurisdiction]); } if(r&&Array.isArray(r.jurisdictionOptions)) setJxOptions(r.jurisdictionOptions); }).catch(()=>{}); };
   const loadItems = ()=>{
     if(!live) return;
     setLoading(true);
@@ -1984,7 +1989,7 @@ function CompetitorsScreen({ ctx }) {
       setNotProv(false); setItems((r&&r.items)||[]); setCounts((r&&r.counts)||{}); if(r&&r.siteJurisdiction) setSiteJx(r.siteJurisdiction);
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setLoading(false));
   };
-  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setJxFilter(""); setFilter("new"); setShown(100); if(live){ loadSources(); loadItems(); } },[s.id]);
+  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setJxFilter(""); setFilter("new"); setShown(100); setPushJx([]); setPushOpen(false); if(live){ loadSources(); loadItems(); } },[s.id]);
   // Top-bar jurisdiction changed → refresh the label (and the auto filter follows it).
   useEffect(()=>{ if(live) loadSources(); },[s.semrush_db]);
   useEffect(()=>{ setShown(100); },[filter,compFilter,jxFilter]);
@@ -2041,16 +2046,19 @@ function CompetitorsScreen({ ctx }) {
   const push = (it)=>{
     if(busyId) return;
     const type = types[it.id] || it.suggestedType || (TYPES[0]&&TYPES[0][0]) || "blog";
+    const jxs = pushJx.length ? pushJx : (siteJx ? [siteJx] : []);
     setBusyId(it.id);
-    API.engineAutodraft(s.id,{ ids:[it.id], category:type }).then(r=>{
+    API.engineAutodraft(s.id, Object.assign({ ids:[it.id], category:type }, jxs.length?{ jurisdictions: jxs }:{})).then(r=>{
       if(r && r.notProvisioned){ setNotProv(true); return; }
       if(r && r.skipped){ ctx.toast(r.reason||"Couldn't push — connect the Airtable Article Writer first","gold"); loadItems(); return; }
       if(r && r.error){ ctx.toast("Push: "+r.error,"clay"); return; }
       const n=(r&&r.drafted!=null)?r.drafted:0;
-      ctx.toast(n>0?("Pushed to the writer as "+typeLabel(type)+" ✓ — marked done"):(r&&r.skippedDup?"Already in the Article Writer — marked done":"Nothing pushed"), n>0?"teal":"gold");
+      const where = jxs.length>1 ? (n+" jurisdiction"+(n===1?"":"s")+" ("+Object.keys(r.perJurisdiction||{}).join(", ")+")") : "the writer";
+      ctx.toast(n>0?("Pushed to "+where+" as "+typeLabel(type)+" ✓ — marked done"+((r.skippedDup||0)>0?(" · "+r.skippedDup+" already there"):"")):(r&&r.skippedDup?"Already in the Article Writer for those jurisdictions — marked done":"Nothing pushed"), n>0?"teal":"gold");
       loadItems();
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
   };
+  const togglePushJx = (label)=> setPushJx(p=> p.includes(label) ? p.filter(x=>x!==label) : [...p,label]);
   const hide = (it)=>{ setBusyId(it.id); API.engineDismiss(it.id).then(()=>loadItems()).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId("")); };
   const unhide = (it)=>{ setBusyId(it.id); API.engineSetStatus(it.id,"scored").then(()=>loadItems()).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId("")); };
 
@@ -2142,6 +2150,32 @@ function CompetitorsScreen({ ctx }) {
             </div>
           </div>
           <div style={{ fontSize:12, color:"var(--muted)", marginBottom:8 }}>Each topic shows which competitor it came from and which country it was written for. Pick a content type, then <b>Push to writer</b> — it moves to <b>Pushed</b> so you know it's done. Results are saved, so you never re-scan to see them, and a re-scan never brings back anything you've already pushed or hidden.</div>
+          {/* Multi-jurisdiction push: one writer row per selected country, in that country's language. */}
+          {jxOptions.length>0 && (
+            <div style={{ marginBottom:10, padding:"9px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+              <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", fontSize:12.5 }}>
+                <span style={{ color:"var(--muted)" }}>Push each topic to:</span>
+                <b style={{ color:"var(--ink)" }}>{pushJx.length?pushJx.join(", "):"(choose a jurisdiction)"}</b>
+                <button onClick={()=>setPushOpen(o=>!o)} style={{ border:"none", background:"transparent", color:"var(--t-700)", fontWeight:700, cursor:"pointer", fontSize:12.5, padding:0 }}>{pushOpen?"Done":"Change"}</button>
+                {pushJx.length>1 && <span style={{ color:"var(--muted)" }}>· one article per country, each written in that country's language</span>}
+              </div>
+              {pushOpen && (
+                <div style={{ marginTop:8 }}>
+                  <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:8 }}>
+                    <button onClick={()=>setPushJx(jxOptions.map(o=>o.label))} className="neo-btn" style={{ padding:"5px 10px", borderRadius:"var(--r-pill)", border:"none", cursor:"pointer", fontSize:12, fontWeight:700, background:"var(--surface)", boxShadow:"var(--neo-xs)", color:"var(--ink)" }}>Select all ({jxOptions.length})</button>
+                    <button onClick={()=>setPushJx(siteJx?[siteJx]:[])} className="neo-btn" style={{ padding:"5px 10px", borderRadius:"var(--r-pill)", border:"none", cursor:"pointer", fontSize:12, fontWeight:700, background:"var(--surface)", boxShadow:"var(--neo-xs)", color:"var(--ink)" }}>Just {siteJx||"current"}</button>
+                  </div>
+                  <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                    {jxOptions.map(o=>{ const on=pushJx.includes(o.label); return (
+                      <button key={o.label} onClick={()=>togglePushJx(o.label)} title={"Written in "+o.language} style={{ padding:"5px 10px", borderRadius:"var(--r-pill)", border:"none", cursor:"pointer", fontSize:12, fontWeight:700, background:on?"var(--t-100)":"var(--surface)", boxShadow:on?"var(--neo-in)":"var(--neo-xs)", color:on?"var(--t-700)":"var(--muted)" }}>
+                        {on?"✓ ":""}{o.label}<span style={{ fontWeight:500, opacity:.75 }}> · {o.language}</span>
+                      </button>); })}
+                  </div>
+                  <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:8 }}>Only countries your writer can produce are listed. The same topic is never pushed twice for the same country.</div>
+                </div>
+              )}
+            </div>
+          )}
           {siteJx && jxFilter===siteJx && (
             <div style={{ fontSize:12, color:"var(--t-700)", marginBottom:8, fontWeight:600 }}>Showing pieces written for <b>{siteJx}</b> — your current jurisdiction (top bar). Choose “All jurisdictions” to see everything.</div>
           )}
@@ -2173,7 +2207,7 @@ function CompetitorsScreen({ ctx }) {
               )}
               {isPushed(it.status) && <span style={{ fontSize:12, fontWeight:700, color:"var(--t-700)", background:"var(--t-50)", padding:"5px 10px", borderRadius:"var(--r-pill)" }}>Pushed ✓</span>}
               {it.status==="dismissed" && <span style={{ fontSize:12, fontWeight:700, color:"var(--muted)", background:"var(--bg)", padding:"5px 10px", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-in)" }}>Hidden</span>}
-              {it.status==="scored" && <NeoButton kind="primary" size="sm" disabled={busyId===it.id} onClick={()=>push(it)} title="Create this in your Article Writer and mark it done here">{busyId===it.id?"Pushing…":"Push to writer"}</NeoButton>}
+              {it.status==="scored" && <NeoButton kind="primary" size="sm" disabled={busyId===it.id} onClick={()=>push(it)} title={pushJx.length>1?("Create this in your Article Writer for "+pushJx.length+" jurisdictions ("+pushJx.join(", ")+") and mark it done here"):"Create this in your Article Writer and mark it done here"}>{busyId===it.id?"Pushing…":(pushJx.length>1?("Push to "+pushJx.length+" jurisdictions"):"Push to writer")}</NeoButton>}
               {it.status==="scored" && <NeoButton kind="ghost" size="sm" disabled={busyId===it.id} onClick={()=>hide(it)} title="Not interested — hide it">Hide</NeoButton>}
               {it.status==="dismissed" && <NeoButton kind="ghost" size="sm" disabled={busyId===it.id} onClick={()=>unhide(it)}>Unhide</NeoButton>}
             </div>

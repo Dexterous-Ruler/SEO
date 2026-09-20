@@ -959,7 +959,36 @@ async function draftAnswerBlocks(siteId, n) {
   return { drafted: inReview, inReview, failed, candidates: items.length, kind: 'answer_block' };
 }
 
-export async function autoDraft(siteId, { topN = 5, actionType, ids, category } = {}) {
+// The jurisdictions a site's writer can actually produce. go-legal.ai's n8n multilingual
+// writer resolves exactly these 16 (its Country Language Config COUNTRIES map) and THROWS
+// on anything else — so only offer those there. Other sites: every top-bar market.
+const WRITER_JX_GO_LEGAL_AI = ['United Kingdom', 'United States', 'Canada', 'Australia', 'India', 'Philippines', 'UAE', 'Pakistan', 'Hong Kong', 'France', 'Germany', 'Spain', 'Sweden', 'Finland', 'Colombia', 'China'];
+export function jurisdictionOptionsFor(site) {
+  const all = dfs.COUNTRIES.map((c) => ({ db: c.db, label: c.label, language: c.language_name }));
+  const n = ((site && site.name) || '') + ' ' + ((site && site.url) || '');
+  if (!/go-?legal\.ai/i.test(n)) return all;
+  const want = new Set(WRITER_JX_GO_LEGAL_AI);
+  const list = all.filter((o) => want.has(o.label));
+  if (!list.some((o) => o.label === 'China')) list.push({ db: 'cn', label: 'China', language: 'Chinese (Simplified)' });
+  return list;
+}
+// Market objects for a list of top-bar labels ("United Kingdom", "UAE"…). Unknown labels
+// still yield a market (English) so the Jurisdiction cell carries the name the writer
+// resolves. Empty → just the default market (today's single-jurisdiction behaviour).
+function marketsForLabels(labels, defaultMarket) {
+  const list = (Array.isArray(labels) ? labels : []).map((l) => String(l || '').trim()).filter(Boolean);
+  if (!list.length) return [defaultMarket];
+  const byLabel = new Map(dfs.COUNTRIES.map((c) => [c.label.toLowerCase(), c]));
+  const out = []; const seen = new Set();
+  for (const l of list) {
+    const key = l.toLowerCase(); if (seen.has(key)) continue; seen.add(key);
+    const c = byLabel.get(key);
+    out.push(c ? marketFor(c.db) : { db: null, country: l, language: l === 'China' ? 'Chinese (Simplified)' : 'English', currency: '', geo: '', preferDomains: [], scope: '' });
+  }
+  return out;
+}
+
+export async function autoDraft(siteId, { topN = 5, actionType, ids, category, jurisdictions } = {}) {
   if (!siteId) return { error: 'No site selected.' };
   const n = Math.min(Math.max(Number(topN) || 5, 1), 50);
   const idList = Array.isArray(ids) ? ids.filter(Boolean) : (ids ? [ids] : []);
@@ -1016,42 +1045,56 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids, category } 
     if (!names.has(col)) { try { const c = await airtable.ensureField(pat, baseId, tbl.id, col, 'singleLineText'); if (c) names.add(c); } catch (e) {} }
   }
 
-  // 3) Map each opportunity → an Article Writer row (Title + Keyword + brief),
-  //    field-set-filtered so a differing per-site schema can't 422.
-  const rowById = new Map();   // opportunity id → { row, keyword }
+  // 3) Map each opportunity → ONE Article Writer row PER JURISDICTION (Karim: "an NDA is
+  //    relevant for every jurisdiction — push it to Airtable for all of them, in the right
+  //    language"). `jurisdictions` = top-bar labels; default = the site's own market. The
+  //    n8n writer derives the language from the Jurisdiction cell, so the France row is
+  //    written in French, Germany in German, etc. Field-set-filtered so a differing
+  //    per-site schema can't 422. `category` (per-push override) wins over anything stored.
+  const markets = marketsForLabels(jurisdictions, market);
+  const planned = [];   // { id, row, keyword, jurisdiction, key: 'keyword|jurisdiction' }
   for (const it of items) {
     const cluster = oppToCluster(it);
     const brief = (it.payload && it.payload.brief && typeof it.payload.brief === 'object') ? it.payload.brief : {};
-    // `category` (per-push override, e.g. the type picked on the Competitors screen) wins over
-    // anything stored on the opportunity; else the auto-suggested type; else Blog.
-    const row = airtable.mapArticleBrief(cluster, brief, briefField, names, airtable.normalizeCategory(category || (it.payload && (it.payload.category || it.payload.suggestedType)) || (cluster && cluster.category)), market);
-    if (row && row.Keyword) rowById.set(it.id, { row, keyword: String(row.Keyword).trim().toLowerCase() });
+    const cat = airtable.normalizeCategory(category || (it.payload && (it.payload.category || it.payload.suggestedType)) || (cluster && cluster.category));
+    for (const mk of markets) {
+      const row = airtable.mapArticleBrief(cluster, brief, briefField, names, cat, mk);
+      if (!row || !row.Keyword) continue;
+      const keyword = String(row.Keyword).trim().toLowerCase();
+      planned.push({ id: it.id, row, keyword, jurisdiction: mk.country, key: keyword + '|' + String(mk.country || '').toLowerCase() });
+    }
   }
-  if (!rowById.size) return { drafted: 0, skipped: true, reason: 'nothing mappable to draft', candidates: items.length };
+  if (!planned.length) return { drafted: 0, skipped: true, reason: 'nothing mappable to draft', candidates: items.length };
 
-  // De-dupe by Keyword (case-insensitive) against rows already in the table.
+  // De-dupe by (Keyword, Jurisdiction) against rows already in the table, so the same
+  // keyword CAN exist once per country but never twice for the same one. An older row with
+  // no Jurisdiction cell counts as the site's default market.
   const existing = new Set();
   try {
     let offset;
     do {
-      const page = await airtable.listRecords(pat, baseId, tbl.id, { pageSize: 100, offset, fields: ['Keyword'] });
-      for (const rec of (page.records || [])) { const v = String((rec.fields || {}).Keyword || '').trim().toLowerCase(); if (v) existing.add(v); }
+      const page = await airtable.listRecords(pat, baseId, tbl.id, { pageSize: 100, offset, fields: ['Keyword', 'Jurisdiction'] });
+      for (const rec of (page.records || [])) {
+        const f = rec.fields || {};
+        const kw = String(f.Keyword || '').trim().toLowerCase(); if (!kw) continue;
+        existing.add(kw + '|' + String(f.Jurisdiction || market.country || '').trim().toLowerCase());
+      }
       offset = page.offset;
     } while (offset);
   } catch (e) { /* read failed → treat as none existing */ }
 
-  const toCreate = [], draftedIds = [], dupIds = [], seen = new Set();
+  const toCreate = [], seen = new Set(), createdIds = new Set(), dupIds = new Set();
+  const perJurisdiction = {};
   let skippedDup = 0;
-  for (const [id, { row, keyword }] of rowById) {
-    if (keyword && (existing.has(keyword) || seen.has(keyword))) { skippedDup++; dupIds.push(id); continue; }
-    if (keyword) seen.add(keyword);
-    toCreate.push(row);
-    draftedIds.push(id);
+  for (const p of planned) {
+    if (existing.has(p.key) || seen.has(p.key)) { skippedDup++; dupIds.add(p.id); continue; }
+    seen.add(p.key);
+    toCreate.push(p.row); createdIds.add(p.id);
+    perJurisdiction[p.jurisdiction] = (perJurisdiction[p.jurisdiction] || 0) + 1;
   }
-  // A duplicate IS in the writer already — flip it to 'queued' so it stops squatting
-  // in the scored top-N window. (Previously it stayed 'scored' forever, and once the
-  // top N were all dups, auto-draft never drafted anything again — the auto-pilot wedge.)
-  for (const id of dupIds) await setStatus(id, 'queued').catch(() => null);
+  // An item whose every jurisdiction is already in the writer → flip it to 'queued' so it
+  // stops squatting in the scored top-N window (the auto-pilot wedge).
+  for (const id of dupIds) if (!createdIds.has(id)) await setStatus(id, 'queued').catch(() => null);
   if (!toCreate.length) return { drafted: 0, skipped: true, reason: 'all candidates already in Article Writer table (now marked queued)', candidates: items.length, skippedDup };
 
   // 4) Push to the n8n-watched table, then flip the drafted opportunities → 'queued'.
@@ -1060,9 +1103,9 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids, category } 
   catch (e) { return { error: `Article Writer push → ${String(e.message || e)}`, drafted: 0, candidates: items.length }; }
 
   let queued = 0;
-  for (const id of draftedIds) { const r = await setStatus(id, 'queued').catch(() => null); if (r && r.updated) queued++; }
+  for (const id of createdIds) { const r = await setStatus(id, 'queued').catch(() => null); if (r && r.updated) queued++; }
 
-  return { drafted: pushed, queued, skippedDup, candidates: items.length, table: tbl.name };
+  return { drafted: pushed, queued, skippedDup, candidates: items.length, table: tbl.name, jurisdictions: markets.map((m) => m.country), perJurisdiction };
 }
 
 // ---- 12) syncPublished -----------------------------------------------------

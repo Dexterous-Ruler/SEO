@@ -4616,7 +4616,7 @@ const routes = {
   // → { drafted, queued, skippedDup, candidates, table } | { skipped, reason } | { notProvisioned }.
   'POST /engine-autodraft': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    return engine.autoDraft(body.siteId, { topN: body.topN, actionType: body.actionType, ids: body.ids, category: body.category });
+    return engine.autoDraft(body.siteId, { topN: body.topN, actionType: body.actionType, ids: body.ids, category: body.category, jurisdictions: body.jurisdictions });
   },
 
   // Close the loop opposite autodraft: read the n8n-watched Article Writer table
@@ -4709,7 +4709,7 @@ const routes = {
   'POST /competitor-sources': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
     const site = await db.getSite(body.siteId).catch(() => null);
-    return { sources: await competitorSourcesFor(body.siteId), siteJurisdiction: marketFor(site && site.semrush_db).country };
+    return { sources: await competitorSourcesFor(body.siteId), siteJurisdiction: marketFor(site && site.semrush_db).country, jurisdictionOptions: engine.jurisdictionOptionsFor(site) };
   },
   // Add a competitor website or sitemap URL (de-duped by host). Returns the full list.
   'POST /competitor-source-save': async (body) => {
@@ -4776,8 +4776,12 @@ const routes = {
     const wl = { items: all };
     const want = body.competitor ? String(body.competitor).toLowerCase() : '';
     const order = { scored: 0, in_review: 1, queued: 2, published: 3, done: 3, dismissed: 4 };
+    // Rows scanned before the full-country detector carry short labels; normalise on read so
+    // they match the top-bar labels (a re-scan rewrites them permanently).
+    const LEGACY_JX = { UK: 'United Kingdom', US: 'United States' };
+    const jxOf = (o) => { const j = (o.payload && o.payload.jurisdiction) || 'Not stated'; return LEGACY_JX[j] || j; };
     const items = (wl.items || [])
-      .map((o) => ({ id: o.id, title: o.title, score: o.score, status: o.status, competitor: (o.payload && o.payload.competitor) || '', link: o.payload && o.payload.link, suggestedType: (o.payload && (o.payload.category || o.payload.suggestedType)) || 'blog', jurisdiction: (o.payload && o.payload.jurisdiction) || 'Not stated', primaryKeyword: o.primary_keyword, createdAt: o.created_at || null, updatedAt: o.updated_at || null }))
+      .map((o) => ({ id: o.id, title: o.title, score: o.score, status: o.status, competitor: (o.payload && o.payload.competitor) || '', link: o.payload && o.payload.link, suggestedType: (o.payload && (o.payload.category || o.payload.suggestedType)) || 'blog', jurisdiction: jxOf(o), primaryKeyword: o.primary_keyword, createdAt: o.created_at || null, updatedAt: o.updated_at || null }))
       .filter((o) => !want || String(o.competitor).toLowerCase() === want)
       .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || (b.score - a.score));
     const counts = { total: items.length, new: items.filter((i) => i.status === 'scored').length, pushed: items.filter((i) => ['queued', 'in_review', 'published', 'done'].includes(i.status)).length, hidden: items.filter((i) => i.status === 'dismissed').length };
