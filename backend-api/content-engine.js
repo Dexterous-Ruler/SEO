@@ -502,6 +502,36 @@ function suggestTypeFor(site, title, url) {
   return 'blog';
 }
 
+// Best-effort jurisdiction of a competitor page (Karim: "the content doesn't tell me which
+// jurisdiction the competitor wrote it for"). Signals, strongest first: a locale segment in
+// the URL (/uk/, /en-us/…), a country word in the title, then the domain's country TLD
+// (.co.uk, .com.au…). "Not stated" when nothing signals it (.com/.io with no other hint).
+const JX_PATH = { 'en-gb': 'UK', 'uk': 'UK', 'gb': 'UK', 'en-us': 'US', 'us': 'US', 'usa': 'US', 'en-ca': 'Canada', 'ca': 'Canada', 'en-au': 'Australia', 'au': 'Australia', 'en-in': 'India', 'in': 'India', 'en-ie': 'Ireland', 'ie': 'Ireland', 'en-nz': 'New Zealand', 'nz': 'New Zealand', 'en-ae': 'UAE', 'ae': 'UAE', 'en-sg': 'Singapore', 'sg': 'Singapore', 'en-za': 'South Africa', 'za': 'South Africa', 'de-de': 'Germany', 'de': 'Germany', 'fr-fr': 'France', 'fr': 'France', 'es-es': 'Spain', 'es': 'Spain', 'it-it': 'Italy', 'it': 'Italy', 'nl-nl': 'Netherlands', 'nl': 'Netherlands' };
+const JX_TLD = { 'co.uk': 'UK', 'org.uk': 'UK', 'me.uk': 'UK', 'uk': 'UK', 'ie': 'Ireland', 'com.au': 'Australia', 'net.au': 'Australia', 'au': 'Australia', 'co.nz': 'New Zealand', 'nz': 'New Zealand', 'ca': 'Canada', 'co.in': 'India', 'in': 'India', 'ae': 'UAE', 'sg': 'Singapore', 'com.sg': 'Singapore', 'co.za': 'South Africa', 'za': 'South Africa', 'de': 'Germany', 'fr': 'France', 'es': 'Spain', 'it': 'Italy', 'nl': 'Netherlands', 'us': 'US' };
+const JX_WORDS = [
+  [/\b(uk|united kingdom|england|wales|scotland|british|hmrc|companies house|england and wales)\b/i, 'UK'],
+  [/\b(usa|united states|american|california|texas|new york|florida|delaware|irs)\b/i, 'US'],
+  [/\b(australia|australian|nsw|queensland)\b/i, 'Australia'],
+  [/\b(canada|canadian|ontario|british columbia|quebec)\b/i, 'Canada'],
+  [/\b(india|indian)\b/i, 'India'], [/\b(ireland|irish)\b/i, 'Ireland'],
+  [/\b(uae|dubai|abu dhabi|emirates)\b/i, 'UAE'], [/\b(new zealand)\b/i, 'New Zealand'],
+  [/\b(singapore)\b/i, 'Singapore'], [/\b(south africa)\b/i, 'South Africa'],
+];
+const GENERIC_TLD = new Set(['com', 'net', 'org', 'io', 'co', 'app', 'ai', 'legal', 'law', 'info', 'biz', 'me', 'xyz', 'online', 'site', 'dev']);
+function inferJurisdiction(host, url, title) {
+  try {
+    const segs = new URL(url).pathname.toLowerCase().split('/').filter(Boolean);
+    for (const seg of segs.slice(0, 2)) if (JX_PATH[seg]) return JX_PATH[seg];
+  } catch {}
+  const t = String(title || '');
+  for (const [re, j] of JX_WORDS) if (re.test(t)) return j;
+  const parts = String(host || '').toLowerCase().split('.');
+  const two = parts.slice(-2).join('.'); const one = parts.slice(-1)[0];
+  if (JX_TLD[two]) return JX_TLD[two];
+  if (!GENERIC_TLD.has(one) && JX_TLD[one]) return JX_TLD[one];
+  return 'Not stated';
+}
+
 // `inputs` = saved competitor sources [{ id, url, label }] (or plain URL strings).
 // Returns per-source stats keyed back by id so the caller can record lastScan/lastFound.
 export async function ingestCompetitorSitemap(siteId, inputs) {
@@ -539,7 +569,7 @@ export async function ingestCompetitorSitemap(siteId, inputs) {
         intent: 'informational',
         actionType: 'article',
         evidence: [{ source: 'competitor_sitemap', detail: `A competitor covers this: ${comp}` }],
-        payload: { link: u, competitor: comp, competitorSourceId: src.id || null, fromCompetitor: true, sourceType: 'competitor_sitemap', suggestedType },
+        payload: { link: u, competitor: comp, competitorSourceId: src.id || null, fromCompetitor: true, sourceType: 'competitor_sitemap', suggestedType, jurisdiction: inferJurisdiction(comp, u, title) },
       });
       o.dedupeKey = 'csm:' + feedHash(String(u).replace(/[#?].*$/, '').toLowerCase());
       score(o, scoreSite);
@@ -575,7 +605,7 @@ export async function persist(siteId, opps) {
     const inList = keys.map((k) => `"${String(k).replace(/"/g, '')}"`).join(',');
     const existing = {};
     if (inList) {
-      const res = await fetch(`${SB}/rest/v1/content_opportunities?site_id=eq.${encodeURIComponent(siteId)}&dedupe_key=in.(${encodeURIComponent(inList)})&select=dedupe_key,score,evidence`, { headers: headers() });
+      const res = await fetch(`${SB}/rest/v1/content_opportunities?site_id=eq.${encodeURIComponent(siteId)}&dedupe_key=in.(${encodeURIComponent(inList)})&select=dedupe_key,score,evidence,status`, { headers: headers() });
       const text = await res.text();
       if (!res.ok) {
         if (isMissingTable(res.status, text)) return NOT_PROVISIONED;
@@ -594,6 +624,11 @@ export async function persist(siteId, opps) {
         for (const e of (Array.isArray(prev.evidence) ? prev.evidence : [])) {
           const k = `${e.source}|${e.detail}`; if (!seen.has(k)) { row.evidence.push(e); seen.add(k); }
         }
+        // NEVER let a re-scan / re-poll reset progress: a row the user already pushed
+        // (queued/in_review/published/done) or hid (dismissed) keeps that status. Without
+        // this, merge-duplicates overwrote it with 'scored' and "Pushed ✓" items came
+        // back as "New" — exactly the duplicate-content risk Karim flagged.
+        if (prev.status && prev.status !== 'scored') row.status = prev.status;
       }
       return row;
     });

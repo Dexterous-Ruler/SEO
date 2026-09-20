@@ -4771,7 +4771,7 @@ const routes = {
     const want = body.competitor ? String(body.competitor).toLowerCase() : '';
     const order = { scored: 0, in_review: 1, queued: 2, published: 3, done: 3, dismissed: 4 };
     const items = (wl.items || [])
-      .map((o) => ({ id: o.id, title: o.title, score: o.score, status: o.status, competitor: (o.payload && o.payload.competitor) || '', link: o.payload && o.payload.link, suggestedType: (o.payload && (o.payload.category || o.payload.suggestedType)) || 'blog', primaryKeyword: o.primary_keyword, createdAt: o.created_at || null, updatedAt: o.updated_at || null }))
+      .map((o) => ({ id: o.id, title: o.title, score: o.score, status: o.status, competitor: (o.payload && o.payload.competitor) || '', link: o.payload && o.payload.link, suggestedType: (o.payload && (o.payload.category || o.payload.suggestedType)) || 'blog', jurisdiction: (o.payload && o.payload.jurisdiction) || 'Not stated', primaryKeyword: o.primary_keyword, createdAt: o.created_at || null, updatedAt: o.updated_at || null }))
       .filter((o) => !want || String(o.competitor).toLowerCase() === want)
       .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || (b.score - a.score));
     const counts = { total: items.length, new: items.filter((i) => i.status === 'scored').length, pushed: items.filter((i) => ['queued', 'in_review', 'published', 'done'].includes(i.status)).length, hidden: items.filter((i) => i.status === 'dismissed').length };

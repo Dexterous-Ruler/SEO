@@ -1963,12 +1963,18 @@ function CompetitorsScreen({ ctx }) {
   const [notProv,setNotProv] = useState(false);
   const [filter,setFilter] = useState("new");      // new | pushed | hidden | all
   const [compFilter,setCompFilter] = useState("");
+  const [jxFilter,setJxFilter] = useState("");      // jurisdiction the competitor wrote the piece for
+  const [jxTouched,setJxTouched] = useState(false); // user picked a jurisdiction filter themselves (stop auto-following the top bar)
   const [types,setTypes] = useState({});            // item id → content type chosen before push
   const [busyId,setBusyId] = useState("");
   const [shown,setShown] = useState(100);          // rows rendered so far (client-side "Show more" — the list itself is unlimited)
   const TYPES = contentTypesFor(s);
   const typeLabel = (v)=>{ const t=TYPES.find(x=>x[0]===v); return t?t[1]:v; };
   const isPushed = (st)=>["queued","in_review","published","done"].includes(st);
+  // The site's current jurisdiction (top-bar picker → semrush_db) as the label the
+  // competitor pieces are tagged with, so the list can follow "I changed the jurisdiction".
+  const JX_OF_DB = { uk:"UK", us:"US", in:"India", ae:"UAE", au:"Australia", ca:"Canada", ie:"Ireland", nz:"New Zealand", sg:"Singapore", za:"South Africa", de:"Germany", fr:"France", es:"Spain", it:"Italy", nl:"Netherlands" };
+  const siteJx = JX_OF_DB[String(s.semrush_db||"uk").toLowerCase()] || "";
 
   const loadSources = ()=>{ if(!live) return; API.competitorSources(s.id).then(r=>setSources((r&&r.sources)||[])).catch(()=>{}); };
   const loadItems = ()=>{
@@ -1979,8 +1985,17 @@ function CompetitorsScreen({ ctx }) {
       setNotProv(false); setItems((r&&r.items)||[]); setCounts((r&&r.counts)||{});
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setLoading(false));
   };
-  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setFilter("new"); setShown(100); if(live){ loadSources(); loadItems(); } },[s.id]);
-  useEffect(()=>{ setShown(100); },[filter,compFilter]);
+  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setJxFilter(""); setFilter("new"); setShown(100); if(live){ loadSources(); loadItems(); } },[s.id]);
+  useEffect(()=>{ setShown(100); },[filter,compFilter,jxFilter]);
+  // Follow the top-bar Jurisdiction: when it changes, go back to auto mode…
+  useEffect(()=>{ setJxTouched(false); },[s.semrush_db]);
+  // …and in auto mode, pre-filter to the site's jurisdiction when any pieces carry it
+  // (else show all, so the list never looks empty just because a .com site is "Not stated").
+  useEffect(()=>{
+    if(jxTouched) return;
+    const d = (siteJx && items.some(i=>(i.jurisdiction||"")===siteJx)) ? siteJx : "";
+    if(d!==jxFilter) setJxFilter(d);
+  },[items,s.semrush_db,jxTouched]);
 
   const add = ()=>{
     const u=url.trim();
@@ -2031,8 +2046,10 @@ function CompetitorsScreen({ ctx }) {
 
   const visible = items
     .filter(it=> filter==="all" || (filter==="new"&&it.status==="scored") || (filter==="pushed"&&isPushed(it.status)) || (filter==="hidden"&&it.status==="dismissed"))
-    .filter(it=> !compFilter || it.competitor===compFilter);
+    .filter(it=> !compFilter || it.competitor===compFilter)
+    .filter(it=> !jxFilter || (it.jurisdiction||"Not stated")===jxFilter);
   const comps = [...new Set(items.map(i=>i.competitor).filter(Boolean))].sort();
+  const jxs = [...new Set(items.map(i=>i.jurisdiction||"Not stated"))].sort((a,b)=>(a==="Not stated")-(b==="Not stated")||a.localeCompare(b));
   const fmtDate = (d)=>{ if(!d) return "never"; try{ return new Date(d).toLocaleDateString(undefined,{ day:"numeric", month:"short" }); }catch(e){ return ""; } };
   const inp = { padding:"10px 13px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none" };
   const sel = { padding:"7px 10px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5, color:"var(--ink)", outline:"none" };
@@ -2091,14 +2108,28 @@ function CompetitorsScreen({ ctx }) {
             <FilterBtn k="pushed" label="Pushed" n={counts.pushed} />
             <FilterBtn k="hidden" label="Hidden" n={counts.hidden} />
             <FilterBtn k="all" label="All" n={counts.total} />
-            {comps.length>1 && (
-              <select value={compFilter} onChange={e=>setCompFilter(e.target.value)} style={{ ...sel, marginLeft:"auto" }} title="Show topics from one competitor only">
-                <option value="">All competitors</option>
-                {comps.map(c=><option key={c} value={c}>{c}</option>)}
-              </select>
-            )}
+            <div style={{ display:"inline-flex", gap:8, marginLeft:"auto", flexWrap:"wrap" }}>
+              {comps.length>1 && (
+                <select value={compFilter} onChange={e=>setCompFilter(e.target.value)} style={sel} title="Show topics from one competitor only">
+                  <option value="">All competitors</option>
+                  {comps.map(c=><option key={c} value={c}>{c}</option>)}
+                </select>
+              )}
+              {jxs.length>1 && (
+                <select value={jxFilter} onChange={e=>{ setJxFilter(e.target.value); setJxTouched(true); }} style={sel} title="Show only pieces the competitor wrote for one country">
+                  <option value="">All jurisdictions</option>
+                  {jxs.map(j=><option key={j} value={j}>{j}</option>)}
+                </select>
+              )}
+            </div>
           </div>
-          <div style={{ fontSize:12, color:"var(--muted)", marginBottom:8 }}>Each topic shows which competitor it came from. Pick a content type, then <b>Push to writer</b> — it moves to <b>Pushed</b> so you know it's done.</div>
+          <div style={{ fontSize:12, color:"var(--muted)", marginBottom:8 }}>Each topic shows which competitor it came from and which country it was written for. Pick a content type, then <b>Push to writer</b> — it moves to <b>Pushed</b> so you know it's done. Results are saved, so you never re-scan to see them, and a re-scan never brings back anything you've already pushed or hidden.</div>
+          {siteJx && jxFilter===siteJx && (
+            <div style={{ fontSize:12, color:"var(--t-700)", marginBottom:8, fontWeight:600 }}>Showing pieces written for <b>{siteJx}</b> — your current jurisdiction (top bar). Choose “All jurisdictions” to see everything.</div>
+          )}
+          {siteJx && !jxFilter && !jxTouched && items.length>0 && !items.some(i=>(i.jurisdiction||"")===siteJx) && (
+            <div style={{ fontSize:12, color:"var(--muted)", marginBottom:8 }}>None of these pieces are labelled for <b>{siteJx}</b> (your current jurisdiction), so all jurisdictions are shown. Many .com sites don't state a country.</div>
+          )}
           {loading && <div style={{ fontSize:13, color:"var(--muted)", padding:"8px 2px" }}>Loading…</div>}
           {!loading && !visible.length && (
             <div style={{ fontSize:13, color:"var(--muted)", padding:"8px 2px" }}>{items.length?"Nothing here for this filter.":"Nothing scanned yet — click Scan on a competitor above."}</div>
@@ -2109,6 +2140,9 @@ function CompetitorsScreen({ ctx }) {
                 <div style={{ fontSize:13.5, fontWeight:700, color:"var(--ink)", lineHeight:1.35 }}>{it.title}</div>
                 <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>
                   from <b>{it.competitor||"competitor"}</b>
+                  <span title="The country this competitor piece appears to be written for (from its web address, title or domain). “Not stated” = no clear signal." style={{ marginLeft:8, display:"inline-flex", alignItems:"center", gap:4, padding:"1px 8px", borderRadius:"var(--r-pill)", background:(it.jurisdiction&&it.jurisdiction!=="Not stated")?"var(--t-50)":"var(--bg)", color:(it.jurisdiction&&it.jurisdiction!=="Not stated")?"var(--t-700)":"var(--muted)", fontWeight:700, fontSize:11.5, boxShadow:"var(--neo-in)" }}>
+                    <Icon name="globe" size={11} /> {it.jurisdiction||"Not stated"}
+                  </span>
                   {it.link && <a href={it.link} target="_blank" rel="noopener noreferrer" style={{ marginLeft:8, color:"var(--t-700)", fontWeight:600 }}>view their page ↗</a>}
                 </div>
               </div>
