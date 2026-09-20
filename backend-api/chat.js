@@ -221,7 +221,7 @@ async function firecrawlScrape(url, timeoutMs = 20000) {
     return null;
   } catch (e) { return null; } finally { clearTimeout(t); }
 }
-async function readPage(url, siteId) {
+export async function readPage(url, siteId) {
   // 1) own-site via WP REST — read-only creds (a READ must not require write-armed).
   //    12s bound: WordPressClient.request has no AbortSignal and retries up to 4×, so a
   //    hanging origin could otherwise burn the whole request budget inside this tier.

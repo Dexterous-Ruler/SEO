@@ -345,7 +345,7 @@ function authOk(req) {
 // The dashboard's kill switch was per-tab React state — another tab (or the API)
 // happily kept writing. Now it's persisted (app_secrets) and enforced HERE, at the
 // dispatcher, for every route that can mutate WordPress/Airtable/n8n. 10s cache.
-const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|engine-clean-negatives|competitor-sitemap-poll|competitor-expand|competitor-source-save|competitor-source-remove|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
+const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|engine-clean-negatives|competitor-sitemap-poll|competitor-expand|competitor-brief|competitor-brief-start|competitor-source-save|competitor-source-remove|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
 let _kill = { v: false, exp: 0 };
 async function killSwitchOn() {
   if (Date.now() < _kill.exp) return _kill.v;
@@ -564,6 +564,8 @@ async function competitorSourcesFor(siteId) {
   return seed;
 }
 async function saveCompetitorSources(siteId, list) { await db.setAppSecret('competitor_sources:' + siteId, JSON.stringify(list)); return list; }
+// In-flight researched-brief jobs for competitor topics/clusters, keyed by opportunity id.
+const CBRIEF_RUNS = new Map();
 
 // --- route handlers --------------------------------------------------------
 const routes = {
@@ -4762,6 +4764,75 @@ const routes = {
   },
   // "Take over this topic": one competitor article → 3-5 keyword clusters (real volumes
   // from DataForSEO + Claude), each persisted as its own opportunity under the topic.
+  // Detailed, RESEARCHED brief for ONE competitor topic / cluster, stored on the row so a
+  // push carries it (Karim: "the competitor articles pushed to Airtable are not good
+  // quality — create a detailed, researched brief first"). Reads the competitor's own page
+  // + live sources (Tavily / Perplexity); Claude structures a brief that OUT-DOES it:
+  // angle, meta, outline, sourced key facts, FAQs, internal links, target length.
+  'POST /competitor-brief': async (body) => {
+    if (!body.siteId || !body.id) return { error: 'siteId + id required' };
+    const got = await engine.fetchByIds(body.siteId, [body.id]);
+    const opp = (got.items || [])[0];
+    if (!opp) return { error: 'That topic is no longer here.' };
+    const payload = (opp.payload && typeof opp.payload === 'object') ? opp.payload : {};
+    const stored = payload.brief && typeof payload.brief === 'object' && !payload.brief.error ? payload.brief : null;
+    if (stored && (body.existing || !body.regenerate)) {
+      return { brief: stored, sources: payload.briefSources || [], briefFor: payload.briefFor || null, competitorRead: !!payload.briefCompetitorRead, existing: true };
+    }
+    if (body.existing) return { error: 'No brief stored yet.' };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    if (!site) return { error: 'Site not found.' };
+    let market = marketFor(site.semrush_db);
+    if (body.jurisdiction) { const c = semrush.COUNTRIES.find((x) => x.label.toLowerCase() === String(body.jurisdiction).toLowerCase()); if (c) market = marketFor(c.db); }
+    // The competitor's own article (best-effort, external tiers) so the brief out-does it.
+    let competitor = null;
+    if (payload.link) {
+      try { const pg = await chatbot.readPage(payload.link); if (pg && !pg.error && pg.text) competitor = { url: payload.link, title: pg.title || opp.title, text: String(pg.text).slice(0, 6000) }; } catch (e) {}
+    }
+    const excludeDomain = (site.url || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    let internalLinkCandidates = [];
+    try {
+      const { baseUrl, username, appPassword } = await credsForSite(body.siteId);
+      const wp = new WordPressClient({ baseUrl, username, appPassword });
+      const [pg, ps] = await Promise.all([wp.list('pages', { perPage: 100, fields: 'title,link' }).catch(() => []), wp.list('posts', { perPage: 100, fields: 'title,link' }).catch(() => [])]);
+      internalLinkCandidates = [...pg, ...ps].map((r) => ({ title: (r.title?.rendered || '').replace(/&[a-z]+;/g, ' ').trim(), url: r.link })).filter((p) => p.title && p.url);
+    } catch (e) {}
+    const keyword = opp.primary_keyword || opp.title;
+    let r;
+    try {
+      r = await research.contentBrief({ keyword, intent: opp.intent, siteName: site.name, niche: site.niche || (site.stack && site.stack.type), excludeDomain, internalLinkCandidates, siteId: body.siteId, db: market.db, now: Date.now(), competitor });
+    } catch (e) { return { error: 'Brief research failed: ' + String((e && e.message) || e) }; }
+    if (!r || r.error) return { error: (r && r.error) || 'Brief research failed.' };
+    if (!r.brief || r.brief.error) return { error: 'Brief could not be structured — try again.' };
+    const briefSources = (r.sources || []).slice(0, 10).map((x) => ({ title: x.title || '', url: x.url }));
+    await engine.updateOpp(opp.id, { payload: Object.assign({}, payload, { brief: r.brief, briefSources, briefAt: new Date().toISOString(), briefFor: market.country, briefCompetitorRead: !!competitor, briefEngines: r.engines || null }) }).catch(() => {});
+    return { brief: r.brief, sources: briefSources, briefFor: market.country, competitorRead: !!competitor, engines: r.engines };
+  },
+  // Background wrapper — research + several Claude calls can run past the ~95s request
+  // cap (the Content Plan brief 504'd at 102s on a slow keyword). Start → poll, keyed by id.
+  'POST /competitor-brief-start': async (body) => {
+    if (!body.siteId || !body.id) return { error: 'siteId + id required' };
+    const key = String(body.id);
+    const cur = CBRIEF_RUNS.get(key);
+    if (cur && cur.status === 'running' && Date.now() - cur.at < 5 * 60 * 1000) return { status: 'running' };
+    CBRIEF_RUNS.set(key, { status: 'running', at: Date.now() });
+    (async () => {
+      try {
+        const r = await routes['POST /competitor-brief'](Object.assign({}, body, { regenerate: true }));
+        CBRIEF_RUNS.set(key, { status: r && r.error ? 'error' : 'done', result: r, error: r && r.error, at: Date.now() });
+      } catch (e) { CBRIEF_RUNS.set(key, { status: 'error', error: String((e && e.message) || e), at: Date.now() }); }
+    })();
+    return { status: 'running' };
+  },
+  'POST /competitor-brief-status': async (body) => {
+    const key = String(body.id || '');
+    const r = CBRIEF_RUNS.get(key);
+    if (!r) return { status: 'unknown', reason: 'no active run — re-run' };
+    if (Date.now() - r.at > 10 * 60 * 1000) { CBRIEF_RUNS.delete(key); return { status: 'unknown', reason: 'expired — re-run' }; }
+    if (r.status === 'done') return { status: 'done', ...(r.result || {}) };
+    if (r.status === 'error') return { status: 'error', error: r.error };
+    return { status: 'running' };
+  },
   // Preview / diagnostic: the on-topic keyword pool (real volumes) for a topic — no persistence.
   'POST /competitor-keyword-pool': async (body) => {
     if (!body.siteId || !body.topic) return { error: 'siteId + topic required' };
@@ -4794,8 +4865,9 @@ const routes = {
     // they match the top-bar labels (a re-scan rewrites them permanently).
     const LEGACY_JX = { UK: 'United Kingdom', US: 'United States' };
     const jxOf = (o) => { const j = (o.payload && o.payload.jurisdiction) || 'Not stated'; return LEGACY_JX[j] || j; };
+    const hasBriefOf = (o) => !!(o.payload && o.payload.brief && typeof o.payload.brief === 'object' && !o.payload.brief.error);
     const items = (wl.items || [])
-      .map((o) => ({ id: o.id, title: o.title, score: o.score, status: o.status, competitor: (o.payload && o.payload.competitor) || '', link: o.payload && o.payload.link, suggestedType: (o.payload && (o.payload.category || o.payload.suggestedType)) || 'blog', jurisdiction: jxOf(o), primaryKeyword: o.primary_keyword, createdAt: o.created_at || null, updatedAt: o.updated_at || null }))
+      .map((o) => ({ id: o.id, title: o.title, score: o.score, status: o.status, competitor: (o.payload && o.payload.competitor) || '', link: o.payload && o.payload.link, suggestedType: (o.payload && (o.payload.category || o.payload.suggestedType)) || 'blog', jurisdiction: jxOf(o), primaryKeyword: o.primary_keyword, hasBrief: hasBriefOf(o), briefFor: (o.payload && o.payload.briefFor) || null, createdAt: o.created_at || null, updatedAt: o.updated_at || null }))
       .filter((o) => !want || String(o.competitor).toLowerCase() === want)
       .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || (b.score - a.score));
     const counts = { total: items.length, new: items.filter((i) => i.status === 'scored').length, pushed: items.filter((i) => ['queued', 'in_review', 'published', 'done'].includes(i.status)).length, hidden: items.filter((i) => i.status === 'dismissed').length };
@@ -4807,7 +4879,7 @@ const routes = {
       for (const o of rows) {
         const p = (o.payload && typeof o.payload === 'object') ? o.payload : {};
         const pid = p.parentId; if (!pid) continue;
-        (clustersByParent[pid] = clustersByParent[pid] || []).push({ id: o.id, title: o.title, status: o.status, primaryKeyword: o.primary_keyword, keywords: Array.isArray(p.keywords) ? p.keywords : [], totalVolume: p.totalVolume || 0, angle: p.angle || '', format: p.format || '', intent: o.intent || p.intent || '', suggestedType: p.category || p.suggestedType || 'blog', jurisdiction: p.jurisdiction || 'Not stated', competitor: p.competitor || '', volumesReal: !!p.volumesReal });
+        (clustersByParent[pid] = clustersByParent[pid] || []).push({ id: o.id, title: o.title, status: o.status, primaryKeyword: o.primary_keyword, keywords: Array.isArray(p.keywords) ? p.keywords : [], totalVolume: p.totalVolume || 0, angle: p.angle || '', format: p.format || '', intent: o.intent || p.intent || '', suggestedType: p.category || p.suggestedType || 'blog', jurisdiction: p.jurisdiction || 'Not stated', competitor: p.competitor || '', volumesReal: !!p.volumesReal, link: p.link || '', hasBrief: hasBriefOf(o), briefFor: p.briefFor || null });
       }
       if (rows.length < 500) break;
     }

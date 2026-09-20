@@ -195,6 +195,10 @@
     competitorSitemapItems(siteId, opts) { return engine("/competitor-sitemap-items", Object.assign({ siteId }, opts || {})); },
     // "Take over this topic": one competitor article → 3-5 keyword clusters (persisted under it).
     competitorExpand(siteId, id, count) { return engine("/competitor-expand", { siteId, id, count }); },
+    // Researched brief for one competitor topic / cluster (stored on it; background + poll).
+    competitorBrief(siteId, id, opts) { return engine("/competitor-brief", Object.assign({ siteId, id }, opts || {})); },
+    competitorBriefStart(siteId, id, opts) { return engine("/competitor-brief-start", Object.assign({ siteId, id }, opts || {})); },
+    competitorBriefStatus(siteId, id) { return engine("/competitor-brief-status", { siteId, id }); },
     trendingIntel(siteId, niche, db) { return engine("/trending-intel", { siteId, niche, db }); },
     peopleAlsoAsk(siteId, keyword, depth) { return engine("/people-also-ask", { siteId, keyword, depth }); },
     // Same route with push:true → sends each PAA question to the Airtable Article Writer; returns { ..., airtable }.

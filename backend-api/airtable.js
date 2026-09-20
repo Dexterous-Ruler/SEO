@@ -456,6 +456,13 @@ function briefToText(b) {
   if (Array.isArray(b.outline)) { lines.push('\nOUTLINE:'); b.outline.forEach((o) => { lines.push('• ' + (o.h2 || '')); (o.points || []).forEach((p) => lines.push('   - ' + p)); }); }
   if (Array.isArray(b.keyFacts) && b.keyFacts.length) { lines.push('\nKEY FACTS:'); b.keyFacts.forEach((f) => lines.push(`• ${f.fact} [${f.source}]`)); }
   if (Array.isArray(b.faqs) && b.faqs.length) { lines.push('\nFAQ:'); b.faqs.forEach((f) => lines.push(`Q: ${f.q}\nA: ${f.a}`)); }
+  if (Array.isArray(b.internalLinks) && b.internalLinks.length) {
+    lines.push('\nINTERNAL LINKS (link to these existing pages):');
+    b.internalLinks.forEach((l) => {
+      if (typeof l === 'string') lines.push('• ' + l);
+      else if (l && (l.url || l.to || l.title || l.anchor)) lines.push('• ' + (l.anchor || l.title || l.from || '') + (l.url ? ' → ' + l.url : (l.to ? ' → ' + l.to : '')) + (l.reason ? ' — ' + l.reason : ''));
+    });
+  }
   if (b.wordCount) lines.push('\nTarget length: ~' + b.wordCount + ' words');
   return lines.join('\n');
 }

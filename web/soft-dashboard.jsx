@@ -1969,6 +1969,9 @@ function CompetitorsScreen({ ctx }) {
   const [clusters,setClusters] = useState({});      // parent topic id → [cluster opportunities] ("Take over this topic")
   const [openCl,setOpenCl] = useState({});          // parent topic id → panel open?
   const [expanding,setExpanding] = useState("");    // parent id being expanded
+  const [briefing,setBriefing] = useState("");      // id whose researched brief is being generated
+  const [briefOpen,setBriefOpen] = useState({});    // id → brief panel open?
+  const [briefData,setBriefData] = useState({});    // id → { brief, sources, briefFor, competitorRead }
   const [types,setTypes] = useState({});            // item id → content type chosen before push
   const [busyId,setBusyId] = useState("");
   const [shown,setShown] = useState(100);          // rows rendered so far (client-side "Show more" — the list itself is unlimited)
@@ -2007,7 +2010,7 @@ function CompetitorsScreen({ ctx }) {
       loadItems();
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setExpanding(""));
   };
-  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setJxFilter(""); setTypeFilter(""); setFilter("new"); setShown(100); setPushJx([]); setPushOpen(false); setClusters({}); setOpenCl({}); if(live){ loadSources(); loadItems(); } },[s.id]);
+  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setJxFilter(""); setTypeFilter(""); setFilter("new"); setShown(100); setPushJx([]); setPushOpen(false); setClusters({}); setOpenCl({}); setBriefOpen({}); setBriefData({}); if(live){ loadSources(); loadItems(); } },[s.id]);
   // Top-bar jurisdiction changed → refresh the label (and the auto filter follows it).
   useEffect(()=>{ if(live) loadSources(); },[s.semrush_db]);
   useEffect(()=>{ setShown(100); },[filter,compFilter,jxFilter,typeFilter]);
@@ -2061,20 +2064,74 @@ function CompetitorsScreen({ ctx }) {
   };
   // Push ONE topic to the Article Writer as the chosen type → the row is created in Airtable
   // and the topic flips to "Pushed ✓" here (its status becomes queued), i.e. marked done.
-  const push = (it)=>{
+  // Research a DETAILED brief for one topic/cluster (background job + poll): reads the
+  // competitor's own page + live sources; Claude structures angle / outline / sourced key
+  // facts / FAQs / internal links. Stored on the item, so it's done once. Resolves the brief
+  // result, or null if it failed.
+  const ensureBrief = (it)=> new Promise((resolve)=>{
+    setBriefing(it.id);
+    ctx.toast("Researching a detailed brief for “"+String(it.title).slice(0,40)+"” — reading the competitor's page + live sources (~45s)…","teal");
+    const jx = pushJx[0] || siteJx || undefined;
+    API.competitorBriefStart(s.id, it.id, jx?{ jurisdiction: jx }:{}).then(st=>{
+      if(st && st.error){ ctx.toast(st.error,"clay"); setBriefing(""); resolve(null); return; }
+      let polls=0;
+      const poll=()=>{ API.competitorBriefStatus(s.id, it.id).then(r=>{
+        if(!r || r.status==="running"){ if(++polls<45){ setTimeout(poll,4000); } else { ctx.toast("Still researching — try again in a minute","gold"); setBriefing(""); resolve(null); } return; }
+        if(r.status==="error" || r.error || !r.brief){ ctx.toast("Research failed: "+(r.error||r.reason||"unknown"),"clay"); setBriefing(""); resolve(null); return; }
+        setBriefData(d=>Object.assign({},d,{[it.id]:r})); setBriefing(""); resolve(r);
+      }).catch(e=>{ ctx.toast(e.message,"clay"); setBriefing(""); resolve(null); }); };
+      setTimeout(poll,4000);
+    }).catch(e=>{ ctx.toast(e.message,"clay"); setBriefing(""); resolve(null); });
+  });
+  // "Brief ✓ · View" / "Research brief" button: show the stored brief, or research one now.
+  const viewBrief = (it)=>{
+    if(briefOpen[it.id]){ setBriefOpen(o=>Object.assign({},o,{[it.id]:false})); return; }
+    if(briefData[it.id]){ setBriefOpen(o=>Object.assign({},o,{[it.id]:true})); return; }
+    if(it.hasBrief){
+      API.competitorBrief(s.id, it.id, { existing:true }).then(r=>{ if(r&&r.brief){ setBriefData(d=>Object.assign({},d,{[it.id]:r})); setBriefOpen(o=>Object.assign({},o,{[it.id]:true})); } else ctx.toast((r&&r.error)||"No brief stored","gold"); }).catch(e=>ctx.toast(e.message,"clay"));
+      return;
+    }
+    if(briefing) return;
+    ensureBrief(it).then(r=>{ if(r){ setBriefOpen(o=>Object.assign({},o,{[it.id]:true})); ctx.toast("Brief ready ✓ — "+((r.sources||[]).length)+" sources"+(r.competitorRead?", competitor page read":""),"teal"); loadItems(); } });
+  };
+  // Push ONE topic/cluster to the Article Writer as the chosen type → the row is created in
+  // Airtable and it flips to "Pushed ✓" here. A detailed, RESEARCHED brief is produced first
+  // (Karim: pushed competitor articles were thin) so the writer starts from real research.
+  const push = async (it)=>{
     if(busyId) return;
     const type = types[it.id] || it.suggestedType || (TYPES[0]&&TYPES[0][0]) || "blog";
     const jxs = pushJx.length ? pushJx : (siteJx ? [siteJx] : []);
     setBusyId(it.id);
-    API.engineAutodraft(s.id, Object.assign({ ids:[it.id], category:type }, jxs.length?{ jurisdictions: jxs }:{})).then(r=>{
+    try{
+      let researched = !!it.hasBrief;
+      if(!researched){ const b = await ensureBrief(it); researched = !!b; if(!researched) ctx.toast("Couldn't research this one — pushing with the basic brief","gold"); }
+      const r = await API.engineAutodraft(s.id, Object.assign({ ids:[it.id], category:type }, jxs.length?{ jurisdictions: jxs }:{}));
       if(r && r.notProvisioned){ setNotProv(true); return; }
       if(r && r.skipped){ ctx.toast(r.reason||"Couldn't push — connect the Airtable Article Writer first","gold"); loadItems(); return; }
       if(r && r.error){ ctx.toast("Push: "+r.error,"clay"); return; }
       const n=(r&&r.drafted!=null)?r.drafted:0;
       const where = jxs.length>1 ? (n+" jurisdiction"+(n===1?"":"s")+" ("+Object.keys(r.perJurisdiction||{}).join(", ")+")") : "the writer";
-      ctx.toast(n>0?("Pushed to "+where+" as "+typeLabel(type)+" ✓ — marked done"+((r.skippedDup||0)>0?(" · "+r.skippedDup+" already there"):"")):(r&&r.skippedDup?"Already in the Article Writer for those jurisdictions — marked done":"Nothing pushed"), n>0?"teal":"gold");
+      ctx.toast(n>0?("Pushed to "+where+" as "+typeLabel(type)+(researched?" with a researched brief":"")+" ✓ — marked done"+((r.skippedDup||0)>0?(" · "+r.skippedDup+" already there"):"")):(r&&r.skippedDup?"Already in the Article Writer for those jurisdictions — marked done":"Nothing pushed"), n>0?"teal":"gold");
       loadItems();
-    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
+    }catch(e){ ctx.toast(e.message,"clay"); }
+    finally{ setBusyId(""); }
+  };
+  // Inline preview of the researched brief (what the writer will receive).
+  const briefPanel = (it)=>{
+    const d = briefData[it.id]; if(!briefOpen[it.id] || !d || !d.brief) return null;
+    const b = d.brief;
+    return (
+      <div style={{ margin:"0 4px 10px 22px", padding:"10px 12px", borderRadius:"var(--r-md)", background:"var(--surface)", boxShadow:"var(--neo-xs)", fontSize:12.5, lineHeight:1.5 }}>
+        <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:4 }}>Researched brief{d.briefFor?(" for "+d.briefFor):""} · {(d.sources||[]).length} live source{(d.sources||[]).length===1?"":"s"}{d.competitorRead?" · competitor's page read":""} — this is what the writer receives.</div>
+        {b.title && <div style={{ fontWeight:800, color:"var(--ink)" }}>{b.title}</div>}
+        {b.angle && <div style={{ marginTop:4 }}><b>Angle:</b> {b.angle}</div>}
+        {b.metaDescription && <div style={{ marginTop:4, color:"var(--muted)" }}><b>Meta:</b> {b.metaDescription}</div>}
+        {Array.isArray(b.outline) && b.outline.length>0 && (<div style={{ marginTop:6 }}><b>Outline</b><ul style={{ margin:"4px 0 0 18px", padding:0 }}>{b.outline.map((o,i)=><li key={i}>{o.h2}{Array.isArray(o.points)&&o.points.length?<span style={{ color:"var(--muted)" }}> — {o.points.slice(0,3).join("; ")}{o.points.length>3?"…":""}</span>:null}</li>)}</ul></div>)}
+        {Array.isArray(b.keyFacts) && b.keyFacts.length>0 && (<div style={{ marginTop:6 }}><b>Key facts</b><ul style={{ margin:"4px 0 0 18px", padding:0 }}>{b.keyFacts.slice(0,6).map((f,i)=><li key={i}>{f.fact}{f.source?<span style={{ color:"var(--muted)" }}> [{f.source}]</span>:null}</li>)}</ul></div>)}
+        {Array.isArray(b.faqs) && b.faqs.length>0 && <div style={{ marginTop:6 }}><b>FAQs:</b> {b.faqs.length} included</div>}
+        {b.wordCount && <div style={{ marginTop:4, color:"var(--muted)" }}>Target length ~{b.wordCount} words</div>}
+      </div>
+    );
   };
   const togglePushJx = (label)=> setPushJx(p=> p.includes(label) ? p.filter(x=>x!==label) : [...p,label]);
   const hide = (it)=>{ setBusyId(it.id); API.engineDismiss(it.id).then(()=>loadItems()).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId("")); };
@@ -2099,7 +2156,8 @@ function CompetitorsScreen({ ctx }) {
       <div style={{ margin:"0 4px 10px 22px", padding:"10px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
         <div style={{ fontSize:12, color:"var(--muted)", marginBottom:4 }}>Clusters around <b>{it.title}</b> — each one is a new article to surround and out-rank it. Pick a type and push the ones you want{pushJx.length>1?(" (to "+pushJx.length+" jurisdictions)"):""}.</div>
         {list.map(c=>(
-          <div key={c.id} style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", padding:"8px 0", borderTop:"1px solid var(--line)" }}>
+          <React.Fragment key={c.id}>
+          <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", padding:"8px 0", borderTop:"1px solid var(--line)" }}>
             <div style={{ flex:"1 1 320px", minWidth:0 }}>
               <div style={{ fontSize:13, fontWeight:700, color:"var(--ink)", lineHeight:1.35 }}>{c.title}</div>
               <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:2 }}>{(c.keywords||[]).slice(0,6).map(k=>k.keyword+(k.volume?(" ("+Number(k.volume).toLocaleString()+"/mo)"):" (unverified)")).join(" · ")}{c.totalVolume?(" · ~"+Number(c.totalVolume).toLocaleString()+" searches/mo"):""}</div>
@@ -2112,12 +2170,15 @@ function CompetitorsScreen({ ctx }) {
                 </select>
               </label>
             )}
+            {c.status!=="dismissed" && <NeoButton kind="ghost" size="sm" disabled={briefing===c.id||busyId===c.id} onClick={()=>viewBrief(c)} title={c.hasBrief?"Show the researched brief that goes to the writer":"Research a detailed brief before pushing"}>{briefing===c.id?"Researching…":(c.hasBrief?(briefOpen[c.id]?"Hide brief":"Brief ✓ · View"):"Research brief")}</NeoButton>}
             {isPushed(c.status) && <span style={{ fontSize:12, fontWeight:700, color:"var(--t-700)", background:"var(--t-50)", padding:"5px 10px", borderRadius:"var(--r-pill)" }}>Pushed ✓</span>}
             {c.status==="dismissed" && <span style={{ fontSize:12, fontWeight:700, color:"var(--muted)", background:"var(--surface)", padding:"5px 10px", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-xs)" }}>Hidden</span>}
             {c.status==="scored" && <NeoButton kind="primary" size="sm" disabled={busyId===c.id} onClick={()=>push(c)}>{busyId===c.id?"Pushing…":(pushJx.length>1?("Push to "+pushJx.length+" jurisdictions"):"Push to writer")}</NeoButton>}
             {c.status==="scored" && <NeoButton kind="ghost" size="sm" disabled={busyId===c.id} onClick={()=>hide(c)}>Hide</NeoButton>}
             {c.status==="dismissed" && <NeoButton kind="ghost" size="sm" disabled={busyId===c.id} onClick={()=>unhide(c)}>Unhide</NeoButton>}
           </div>
+          {briefPanel(c)}
+          </React.Fragment>
         ))}
         <div style={{ paddingTop:8 }}>
           <NeoButton kind="soft" size="sm" disabled={!!expanding} onClick={()=>expand(it)}>{expanding===it.id?"Finding…":"Find more clusters"}</NeoButton>
@@ -2212,7 +2273,7 @@ function CompetitorsScreen({ ctx }) {
           <div style={{ fontSize:12, color:"var(--muted)", marginBottom:8 }}>Each topic shows which competitor it came from and which country it was written for. Pick a content type, then <b>Push to writer</b> — it moves to <b>Pushed</b> so you know it's done. Results are saved, so you never re-scan to see them, and a re-scan never brings back anything you've already pushed or hidden.</div>
           {/* Multi-jurisdiction push: one writer row per selected country, in that country's language. */}
           {jxOptions.length>0 && (
-            <div style={{ marginBottom:10, padding:"9px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+            <div style={{ position:"sticky", top:0, zIndex:6, marginBottom:10, padding:"9px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in), 0 6px 14px rgba(0,0,0,.08)" }} title="Stays visible while you scroll so you always know where you're pushing">
               <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", fontSize:12.5 }}>
                 <span style={{ color:"var(--muted)" }}>Push each topic to:</span>
                 <b style={{ color:"var(--ink)" }}>{pushJx.length?pushJx.join(", "):"(choose a jurisdiction)"}</b>
@@ -2269,12 +2330,14 @@ function CompetitorsScreen({ ctx }) {
               {it.status!=="dismissed" && ((it.clusterCount>0)
                 ? <NeoButton kind="soft" size="sm" onClick={()=>setOpenCl(o=>Object.assign({},o,{[it.id]:!o[it.id]}))} title="Show the keyword clusters found around this topic">{it.clusterCount+" cluster"+(it.clusterCount===1?"":"s")+(openCl[it.id]?" ▴":" ▾")}</NeoButton>
                 : <NeoButton kind="soft" size="sm" icon={expanding===it.id?undefined:"sparkles"} disabled={!!expanding} onClick={()=>expand(it)} title="Find 3–5 keyword clusters around this competitor article so you can surround and out-rank it">{expanding===it.id?"Finding…":"Take over this topic"}</NeoButton>)}
+              {it.status!=="dismissed" && <NeoButton kind="ghost" size="sm" disabled={briefing===it.id||busyId===it.id} onClick={()=>viewBrief(it)} title={it.hasBrief?"Show the researched brief that goes to the writer":"Research a detailed brief (competitor's page + live sources) before pushing"}>{briefing===it.id?"Researching…":(it.hasBrief?(briefOpen[it.id]?"Hide brief":"Brief ✓ · View"):"Research brief")}</NeoButton>}
               {isPushed(it.status) && <span style={{ fontSize:12, fontWeight:700, color:"var(--t-700)", background:"var(--t-50)", padding:"5px 10px", borderRadius:"var(--r-pill)" }}>Pushed ✓</span>}
               {it.status==="dismissed" && <span style={{ fontSize:12, fontWeight:700, color:"var(--muted)", background:"var(--bg)", padding:"5px 10px", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-in)" }}>Hidden</span>}
               {it.status==="scored" && <NeoButton kind="primary" size="sm" disabled={busyId===it.id} onClick={()=>push(it)} title={pushJx.length>1?("Create this in your Article Writer for "+pushJx.length+" jurisdictions ("+pushJx.join(", ")+") and mark it done here"):"Create this in your Article Writer and mark it done here"}>{busyId===it.id?"Pushing…":(pushJx.length>1?("Push to "+pushJx.length+" jurisdictions"):"Push to writer")}</NeoButton>}
               {it.status==="scored" && <NeoButton kind="ghost" size="sm" disabled={busyId===it.id} onClick={()=>hide(it)} title="Not interested — hide it">Hide</NeoButton>}
               {it.status==="dismissed" && <NeoButton kind="ghost" size="sm" disabled={busyId===it.id} onClick={()=>unhide(it)}>Unhide</NeoButton>}
             </div>
+            {briefPanel(it)}
             {clusterPanel(it)}
             </React.Fragment>
           ))}

@@ -1066,7 +1066,7 @@ function oppToCluster(row) {
 }
 
 // Patch arbitrary columns on one opportunity (status + payload etc.). Graceful.
-async function updateOpp(id, patch) {
+export async function updateOpp(id, patch) {
   const body = Object.assign({}, patch, { updated_at: new Date().toISOString() });
   let res;
   try { res = await fetch(`${SB}/rest/v1/content_opportunities?id=eq.${id}`, { method: 'PATCH', headers: headers({ Prefer: 'return=representation' }), body: JSON.stringify(body) }); }

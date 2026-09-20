@@ -564,12 +564,16 @@ Be STRICT: a short, precise list is far more valuable than a broad one. High sea
 // Perplexity grounded answer). Claude structures + writes the brief but must use
 // ONLY the supplied research — every fact ties to a provided source, nothing
 // invented. UK audience, UK English. Returns structured JSON.
-export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market }) {
+export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor }) {
   const sources = (research.sources || []).map((s, i) => `[${i + 1}] ${s.title || ''} — ${s.url}`).join('\n');
   const material = (research.material || '').slice(0, 9000);
   const links = (internalLinkCandidates || []).slice(0, 25).map((p) => `${p.title} → ${p.url}`).join('\n');
   const country = (market && market.country) || 'United Kingdom';
   const scope = (market && market.scope) ? market.scope + '\n\n' : '';
+  // Competitors screen: the brief must OUT-DO the competitor's own article (we read it).
+  const compBlock = (competitor && competitor.text)
+    ? `\n\n=== COMPETITOR ARTICLE TO OUT-DO (${competitor.url || ''}) ===\nTitle: ${competitor.title || ''}\n${String(competitor.text).slice(0, 6000)}\n\nThis brief MUST out-do that competitor article: cover everything it covers, then add what it misses (depth, worked examples, current ${country} rules and figures, common mistakes, FAQs). Never copy its wording.`
+    : '';
   const txt = await complete({
     system: sys('content.brief', siteId),
     promptKey: 'content.brief',
@@ -578,7 +582,7 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
     // cap), so give the synthesis room: 3000 tokens of structured JSON over dense research
     // regularly ran past the default 60s attempt and then failed on a 34s retry sliver.
     timeoutMs: 85000, deadlineMs: 170000,
-    messages: [{ role: 'user', content: `${scope}TARGET MARKET: ${country}\nKEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}\n\nWrite the ${country} content brief as JSON.` }],
+    messages: [{ role: 'user', content: `${scope}TARGET MARKET: ${country}\nKEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}${compBlock}\n\nWrite the ${country} content brief as JSON.` }],
   });
   try {
     const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
