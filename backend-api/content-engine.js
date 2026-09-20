@@ -667,12 +667,16 @@ export async function expandCompetitorTopic(siteId, oppId, { count = 4 } = {}) {
   //    matches single words, so "service agreement" otherwise floods with "dvla customer
   //    service" / "audi service plan" (exactly what went wrong in the first live test).
   const STOPW = new Set(['a', 'an', 'the', 'to', 'of', 'for', 'and', 'or', 'in', 'on', 'at', 'by', 'with', 'how', 'what', 'is', 'are', 'your', 'our', 'vs', 'uk', 'from', 'into']);
-  const toks = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !STOPW.has(t));
+  // Stem lightly so plural/singular match ("shareholders" ↔ "shareholder agreement",
+  // "agreements" ↔ "agreement") — DataForSEO returns the singular far more often.
+  const stem = (t) => t.replace(/ies$/, 'y').replace(/(ches|shes|sses|xes)$/, (m) => m.slice(0, -2)).replace(/s$/, '');
+  const toks = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !STOPW.has(t)).map(stem);
   const topicToks = toks(seed);
-  const head = topicToks.slice(-2).join(' ');
-  const seeds = [...new Set([seed.toLowerCase(), head].filter(Boolean))];
+  const headStem = topicToks.slice(-2).join(' ');
+  const headRaw = String(seed || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !STOPW.has(t)).slice(-2).join(' ');
+  const seeds = [...new Set([seed.toLowerCase(), headRaw, headStem].filter(Boolean))];
   const need = Math.min(2, topicToks.length || 1);
-  const onTopic = (kw) => { const kt = new Set(toks(kw)); let n = 0; for (const t of topicToks) if (kt.has(t)) n++; return n >= need || (head && kw.includes(head)); };
+  const onTopic = (kw) => { const kt = toks(kw); const ks = new Set(kt); let n = 0; for (const t of topicToks) if (ks.has(t)) n++; return n >= need || (headStem && kt.join(' ').includes(headStem)); };
   const pool = new Map();
   const dfsErrors = [];
   if (dfs.hasKey() && seed) {
