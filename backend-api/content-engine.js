@@ -549,7 +549,7 @@ export async function ingestCompetitorSitemap(siteId, inputs) {
   // whole run stays inside the gateway request budget.
   // Read the WHOLE sitemap (big WordPress sites split posts across many child sitemaps),
   // not just the first few hundred URLs — Karim noticed results capping at 200/competitor.
-  const fetched = await Promise.all(list.map((src) => feeds.fetchSitemap(src.url, { maxUrls: 2000, maxChildren: 20 }).catch((e) => ({ error: String((e && e.message) || e), urls: [] }))));
+  const fetched = await Promise.all(list.map((src) => feeds.fetchSitemap(src.url, { maxUrls: 3000, maxChildren: 25 }).catch((e) => ({ error: String((e && e.message) || e), urls: [] }))));
   const perSource = [];
   for (let i = 0; i < list.length; i++) {
     const src = list[i]; const sm = fetched[i] || { urls: [] };
@@ -574,7 +574,7 @@ export async function ingestCompetitorSitemap(siteId, inputs) {
       o.dedupeKey = 'csm:' + feedHash(String(u).replace(/[#?].*$/, '').toLowerCase());
       score(o, scoreSite);
       raw.push(o);
-      if (++made >= 1500) break;   // hard safety bound per competitor per scan (was 200)
+      if (++made >= 3000) break;   // hard safety bound per competitor per scan (was 200 → 1500; real competitors have ~2000 pages; a 3000 scan persists in ~10s)
     }
     perSource.push({ id: src.id, input: src.url, competitor: comp, sitemap: sm.sitemapUrl, urls: urls.length, made });
   }
