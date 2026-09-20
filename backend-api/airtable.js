@@ -290,6 +290,7 @@ export function mapGapBriefs(gaps, briefField, category, market) {
       'Write the definitive page for this keyword: match the search intent, answer it better and more completely than the competitor page, and route readers to the relevant service/booking CTA.',
     ].filter((l) => l !== '');
     const row = { Title: title, Keyword: kw, 'Primary Keyword': kw, Category: category || 'Blog' };
+    { const toa = typeOfArticleFor(category); if (toa) row['Type of Article'] = toa; }
     if (market && market.country) { row.Jurisdiction = market.country; row.Language = market.language || 'English'; }
     const desc = [
       `Target keyword: ${kw}` + (g.volume ? ` (~${Number(g.volume).toLocaleString()} searches/mo)` : ''),
@@ -370,6 +371,22 @@ export function normalizeCategory(type) {
   return 'Blog';
 }
 
+// The go-legal.ai multilingual n8n writer reads the content type from a
+// "Type of Article" field (NOT "Category") and maps it to a WordPress post type
+// (posts / how-to-guide / legal-pathway / glossary / product). Map our normalized
+// Category → that writer's canonical "Type of Article" label so the picked type
+// actually routes. Returns null for types the go-legal.ai writer doesn't define
+// (e.g. GoodFor's Recipes/Ingredient Definitions) so we don't write a stray value;
+// the field is field-set-filtered, so it only ever lands where the column exists.
+const TYPE_OF_ARTICLE = {
+  'Blog': 'Blog Post',
+  'Smart Template': 'Smart Template',
+  'Legal Pathway': 'Legal Pathway',
+  'Legal Definition': 'Legal Definition',
+  'How To Guide': 'How-to Guide',
+};
+export function typeOfArticleFor(category) { return TYPE_OF_ARTICLE[category] || null; }
+
 export function mapArticleBrief(cluster, brief, briefField, fieldSet, category, market) {
   const c = cluster || {};
   const b = (brief && typeof brief === 'object') ? brief : {};
@@ -389,6 +406,8 @@ export function mapArticleBrief(cluster, brief, briefField, fieldSet, category, 
   };
   // Jurisdiction + language so the writer produces the article for the right market.
   if (market && market.country) { row.Jurisdiction = market.country; row.Language = market.language || 'English'; }
+  // Content type in the field the go-legal.ai multilingual writer reads ("Type of Article").
+  { const toa = typeOfArticleFor(category); if (toa) row['Type of Article'] = toa; }
   if (b.angle) row['Goal of Article'] = b.angle;
   // Description: the generated meta when we have one, else a synthesised summary — never blank.
   row.Description = b.metaDescription || summaryFor(c, title);

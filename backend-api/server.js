@@ -3804,7 +3804,7 @@ const routes = {
         const k = String(rawK).trim(); if (!k) continue;
         const br = byKw.get(k.toLowerCase()) || {};
         const row = {};
-        for (const fname of ['Title', 'Description', 'Primary Keyword', 'Jurisdiction', 'Language', briefField]) {
+        for (const fname of ['Title', 'Description', 'Primary Keyword', 'Jurisdiction', 'Language', 'Type of Article', briefField]) {
           if (fname && fieldNames.has(fname) && br[fname] != null && String(br[fname]).trim()) row[fname] = br[fname];
         }
         if (linkField && links && links[k]) row[linkField] = links[k];
