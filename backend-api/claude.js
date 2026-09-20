@@ -451,6 +451,33 @@ export async function projectPlan({ siteName, niche, baseUrl, keyPages, scores, 
 // and a suggested content title/format. Claude ONLY groups + labels — it must
 // use the EXACT keyword strings provided (no inventing keywords); volumes/gaps
 // are computed deterministically by the caller.
+// ONE competitor article → 3-5 keyword clusters (each = a new article) so the site can
+// surround and out-rank that topic (Competitors screen "Take over this topic"). Uses ONLY
+// the real keywords supplied (with volumes) when there are any; niche via sys() geo block.
+export async function competitorClusters({ topic, competitorUrl, keywords, siteName, siteId, market, count = 4 }) {
+  const list = (keywords || []).slice(0, 120).map((k) => `${k.keyword}${k.volume ? ` (${k.volume})` : ''}`).join('\n');
+  const country = (market && market.country) || 'United Kingdom';
+  const scope = (market && market.scope) ? market.scope + '\n\n' : '';
+  const n = Math.min(Math.max(Number(count) || 4, 3), 5);
+  const txt = await complete({
+    system: sys('content.competitorClusters', siteId),
+    promptKey: 'content.competitorClusters',
+    maxTokens: 3000,
+    messages: [{ role: 'user', content: `${scope}Site: ${siteName || ''}\nTARGET MARKET: ${country}\nCOMPETITOR ARTICLE: ${topic}${competitorUrl ? ` (${competitorUrl})` : ''}\n\nReal related keywords (with monthly volume):\n${list || '(none available — propose realistic phrases and say they are unverified)'}\n\nReturn ${n} clusters as the JSON.` }],
+  });
+  const clean = (arr) => (arr || []).filter((c) => c && (c.label || c.suggestedTitle) && Array.isArray(c.keywords)).slice(0, 5);
+  try {
+    const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
+    return clean(o.clusters);
+  } catch (e) {
+    // Truncated JSON → salvage every complete cluster object.
+    const salvaged = [];
+    const re = /\{\s*"label"[\s\S]*?"keywords"\s*:\s*\[[^\]]*\][\s\S]*?\}/g;
+    let m; while ((m = re.exec(txt)) !== null) { try { const c = JSON.parse(m[0]); if (Array.isArray(c.keywords)) salvaged.push(c); } catch (_) {} }
+    return clean(salvaged);
+  }
+}
+
 export async function clusterKeywords({ keywords, siteName, niche, siteId, timeoutMs, deadlineMs, model }) {
   const list = (keywords || []).slice(0, 140).map((k) => `${k.keyword}${k.volume ? ` (${k.volume})` : ''}`).join('\n');
   // Haiku by DEFAULT (measured 12.7s vs Sonnet 24.8s p50 and a >60s tail on this exact

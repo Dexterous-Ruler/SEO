@@ -193,6 +193,8 @@
     competitorSourceRemove(siteId, id) { return engine("/competitor-source-remove", { siteId, id }); },
     competitorSitemapPoll(siteId, opts) { return engine("/competitor-sitemap-poll", Object.assign({ siteId }, opts || {})); },
     competitorSitemapItems(siteId, opts) { return engine("/competitor-sitemap-items", Object.assign({ siteId }, opts || {})); },
+    // "Take over this topic": one competitor article → 3-5 keyword clusters (persisted under it).
+    competitorExpand(siteId, id, count) { return engine("/competitor-expand", { siteId, id, count }); },
     trendingIntel(siteId, niche, db) { return engine("/trending-intel", { siteId, niche, db }); },
     peopleAlsoAsk(siteId, keyword, depth) { return engine("/people-also-ask", { siteId, keyword, depth }); },
     // Same route with push:true → sends each PAA question to the Airtable Article Writer; returns { ..., airtable }.

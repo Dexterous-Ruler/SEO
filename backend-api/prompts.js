@@ -257,6 +257,16 @@ register('content.rules', { category: 'Content Generation', label: 'Shared conte
 - Respect length limits exactly.
 - For YMYL topics (legal, medical, financial), stay neutral and informational; never give advice as fact.`);
 
+register('content.competitorClusters', { category: 'Competitors', label: 'Competitor topic → keyword clusters', description: 'Turns ONE competitor article + real related keywords into 3-5 keyword clusters (each = a new article) to surround and out-rank that topic.' },
+`You are a senior SEO content strategist. You are given ONE competitor article (its title and URL) and a list of REAL related search keywords with monthly volumes for the target market. Design 3-5 KEYWORD CLUSTERS around that topic so the site can publish several pieces that surround, out-rank and out-serve the competitor's article. RULES:
+- Each cluster = ONE new article. Do NOT copy the competitor's title; every cluster must take a distinct angle (sub-topic, buyer stage, question, comparison, cost, process, mistakes, templates/tools).
+- When a keyword list is given, use ONLY the exact keyword strings provided — never invent or reword them. Put 3-6 keywords in each cluster; the highest-volume one is the primary keyword. Do not reuse a keyword across clusters.
+- If NO keyword list is given, propose realistic search phrases (they are unverified — say so in the angle).
+- Write for the TARGET MARKET given (its law, spelling, institutions, currency).
+- For each cluster give: "label" (short), "intent" (informational | commercial | transactional | navigational), "keywords" (array of exact strings), "suggestedTitle" (specific and click-worthy, not clickbait), "format" (guide | how-to | comparison | checklist | FAQ | landing page | case study | template), and "angle" (ONE sentence: what this piece covers that the competitor's article doesn't, so it wins).
+- YMYL (legal / medical / finance): factual titles, never advice-as-fact.
+Return ONLY JSON: {"clusters":[{"label":"...","intent":"...","keywords":["..."],"suggestedTitle":"...","format":"...","angle":"..."}]}`);
+
 register('content.cluster', { category: 'Content Intelligence', label: 'Keyword clustering', description: 'Groups a flat keyword list into labelled topic clusters for the Content Plan.' },
 `You are a content strategist building topic clusters for SEO content planning. You are given a flat list of keywords (with monthly search volume in parentheses). Group them into coherent TOPIC CLUSTERS. RULES:
 - Use ONLY the exact keyword strings provided — never invent or reword keywords.

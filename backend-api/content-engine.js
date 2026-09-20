@@ -638,6 +638,92 @@ export async function ingestCompetitorSitemap(siteId, inputs, opts) {
   return { saved, error, notProvisioned, fetched: raw.length, unique: merged.length, scannedFor: wanted, perSource };
 }
 
+// ---- "Take over this topic": competitor article → 3-5 keyword clusters --------------
+// Karim: "click a button and get 3-5 keyword clusters based on that competitor article,
+// so I can create 3-5 more pieces around it, choose the type, and out-rank them."
+// 1) real related keywords + volumes from DataForSEO for the site's market (best-effort),
+// 2) Claude groups them into clusters around the competitor topic,
+// 3) each cluster is persisted as its own opportunity (source 'competitor_cluster',
+//    payload.parentId = the competitor row) so it shows under the topic, survives
+//    reloads, and pushes through the same autoDraft path (type + multi-jurisdiction).
+export async function expandCompetitorTopic(siteId, oppId, { count = 4 } = {}) {
+  if (!siteId || !oppId) return { error: 'siteId + id required' };
+  const got = await fetchByIds(siteId, [oppId]);
+  if (got.notProvisioned) return { ...NOT_PROVISIONED, clusters: [] };
+  const parent = (got.items || [])[0];
+  if (!parent) return { error: 'That topic is no longer here.', clusters: [] };
+  const site = await db.getSite(siteId).catch(() => null);
+  if (!site) return { error: 'Site not found.', clusters: [] };
+  const pp = (parent.payload && typeof parent.payload === 'object') ? parent.payload : {};
+  const market = marketFor(site.semrush_db);
+  const seed = String(parent.primary_keyword || parent.title || '').trim();
+  const nicheCtx = geoFor(siteId) || '';
+  const negatives = (Array.isArray(site.negative_keywords) ? site.negative_keywords : []).map((n) => String(n || '').toLowerCase().trim()).filter(Boolean);
+  const scoreSite = { id: siteId, __nicheCtx: nicheCtx, __negatives: negatives };
+
+  // 1) Real keyword pool (volumes) — both DataForSEO expansions, each best-effort.
+  const pool = new Map();
+  const dfsErrors = [];
+  if (dfs.hasKey() && seed) {
+    const [rel, ideas] = await Promise.all([
+      dfs.relatedKeywords(seed, { db: site.semrush_db, limit: 60, depth: 2 }).catch((e) => { dfsErrors.push(String((e && e.message) || e)); return []; }),
+      dfs.keywordIdeas([seed], { db: site.semrush_db, limit: 60 }).catch((e) => { dfsErrors.push(String((e && e.message) || e)); return []; }),
+    ]);
+    for (const k of [...rel, ...ideas]) {
+      const kw = String(k.keyword || '').toLowerCase().trim(); if (!kw) continue;
+      if (hitsNeg(kw, negatives)) continue;                 // never build clusters in an excluded area
+      const prev = pool.get(kw); if (!prev || (k.volume || 0) > (prev.volume || 0)) pool.set(kw, { keyword: kw, volume: Number(k.volume) || 0 });
+    }
+  }
+  const keywords = [...pool.values()].sort((a, b) => (b.volume || 0) - (a.volume || 0)).slice(0, 100);
+
+  // 2) Claude → clusters.
+  let clusters = [];
+  try {
+    clusters = await claude.competitorClusters({ topic: parent.title, competitorUrl: pp.link, keywords, siteName: site.name, siteId, market, count });
+  } catch (e) { return { error: 'Could not generate clusters: ' + String((e && e.message) || e), clusters: [], pool: keywords.length }; }
+  if (!clusters.length) return { error: 'No clusters came back — try again.', clusters: [], pool: keywords.length };
+
+  // 3) Persist one opportunity per cluster, under the parent.
+  const raw = [];
+  for (const c of clusters) {
+    const kws = (Array.isArray(c.keywords) ? c.keywords : []).map((k) => String(k || '').toLowerCase().trim()).filter(Boolean)
+      .map((kw) => ({ keyword: kw, volume: (pool.get(kw) || {}).volume || 0 }));
+    if (!kws.length && !c.suggestedTitle) continue;
+    const primary = (kws.slice().sort((a, b) => (b.volume || 0) - (a.volume || 0))[0] || {}).keyword || String(c.label || c.suggestedTitle || '').toLowerCase();
+    const totalVolume = kws.reduce((s, k) => s + (k.volume || 0), 0);
+    const title = String(c.suggestedTitle || c.label || primary).trim();
+    const label = String(c.label || title).trim();
+    const angle = String(c.angle || '').trim();
+    const o = makeOpp(siteId, {
+      source: 'competitor_cluster',
+      sourceRef: parent.id,
+      title,
+      primaryKeyword: primary,
+      intent: c.intent || 'informational',
+      actionType: 'article',
+      clusterKey: label,
+      evidence: [{ source: 'competitor_cluster', detail: `Cluster around "${String(parent.title || '').slice(0, 80)}"${pp.competitor ? ' (' + pp.competitor + ')' : ''}` }],
+      payload: {
+        parentId: parent.id, parentTitle: parent.title, competitor: pp.competitor || '', link: pp.link || '',
+        label, suggestedTitle: title, primaryKeyword: primary, intent: c.intent || 'informational', format: c.format || '',
+        totalVolume, keywords: kws, angle,
+        // The writer row: Goal = the angle; Content Brief = angle + the keyword list with volumes.
+        brief: { title, angle, outline: kws.length ? [{ h2: 'Target keywords (cover these)', points: kws.map((k) => k.keyword + (k.volume ? ` (~${k.volume}/mo)` : '')) }] : [] },
+        jurisdiction: pp.jurisdiction || market.country, suggestedType: pp.category || pp.suggestedType || 'blog',
+        fromCompetitor: true, sourceType: 'competitor_cluster', volumesReal: keywords.length > 0,
+      },
+    });
+    o.dedupeKey = 'ccl:' + feedHash(String(parent.id) + '|' + label.toLowerCase());
+    score(o, scoreSite);
+    raw.push(o);
+  }
+  const res = await persist(siteId, raw);
+  if (res.notProvisioned) return { ...NOT_PROVISIONED, clusters: [] };
+  const rows = (res.rows || []).map((r) => ({ id: r.id, title: r.title, status: r.status, primaryKeyword: r.primary_keyword, keywords: (r.payload && r.payload.keywords) || [], totalVolume: (r.payload && r.payload.totalVolume) || 0, angle: (r.payload && r.payload.angle) || '', format: (r.payload && r.payload.format) || '', intent: r.intent, suggestedType: (r.payload && r.payload.suggestedType) || 'blog', jurisdiction: (r.payload && r.payload.jurisdiction) || 'Not stated' }));
+  return { clusters: rows, saved: res.saved || 0, pool: keywords.length, volumesReal: keywords.length > 0, dfsErrors: dfsErrors.length ? dfsErrors : undefined, error: res.error };
+}
+
 export async function persist(siteId, opps) {
   if (!SB || !SRV) return { ...NOT_PROVISIONED, error: 'Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE missing).' };
   const list = (opps || []).filter((o) => o && o.dedupeKey);

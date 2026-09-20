@@ -1966,6 +1966,9 @@ function CompetitorsScreen({ ctx }) {
   const [jxFilter,setJxFilter] = useState("");      // jurisdiction the competitor wrote the piece for
   const [jxTouched,setJxTouched] = useState(false); // user picked a jurisdiction filter themselves (stop auto-following the top bar)
   const [typeFilter,setTypeFilter] = useState("");  // content type (smart template, legal definition…) — split the list by what you're working on
+  const [clusters,setClusters] = useState({});      // parent topic id → [cluster opportunities] ("Take over this topic")
+  const [openCl,setOpenCl] = useState({});          // parent topic id → panel open?
+  const [expanding,setExpanding] = useState("");    // parent id being expanded
   const [types,setTypes] = useState({});            // item id → content type chosen before push
   const [busyId,setBusyId] = useState("");
   const [shown,setShown] = useState(100);          // rows rendered so far (client-side "Show more" — the list itself is unlimited)
@@ -1987,10 +1990,24 @@ function CompetitorsScreen({ ctx }) {
     setLoading(true);
     API.competitorSitemapItems(s.id).then(r=>{
       if(r && r.notProvisioned){ setNotProv(true); setItems([]); return; }
-      setNotProv(false); setItems((r&&r.items)||[]); setCounts((r&&r.counts)||{}); if(r&&r.siteJurisdiction) setSiteJx(r.siteJurisdiction);
+      setNotProv(false); setItems((r&&r.items)||[]); setCounts((r&&r.counts)||{}); if(r&&r.siteJurisdiction) setSiteJx(r.siteJurisdiction); setClusters((r&&r.clustersByParent)||{});
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setLoading(false));
   };
-  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setJxFilter(""); setTypeFilter(""); setFilter("new"); setShown(100); setPushJx([]); setPushOpen(false); if(live){ loadSources(); loadItems(); } },[s.id]);
+  // "Take over this topic": 3-5 keyword clusters (real volumes) around one competitor article.
+  const expand = (it)=>{
+    if(expanding) return;
+    setExpanding(it.id);
+    ctx.toast("Finding keyword clusters around “"+String(it.title).slice(0,40)+"”… (~20s)","teal");
+    API.competitorExpand(s.id, it.id, 4).then(r=>{
+      if(r && r.notProvisioned){ setNotProv(true); return; }
+      if(r && r.error && !(r.clusters&&r.clusters.length)){ ctx.toast(r.error,"clay"); return; }
+      const n=(r&&r.clusters||[]).length;
+      ctx.toast(n?("Found "+n+" cluster"+(n===1?"":"s")+(r.volumesReal?" with real search volumes":" (no volume data — phrases are unverified)")+" — pick a type and push the ones you want"):"No clusters found", n?"teal":"gold");
+      setOpenCl(o=>Object.assign({},o,{[it.id]:true}));
+      loadItems();
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setExpanding(""));
+  };
+  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setJxFilter(""); setTypeFilter(""); setFilter("new"); setShown(100); setPushJx([]); setPushOpen(false); setClusters({}); setOpenCl({}); if(live){ loadSources(); loadItems(); } },[s.id]);
   // Top-bar jurisdiction changed → refresh the label (and the auto filter follows it).
   useEffect(()=>{ if(live) loadSources(); },[s.semrush_db]);
   useEffect(()=>{ setShown(100); },[filter,compFilter,jxFilter,typeFilter]);
@@ -2074,6 +2091,40 @@ function CompetitorsScreen({ ctx }) {
   const fmtDate = (d)=>{ if(!d) return "never"; try{ return new Date(d).toLocaleDateString(undefined,{ day:"numeric", month:"short" }); }catch(e){ return ""; } };
   const inp = { padding:"10px 13px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none" };
   const sel = { padding:"7px 10px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5, color:"var(--ink)", outline:"none" };
+  // Panel under a competitor topic: its clusters, each pushable as its own article.
+  const clusterPanel = (it)=>{
+    const list = clusters[it.id]||[];
+    if(!openCl[it.id] || !list.length) return null;
+    return (
+      <div style={{ margin:"0 4px 10px 22px", padding:"10px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+        <div style={{ fontSize:12, color:"var(--muted)", marginBottom:4 }}>Clusters around <b>{it.title}</b> — each one is a new article to surround and out-rank it. Pick a type and push the ones you want{pushJx.length>1?(" (to "+pushJx.length+" jurisdictions)"):""}.</div>
+        {list.map(c=>(
+          <div key={c.id} style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", padding:"8px 0", borderTop:"1px solid var(--line)" }}>
+            <div style={{ flex:"1 1 320px", minWidth:0 }}>
+              <div style={{ fontSize:13, fontWeight:700, color:"var(--ink)", lineHeight:1.35 }}>{c.title}</div>
+              <div style={{ fontSize:11.5, color:"var(--muted)", marginTop:2 }}>{(c.keywords||[]).slice(0,6).map(k=>k.keyword+(k.volume?(" ("+Number(k.volume).toLocaleString()+")"):"")).join(" · ")}{c.totalVolume?(" · ~"+Number(c.totalVolume).toLocaleString()+" searches/mo"):(c.volumesReal?"":" · volumes unverified")}</div>
+              {c.angle && <div style={{ fontSize:11.5, color:"var(--ink-2)", marginTop:2, fontStyle:"italic" }}>{c.angle}</div>}
+            </div>
+            {c.status==="scored" && TYPES.length>1 && (
+              <label style={{ display:"inline-flex", alignItems:"center", gap:6, fontSize:12, color:"var(--muted)" }}>Create as
+                <select value={types[c.id]||c.suggestedType||TYPES[0][0]} onChange={e=>setTypes(p=>Object.assign({},p,{[c.id]:e.target.value}))} style={sel}>
+                  {TYPES.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+                </select>
+              </label>
+            )}
+            {isPushed(c.status) && <span style={{ fontSize:12, fontWeight:700, color:"var(--t-700)", background:"var(--t-50)", padding:"5px 10px", borderRadius:"var(--r-pill)" }}>Pushed ✓</span>}
+            {c.status==="dismissed" && <span style={{ fontSize:12, fontWeight:700, color:"var(--muted)", background:"var(--surface)", padding:"5px 10px", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-xs)" }}>Hidden</span>}
+            {c.status==="scored" && <NeoButton kind="primary" size="sm" disabled={busyId===c.id} onClick={()=>push(c)}>{busyId===c.id?"Pushing…":(pushJx.length>1?("Push to "+pushJx.length+" jurisdictions"):"Push to writer")}</NeoButton>}
+            {c.status==="scored" && <NeoButton kind="ghost" size="sm" disabled={busyId===c.id} onClick={()=>hide(c)}>Hide</NeoButton>}
+            {c.status==="dismissed" && <NeoButton kind="ghost" size="sm" disabled={busyId===c.id} onClick={()=>unhide(c)}>Unhide</NeoButton>}
+          </div>
+        ))}
+        <div style={{ paddingTop:8 }}>
+          <NeoButton kind="soft" size="sm" disabled={!!expanding} onClick={()=>expand(it)}>{expanding===it.id?"Finding…":"Find more clusters"}</NeoButton>
+        </div>
+      </div>
+    );
+  };
   const FilterBtn = ({k,label,n})=>(
     <button onClick={()=>setFilter(k)} className="neo-btn" style={{ padding:"6px 12px", borderRadius:"var(--r-pill)", border:"none", cursor:"pointer", fontSize:12, fontWeight:700, background:filter===k?"var(--t-100)":"var(--bg)", boxShadow:"var(--neo-in)", color:filter===k?"var(--t-700)":"var(--muted)" }}>
       {label}{n!=null?" · "+n:""}
@@ -2196,7 +2247,8 @@ function CompetitorsScreen({ ctx }) {
             <div style={{ fontSize:13, color:"var(--muted)", padding:"8px 2px" }}>{items.length?"Nothing here for this filter.":"Nothing scanned yet — click Scan on a competitor above."}</div>
           )}
           {visible.slice(0,shown).map(it=>(
-            <div key={it.id} style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", padding:"10px 4px", borderTop:"1px solid var(--line)" }}>
+            <React.Fragment key={it.id}>
+            <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", padding:"10px 4px", borderTop:"1px solid var(--line)" }}>
               <div style={{ flex:"1 1 340px", minWidth:0 }}>
                 <div style={{ fontSize:13.5, fontWeight:700, color:"var(--ink)", lineHeight:1.35 }}>{it.title}</div>
                 <div style={{ fontSize:12, color:"var(--muted)", marginTop:2 }}>
@@ -2214,12 +2266,17 @@ function CompetitorsScreen({ ctx }) {
                   </select>
                 </label>
               )}
+              {it.status!=="dismissed" && ((it.clusterCount>0)
+                ? <NeoButton kind="soft" size="sm" onClick={()=>setOpenCl(o=>Object.assign({},o,{[it.id]:!o[it.id]}))} title="Show the keyword clusters found around this topic">{it.clusterCount+" cluster"+(it.clusterCount===1?"":"s")+(openCl[it.id]?" ▴":" ▾")}</NeoButton>
+                : <NeoButton kind="soft" size="sm" icon={expanding===it.id?undefined:"sparkles"} disabled={!!expanding} onClick={()=>expand(it)} title="Find 3–5 keyword clusters around this competitor article so you can surround and out-rank it">{expanding===it.id?"Finding…":"Take over this topic"}</NeoButton>)}
               {isPushed(it.status) && <span style={{ fontSize:12, fontWeight:700, color:"var(--t-700)", background:"var(--t-50)", padding:"5px 10px", borderRadius:"var(--r-pill)" }}>Pushed ✓</span>}
               {it.status==="dismissed" && <span style={{ fontSize:12, fontWeight:700, color:"var(--muted)", background:"var(--bg)", padding:"5px 10px", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-in)" }}>Hidden</span>}
               {it.status==="scored" && <NeoButton kind="primary" size="sm" disabled={busyId===it.id} onClick={()=>push(it)} title={pushJx.length>1?("Create this in your Article Writer for "+pushJx.length+" jurisdictions ("+pushJx.join(", ")+") and mark it done here"):"Create this in your Article Writer and mark it done here"}>{busyId===it.id?"Pushing…":(pushJx.length>1?("Push to "+pushJx.length+" jurisdictions"):"Push to writer")}</NeoButton>}
               {it.status==="scored" && <NeoButton kind="ghost" size="sm" disabled={busyId===it.id} onClick={()=>hide(it)} title="Not interested — hide it">Hide</NeoButton>}
               {it.status==="dismissed" && <NeoButton kind="ghost" size="sm" disabled={busyId===it.id} onClick={()=>unhide(it)}>Unhide</NeoButton>}
             </div>
+            {clusterPanel(it)}
+            </React.Fragment>
           ))}
           {visible.length>shown && (
             <div style={{ display:"flex", justifyContent:"center", padding:"12px 0 4px" }}>

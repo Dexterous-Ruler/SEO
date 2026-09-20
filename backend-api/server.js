@@ -345,7 +345,7 @@ function authOk(req) {
 // The dashboard's kill switch was per-tab React state — another tab (or the API)
 // happily kept writing. Now it's persisted (app_secrets) and enforced HERE, at the
 // dispatcher, for every route that can mutate WordPress/Airtable/n8n. 10s cache.
-const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|engine-clean-negatives|competitor-sitemap-poll|competitor-source-save|competitor-source-remove|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
+const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|engine-clean-negatives|competitor-sitemap-poll|competitor-expand|competitor-source-save|competitor-source-remove|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
 let _kill = { v: false, exp: 0 };
 async function killSwitchOn() {
   if (Date.now() < _kill.exp) return _kill.v;
@@ -4760,6 +4760,12 @@ const routes = {
     }
     return { ok: !r.error, ...r, sources: list, siteJurisdiction: jurisdiction };
   },
+  // "Take over this topic": one competitor article → 3-5 keyword clusters (real volumes
+  // from DataForSEO + Claude), each persisted as its own opportunity under the topic.
+  'POST /competitor-expand': async (body) => {
+    if (!body.siteId || !body.id) return { error: 'siteId + id required' };
+    return engine.expandCompetitorTopic(body.siteId, body.id, { count: body.count });
+  },
   // Everything scanned from competitors (source 'competitor_sitemap'), EVERY status —
   // so the user can see what's new vs already pushed vs hidden. Optional competitor filter.
   'POST /competitor-sitemap-items': async (body) => {
@@ -4785,8 +4791,21 @@ const routes = {
       .filter((o) => !want || String(o.competitor).toLowerCase() === want)
       .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || (b.score - a.score));
     const counts = { total: items.length, new: items.filter((i) => i.status === 'scored').length, pushed: items.filter((i) => ['queued', 'in_review', 'published', 'done'].includes(i.status)).length, hidden: items.filter((i) => i.status === 'dismissed').length };
+    // Child clusters ("Take over this topic"), grouped under their competitor topic.
+    const clustersByParent = {};
+    for (let off = 0; off < 10000; off += 500) {
+      const page = await engine.worklist(body.siteId, { source: 'competitor_cluster', limit: 500, offset: off }).catch(() => ({ items: [] }));
+      const rows = page.items || [];
+      for (const o of rows) {
+        const p = (o.payload && typeof o.payload === 'object') ? o.payload : {};
+        const pid = p.parentId; if (!pid) continue;
+        (clustersByParent[pid] = clustersByParent[pid] || []).push({ id: o.id, title: o.title, status: o.status, primaryKeyword: o.primary_keyword, keywords: Array.isArray(p.keywords) ? p.keywords : [], totalVolume: p.totalVolume || 0, angle: p.angle || '', format: p.format || '', intent: o.intent || p.intent || '', suggestedType: p.category || p.suggestedType || 'blog', jurisdiction: p.jurisdiction || 'Not stated', competitor: p.competitor || '', volumesReal: !!p.volumesReal });
+      }
+      if (rows.length < 500) break;
+    }
+    for (const it of items) it.clusterCount = (clustersByParent[it.id] || []).length;
     const itemsSite = await db.getSite(body.siteId).catch(() => null);
-    return { items, counts, siteJurisdiction: marketFor(itemsSite && itemsSite.semrush_db).country };
+    return { items, counts, siteJurisdiction: marketFor(itemsSite && itemsSite.semrush_db).country, clustersByParent };
   },
 
   // One radar item → a writer-ready brief in the Article Writer (Status BLANK).
