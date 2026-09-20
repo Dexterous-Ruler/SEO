@@ -44,11 +44,22 @@ function isMissingTable(status, body) {
 // whether the answer cites the target domain. Returns structured result.
 // Bounded by a per-call timeout so a single slow/hung web search can't stall the
 // whole tracking pass (which must complete inside the gateway request timeout).
-async function askWithSearch(promptText, timeoutMs = 26000) {
+async function askWithSearch(promptText, timeoutMs = 26000, market = null) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   let res;
   try {
+    // Scope the web search to the target jurisdiction so "how do AI engines answer
+    // this?" is measured for the RIGHT country (a UK-only lock hid India/US reality).
+    const tool = { type: 'web_search_20250305', name: 'web_search', max_uses: 4 };
+    if (market && market.geo) tool.user_location = { type: 'approximate', country: String(market.geo).toUpperCase() };
+    const bodyObj = {
+      model: MODEL,
+      max_tokens: 1024,
+      tools: [tool],
+      messages: [{ role: 'user', content: promptText }],
+    };
+    if (market && market.scope) bodyObj.system = market.scope;   // answer for this country's audience
     res = await fetch(API, {
       method: 'POST',
       headers: {
@@ -56,12 +67,7 @@ async function askWithSearch(promptText, timeoutMs = 26000) {
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
-        model: MODEL,
-        max_tokens: 1024,
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 4 }],
-        messages: [{ role: 'user', content: promptText }],
-      }),
+      body: JSON.stringify(bodyObj),
       signal: ctrl.signal,
     });
   } catch (e) {
@@ -120,7 +126,7 @@ async function mapLimit(items, limit, fn) {
 // timeout (a serial loop over ~18 prompts blew past it → 504 "gateway time-out").
 const GEO_MAX_PROMPTS = 16;   // bound total work — keeps the pass under the gateway timeout
 const GEO_CONCURRENCY = 8;    // parallel web-search calls (gentle on Anthropic rate limits)
-export async function runCitationTracking({ siteId, targetDomain, prompts, competitors = [], onResult }) {
+export async function runCitationTracking({ siteId, targetDomain, prompts, competitors = [], onResult, market = null }) {
   const target = domainOf(targetDomain);
   const compDomains = competitors.map(domainOf);
 
@@ -132,7 +138,7 @@ export async function runCitationTracking({ siteId, targetDomain, prompts, compe
   const results = await mapLimit(list, GEO_CONCURRENCY, async (p, i) => {
     const promptText = typeof p === 'string' ? p : p.prompt;
     try {
-      const { answer, citedUrls } = await askWithSearch(promptText);
+      const { answer, citedUrls } = await askWithSearch(promptText, 26000, market);
       const citedDomains = [...new Set(citedUrls.map(domainOf))];
       const targetCited = citedDomains.includes(target);
       // brand mention in prose even if not formally cited
@@ -176,7 +182,7 @@ export async function runCitationTracking({ siteId, targetDomain, prompts, compe
   const total = answered; // SoV denominator = prompts that actually returned a result
   const shareOfVoice = total ? Math.round((cited / total) * 100) : 0;
   const competitorScores = compDomains.map((d) => ({ domain: d, cited: compCites[d] || 0, share: total ? Math.round(((compCites[d] || 0) / total) * 100) : 0 }));
-  const result = { targetDomain: target, shareOfVoice, promptsTotal: total, promptsCited: cited, promptsAttempted: attempted, promptsErrored: errored, competitors: competitorScores, results };
+  const result = { targetDomain: target, shareOfVoice, promptsTotal: total, promptsCited: cited, promptsAttempted: attempted, promptsErrored: errored, competitors: competitorScores, results, market: (market && market.db) || null, marketCountry: (market && market.country) || null };
 
   // Best-effort time-series snapshot. A snapshot failure (missing table, network)
   // must NEVER break the live tracking result the caller is awaiting.
@@ -188,7 +194,8 @@ export async function runCitationTracking({ siteId, targetDomain, prompts, compe
 }
 
 // Generate a default buyer-intent prompt set for a site/niche using Claude.
-export async function suggestPrompts({ siteName, niche, sampleTitles = [], exclude = [], context = '' }) {
+export async function suggestPrompts({ siteName, niche, sampleTitles = [], exclude = [], context = '', market = null }) {
+  const countryLine = (market && market.country) ? `\n\nThese questions are for a ${market.country} audience — use ${market.country} spelling, terminology, currency and local context in the questions.` : '';
   // Anchor STRICTLY on the real page titles so the prompts match what the site
   // actually is — not what its brand name sounds like (e.g. "GoodFor" must not be
   // assumed to be an employee-recognition tool when it's a food/skincare scanner).
@@ -216,7 +223,7 @@ export async function suggestPrompts({ siteName, niche, sampleTitles = [], exclu
       model: MODEL, max_tokens: 1200,
       messages: [{
         role: 'user',
-        content: `You are generating buyer-intent questions to measure how often AI assistants cite a specific website.\n\nSite: "${siteName}"${niche ? ` — stated niche: ${niche}` : ''}\n${topicBlock}${contextBlock}\n\nGenerate 18 realistic buyer-intent questions a potential CUSTOMER of THIS site would ask ChatGPT or Perplexity. Mix informational, commercial, and comparison intent.\n\nCRITICAL RULES:\n- Base every question ONLY on what this specific site/product actually does (per the page titles above). Do NOT infer the product category from the brand name alone, and never invent an unrelated industry.\n- Write them the way a real person would search — natural questions, NOT stuffed with the brand/domain name (most should not mention the brand at all).${excludeBlock}\n\nReturn ONLY a JSON array of objects: [{"prompt":"...","intent":"informational|commercial|comparison"}]. No markdown.`,
+        content: `You are generating buyer-intent questions to measure how often AI assistants cite a specific website.\n\nSite: "${siteName}"${niche ? ` — stated niche: ${niche}` : ''}\n${topicBlock}${contextBlock}${countryLine}\n\nGenerate 18 realistic buyer-intent questions a potential CUSTOMER of THIS site would ask ChatGPT or Perplexity. Mix informational, commercial, and comparison intent.\n\nCRITICAL RULES:\n- Base every question ONLY on what this specific site/product actually does (per the page titles above). Do NOT infer the product category from the brand name alone, and never invent an unrelated industry.\n- Write them the way a real person would search — natural questions, NOT stuffed with the brand/domain name (most should not mention the brand at all).${excludeBlock}\n\nReturn ONLY a JSON array of objects: [{"prompt":"...","intent":"informational|commercial|comparison"}]. No markdown.`,
       }],
     }),
   });

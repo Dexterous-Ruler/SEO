@@ -26,6 +26,7 @@ dotenvConfig({ override: true });
 
 import { db } from './supabase.js';
 import { geoFor } from './prompts.js';
+import { marketFor } from './market.js';
 import { findOpportunities } from './content-opportunities.js';
 import * as research from './research.js';
 import * as dfs from './dataforseo.js';
@@ -416,11 +417,12 @@ export async function ingestFeeds(siteId, sources) {
   const site = await db.getSite(siteId).catch(() => null);
   if (!site) return { error: 'Site not found.', saved: 0 };
   const scoreSite = { id: siteId, __nicheCtx: geoFor(siteId) || '', __negatives: (Array.isArray(site.negative_keywords) ? site.negative_keywords : []).map((n) => String(n || '').toLowerCase().trim()).filter(Boolean) };
+  const market = marketFor(site.semrush_db);   // scope google_news sources to the site's country/language
   const active = (sources || []).filter((s) => s && s.active !== false);
   const perSource = [];
   const raw = [];
   for (const src of active) {
-    const url = feeds.sourceToUrl(src);
+    const url = feeds.sourceToUrl(src, market);
     if (!url) { perSource.push({ id: src.id, label: src.label, error: 'no feed URL' }); continue; }
     const r = await feeds.fetchFeed(url).catch((e) => ({ error: String((e && e.message) || e), items: [] }));
     if (r.error) { perSource.push({ id: src.id, label: src.label || url, error: r.error, items: 0 }); continue; }
@@ -813,6 +815,8 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids } = {}) {
   if (!pat || !cfg || !cfg.base_id) return { drafted: 0, skipped: true, reason: 'Airtable not configured', candidates: items.length };
   if (!cfg.table_gaps) return { drafted: 0, skipped: true, reason: 'No Article Writer table configured (table_gaps)', candidates: items.length };
   const baseId = cfg.base_id;
+  const site = await db.getSite(siteId).catch(() => null);
+  const market = marketFor(site && site.semrush_db);   // stamp Jurisdiction + Language onto each writer row
 
   let tables = [];
   try { tables = await airtable.listTables(pat, baseId); } catch (e) { tables = []; }
@@ -824,6 +828,10 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids } = {}) {
   let briefField = 'Content Brief';
   if (!names.has('Content Brief')) { try { briefField = await airtable.ensureField(pat, baseId, tbl.id, 'Content Brief', 'multilineText'); } catch (e) { briefField = null; } }
   if (briefField) names.add(briefField);
+  // Jurisdiction + Language columns (best-effort create; needs schema.bases:write).
+  for (const col of ['Jurisdiction', 'Language']) {
+    if (!names.has(col)) { try { const c = await airtable.ensureField(pat, baseId, tbl.id, col, 'singleLineText'); if (c) names.add(c); } catch (e) {} }
+  }
 
   // 3) Map each opportunity → an Article Writer row (Title + Keyword + brief),
   //    field-set-filtered so a differing per-site schema can't 422.
@@ -831,7 +839,7 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids } = {}) {
   for (const it of items) {
     const cluster = oppToCluster(it);
     const brief = (it.payload && it.payload.brief && typeof it.payload.brief === 'object') ? it.payload.brief : {};
-    const row = airtable.mapArticleBrief(cluster, brief, briefField, names);
+    const row = airtable.mapArticleBrief(cluster, brief, briefField, names, airtable.normalizeCategory((it.payload && it.payload.category) || (cluster && cluster.category)), market);
     if (row && row.Keyword) rowById.set(it.id, { row, keyword: String(row.Keyword).trim().toLowerCase() });
   }
   if (!rowById.size) return { drafted: 0, skipped: true, reason: 'nothing mappable to draft', candidates: items.length };

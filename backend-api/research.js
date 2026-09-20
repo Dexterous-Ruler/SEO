@@ -22,16 +22,30 @@ const mt = (key, fallbackModel) => ({ model: modelFor(key) || fallbackModel, tem
 
 // ---- source hygiene --------------------------------------------------------
 const domainOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return u || ''; } };
-function authorityScore(url) {
+// Rank a source's authority for the ACTIVE market. UK still gets its curated
+// gov/authority list; other markets up-rank the market's own ccTLD + government
+// (e.g. .in / gov.in for India, .gov for the US) so non-UK research isn't biased
+// back toward UK sources. `market` optional → UK behaviour (back-compat).
+function authorityScore(url, market) {
   const d = domainOf(url);
-  if (/\.gov\.uk$/.test(d) || d === 'gov.uk') return 100;
-  if (UK.preferDomains.some((p) => d === p || d.endsWith('.' + p))) return 80;
-  if (/\.uk$/.test(d)) return 60;                 // UK domain
-  if (/\.(ac\.uk|nhs\.uk|org\.uk)$/.test(d)) return 70;
+  const mk = market || null;
+  if (!mk || mk.db === 'uk') {
+    if (/\.gov\.uk$/.test(d) || d === 'gov.uk') return 100;
+    if (UK.preferDomains.some((p) => d === p || d.endsWith('.' + p))) return 80;
+    if (/\.uk$/.test(d)) return 60;                 // UK domain
+    if (/\.(ac\.uk|nhs\.uk|org\.uk)$/.test(d)) return 70;
+    return 30;
+  }
+  const cc = String(mk.geo || '').toLowerCase();    // ISO-3166 (GB, IN, US…)
+  const tld = cc === 'gb' ? 'uk' : cc;              // ccTLD (GB→.uk)
+  if (mk.preferDomains && mk.preferDomains.some((p) => d === p || d.endsWith('.' + p))) return 90;
+  if (new RegExp(`(^|\\.)gov\\.${tld}$`).test(d) || new RegExp(`(^|\\.)gov$`).test(d)) return 100;  // gov.in, .gov (US)
+  if (new RegExp(`\\.${tld}$`).test(d)) return 60;  // the market's ccTLD
+  if (/\.(gov|edu)$/.test(d)) return 70;            // generic authority TLDs
   return 30;
 }
-// De-dup by domain, keep the highest-authority/first per domain, rank.
-function rankSources(sources) {
+// De-dup by domain, keep the highest-authority/first per domain, rank for `market`.
+function rankSources(sources, market) {
   const byDomain = new Map();
   for (const s of sources) {
     if (!s || !s.url) continue;
@@ -40,7 +54,7 @@ function rankSources(sources) {
     if (!cur) byDomain.set(d, s);
   }
   return [...byDomain.values()]
-    .map((s) => ({ ...s, domain: domainOf(s.url), authority: authorityScore(s.url) }))
+    .map((s) => ({ ...s, domain: domainOf(s.url), authority: authorityScore(s.url, market) }))
     .sort((a, b) => b.authority - a.authority);
 }
 
@@ -61,7 +75,7 @@ export async function gather(topic, { recency = 'month', excludeDomains, now = 0
   // 1) Tavily — gather source documents for the market (parallel-safe).
   let tav = null;
   if (tavily.hasKey()) {
-    try { tav = await tavily.search(topic, { depth: 'advanced', maxResults: 8, excludeDomains }); out.engines.tavily = (tav.results || []).length; }
+    try { tav = await tavily.search(topic, { depth: 'advanced', maxResults: 8, excludeDomains, country: mk.country }); out.engines.tavily = (tav.results || []).length; }
     catch (e) { out.engines.tavilyError = String(e.message || e); }
   }
   // 2) Perplexity — grounded, cited current-state summary for the market.
@@ -83,7 +97,7 @@ export async function gather(topic, { recency = 'month', excludeDomains, now = 0
     pp && pp.answer ? `GROUNDED SUMMARY:\n${pp.answer}` : '',
     ...(tav && tav.results ? tav.results.map((r) => `SOURCE: ${r.title} (${r.url})\n${(r.content || '').slice(0, 700)}`) : []),
   ].filter(Boolean).join('\n\n');
-  out.sources = rankSources([...(pp ? pp.sources : []), ...(tav ? tav.results : [])]);
+  out.sources = rankSources([...(pp ? pp.sources : []), ...(tav ? tav.results : [])], mk);
 
   if (ttlMs && now) cacheSet(cacheKey, out, now);
   return out;
@@ -118,7 +132,7 @@ export async function trendingIntel({ niche, context, db, now = 0 }) {
         user: `${ctx ? '' : `Niche: ${niche}. `}Propose 6-8 timely, niche-specific article ideas for this site's ${mk.country} audience for THIS week. Return ONLY the JSON array described above.`,
         ...mt('research.trending', 'fast'), recency: 'week', domains: mk.preferDomains, scope: mk.scope, geo: mk.geo, maxTokens: 2000,
       });
-      out.summary = pp.answer; out.sources = rankSources(pp.sources); out.engines.perplexity = (pp.sources || []).length; if (pp.cost) out.cost += pp.cost;
+      out.summary = pp.answer; out.sources = rankSources(pp.sources, mk); out.engines.perplexity = (pp.sources || []).length; if (pp.cost) out.cost += pp.cost;
       try {
         const a = String(pp.answer || '');
         let arr = [];
@@ -146,7 +160,7 @@ export async function trendingIntel({ niche, context, db, now = 0 }) {
     } catch (e) { out.engines.perplexityError = String(e.message || e); }
   }
   if (tavily.hasKey()) {
-    try { const t = await tavily.search(`${(niche || '').slice(0, 60)} ${mk.country}`, { topic: 'news', days: 7, maxResults: 8 }); out.topics = (t.results || []).map((r) => ({ title: r.title, url: r.url })); out.engines.tavily = out.topics.length; if (!out.sources.length) out.sources = rankSources(t.results); }
+    try { const t = await tavily.search(`${(niche || '').slice(0, 60)} ${mk.country}`, { topic: 'news', days: 7, maxResults: 8, country: mk.country }); out.topics = (t.results || []).map((r) => ({ title: r.title, url: r.url })); out.engines.tavily = out.topics.length; if (!out.sources.length) out.sources = rankSources(t.results, mk); }
     catch (e) { out.engines.tavilyError = String(e.message || e); }
   }
   if (now) cacheSet(cacheKey, out, now);
@@ -162,7 +176,7 @@ export async function citableFactsGrounded({ topic, niche, db, siteId, now = 0 }
     user: `Topic: ${topic}${niche ? ` (niche: ${niche})` : ''}. List the current ${mk.country} facts most useful to cite in an article.`,
     ...mt('research.facts', 'pro'), recency: 'month', domains: mk.preferDomains, scope: mk.scope, geo: mk.geo, maxTokens: 900,
   });
-  return { topic, summary: pp.answer, sources: rankSources(pp.sources), cost: pp.cost };
+  return { topic, summary: pp.answer, sources: rankSources(pp.sources, mk), cost: pp.cost };
 }
 
 export function status() { return { perplexity: perplexity.hasKey(), tavily: tavily.hasKey() }; }

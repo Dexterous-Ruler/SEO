@@ -102,10 +102,22 @@ export function googleNewsRss(query, { region = 'GB', lang = 'en' } = {}) {
 
 // Normalize any radar source definition to a fetchable URL.
 // type: 'google_alert' | 'outlet_rss' → the url IS the feed; 'google_news' → build from query.
-export function sourceToUrl(src) {
+// `market` (optional, from marketFor(site.semrush_db)) scopes a google_news search
+// to the site's country/language instead of hard-locking to GB/en.
+export function sourceToUrl(src, market) {
   if (!src) return '';
-  if (src.type === 'google_news') return googleNewsRss(src.query || src.label || '');
+  if (src.type === 'google_news') {
+    const opts = market && market.geo ? { region: market.geo, lang: (String(market.language || 'English').slice(0, 2).toLowerCase() === 'en' ? 'en' : googleLang(market)) } : {};
+    return googleNewsRss(src.query || src.label || '', opts);
+  }
   return String(src.url || '').trim();
+}
+// Best-effort ISO-639 language code from a market's language NAME (Google News
+// wants a 2-letter hl language). Defaults to English — most target markets we
+// support publish English content, and en is always a safe Google News locale.
+function googleLang(market) {
+  const L = { english: 'en', german: 'de', french: 'fr', spanish: 'es', italian: 'it', dutch: 'nl', portuguese: 'pt', swedish: 'sv', norwegian: 'no', danish: 'da', finnish: 'fi', polish: 'pl', turkish: 'tr', japanese: 'ja', arabic: 'ar' };
+  return L[String((market && market.language) || '').toLowerCase()] || 'en';
 }
 
 export default { parseFeed, fetchFeed, googleNewsRss, sourceToUrl, stripTags, unwrapUrl };

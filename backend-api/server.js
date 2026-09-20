@@ -906,18 +906,23 @@ const routes = {
     // Per-site operator context ("what this site is about") steers prompt generation.
     let context = body.context || '';
     if (!context && body.siteId) { try { const st = await db.getSite(body.siteId); if (st && st.geo_context) context = st.geo_context; } catch (e) {} }
-    const prompts = await geo.suggestPrompts({ siteName: body.siteName, niche, sampleTitles: titles, exclude, context });
-    return { prompts, groundedOn: titles.length, excluded: exclude.length, usedContext: !!context };
+    const promptsSite = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    const market = marketFor(promptsSite && promptsSite.semrush_db);
+    const prompts = await geo.suggestPrompts({ siteName: body.siteName, niche, sampleTitles: titles, exclude, context, market });
+    return { prompts, groundedOn: titles.length, excluded: exclude.length, usedContext: !!context, market: market.db, jurisdiction: market.country };
   },
 
   // Run a citation-tracking pass: query prompts via Claude+web-search, detect
   // whether the domain is cited, compute share-of-AI-voice vs competitors.
   'POST /geo-track': async (body) => {
+    const trackSite = body.siteId ? await db.getSite(body.siteId).catch(() => null) : null;
+    const trackMarket = marketFor(trackSite && trackSite.semrush_db);
     const out = await geo.runCitationTracking({
       siteId: body.siteId,
       targetDomain: body.targetDomain,
       prompts: body.prompts || [],
       competitors: body.competitors || [],
+      market: trackMarket,
     });
     // Distinguish "genuinely 0 citations" from "the scan could not run". When web
     // search is unavailable (bad model/account, or a transient outage) EVERY prompt
@@ -943,6 +948,9 @@ const routes = {
         await fetch(`${process.env.SUPABASE_URL}/rest/v1/geo_runs`, {
           method: 'POST',
           headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, Authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE, 'Content-Type': 'application/json' },
+          // NOTE: no `market` column on geo_runs (avoid a DDL migration tonight — the
+          // mgmt token is rotated/dead). The jurisdiction is captured in the live result
+          // (out.market/out.marketCountry) and in citation_snapshots.result (jsonb).
           body: JSON.stringify({ site_id: body.siteId, engine: 'claude', share_of_voice: out.shareOfVoice, prompts_total: out.promptsTotal, prompts_cited: out.promptsCited, results: out.results, competitors: out.competitors }),
         });
       } catch (e) { /* best-effort persist */ }
@@ -3724,6 +3732,7 @@ const routes = {
     const table = cfg.table_gaps;                 // repurposed: keyword table
     const field = cfg.table_content || 'Keyword'; // repurposed: keyword field
     if (!table) return { error: 'No Airtable table selected for this site.', needsConfig: true };
+    const market = marketFor((await db.getSite(siteId).catch(() => null) || {}).semrush_db);
 
     // Keywords: use the list the UI passed, else derive content-GAP keywords
     // (clusters with no existing page) from the opportunity engine.
@@ -3753,6 +3762,10 @@ const routes = {
       // (a) Content Brief column — create it if absent (best-effort; needs schema.bases:write).
       let briefField = fieldNames.has('Content Brief') ? 'Content Brief' : null;
       if (!briefField && tbl) { try { const c = await airtable.ensureField(pat, cfg.base_id, tbl.id, 'Content Brief', 'multilineText'); if (c) { briefField = c; fieldNames.add(c); } } catch (e) {} }
+      // Jurisdiction + Language columns (best-effort create; needs schema.bases:write).
+      for (const col of ['Jurisdiction', 'Language']) {
+        if (!fieldNames.has(col) && tbl) { try { const c = await airtable.ensureField(pat, cfg.base_id, tbl.id, col, 'singleLineText'); if (c) fieldNames.add(c); } catch (e) {} }
+      }
 
       // (b) Internal Links — 2-3 topic-matched existing pages per keyword (keyed by trimmed kw).
       let links = null;
@@ -3784,14 +3797,14 @@ const routes = {
       }
 
       // (c) Title / Description / Content Brief per keyword — reuse the writer-ready mapper.
-      const briefRows = airtable.mapGapBriefs(keywords.map((k) => ({ keyword: String(k).trim() })), briefField, airtable.normalizeCategory(body.category));
+      const briefRows = airtable.mapGapBriefs(keywords.map((k) => ({ keyword: String(k).trim() })), briefField, airtable.normalizeCategory(body.category), market);
       const byKw = new Map(briefRows.map((r) => [String(r.Keyword).trim().toLowerCase(), r]));
       extras = {};
       for (const rawK of keywords) {
         const k = String(rawK).trim(); if (!k) continue;
         const br = byKw.get(k.toLowerCase()) || {};
         const row = {};
-        for (const fname of ['Title', 'Description', 'Primary Keyword', briefField]) {
+        for (const fname of ['Title', 'Description', 'Primary Keyword', 'Jurisdiction', 'Language', briefField]) {
           if (fname && fieldNames.has(fname) && br[fname] != null && String(br[fname]).trim()) row[fname] = br[fname];
         }
         if (linkField && links && links[k]) row[linkField] = links[k];
@@ -3833,6 +3846,8 @@ const routes = {
     const kinds = body.kinds || ['gaps', 'content', 'geo'];
     const out = {};
     const baseId = cfg.base_id;
+    // The site's target market → Jurisdiction + Language stamped on every writer row.
+    const market = marketFor((await db.getSite(siteId).catch(() => null) || {}).semrush_db);
 
     // helper: ensure a table then push rows
     async function push(kind, tableName, rows, schema) {
@@ -3866,6 +3881,11 @@ const routes = {
       const names = new Set((tbl.fields || []).map((f) => f.name));
       if (!names.has('Content Brief')) { try { briefField = await airtable.ensureField(pat, baseId, tbl.id, 'Content Brief', 'multilineText'); } catch (e) { briefField = null; } }
       if (briefField) names.add(briefField);
+      // Jurisdiction + Language columns so the writer knows which country/language to
+      // write for (best-effort create; needs schema.bases:write — degrades to skipping).
+      for (const col of ['Jurisdiction', 'Language']) {
+        if (!names.has(col)) { try { const c = await airtable.ensureField(pat, baseId, tbl.id, col, 'singleLineText'); if (c) names.add(c); } catch (e) {} }
+      }
       return (_awTarget = { tableId: tbl.id, tableName: tbl.name, briefField, fieldSet: names });
     }
     // Push rows into the Article Writer table, field-set-filtered (so a differing
@@ -3920,7 +3940,7 @@ const routes = {
       // stat fields get filtered away, leaving half-empty "ghost" rows in the master list.
       const aw = await articleWriterTarget();
       const rows = aw
-        ? airtable.mapGapBriefs(gaps || [], aw.briefField, airtable.normalizeCategory(body.category))
+        ? airtable.mapGapBriefs(gaps || [], aw.briefField, airtable.normalizeCategory(body.category), market)
         : airtable.mapGaps(gaps || [], 'DataForSEO', now);
       // Land keywords in the Article Writer table (de-duped by Keyword); only if that
       // table isn't configured do we fall back to a dedicated 'SEO Keyword Gaps' table.
@@ -3963,7 +3983,7 @@ const routes = {
       const aw = await articleWriterTarget();
       const clusters = body.clusters || [];
       if (aw) {
-        const rows = clusters.map((c) => airtable.mapArticleBrief(c, c.brief || null, aw.briefField, null, airtable.normalizeCategory(c.category || body.category)));
+        const rows = clusters.map((c) => airtable.mapArticleBrief(c, c.brief || null, aw.briefField, null, airtable.normalizeCategory(c.category || body.category), market));
         await pushToArticleWriter('opportunities', rows, 'Title', { upsert: true });
       } else {
         await push('opportunities', cfg.table_opportunities, airtable.mapOpportunities(clusters, now), airtable.SCHEMAS.opportunities);
@@ -3994,6 +4014,7 @@ const routes = {
           ].filter((l) => l !== '');
           const row = { Title: title, Keyword: q, 'Primary Keyword': q, Category: 'Blog',
             Description: `AI-visibility gap — AI answers this query without citing us${cited ? ` (cites ${cited})` : ''}. Answer it definitively and quotably.` };
+          if (market && market.country) { row.Jurisdiction = market.country; row.Language = market.language || 'English'; }
           if (aw.briefField) row[aw.briefField] = lines.join('\n');
           return row;
         });
@@ -4031,7 +4052,7 @@ const routes = {
       const aw = await articleWriterTarget();
       if (!aw) { out.article_brief = { error: 'No Article Writer table configured for this site.' }; }
       else {
-        const row = airtable.mapArticleBrief(body.cluster || {}, body.brief || null, aw.briefField, null, airtable.normalizeCategory(body.category));
+        const row = airtable.mapArticleBrief(body.cluster || {}, body.brief || null, aw.briefField, null, airtable.normalizeCategory(body.category), market);
         if (!row) { out.article_brief = { pushed: 0, note: 'no brief' }; }
         else { await pushToArticleWriter('article_brief', [row], 'Title', { upsert: true }); }
       }

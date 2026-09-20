@@ -38,13 +38,15 @@ async function post(url, body) {
   return data;
 }
 
-// UK-scoped search. topic 'news' + days for trending; 'general' otherwise.
+// Market-scoped search. topic 'news' + days for trending; 'general' otherwise.
+// `country` biases results to a country (a full country NAME, e.g. "India",
+// "United States"); defaults to the UK so unscoped callers are unchanged.
 // Returns { answer, results:[{title,url,content,score}] }.
-export async function search(query, { depth = 'advanced', maxResults = 8, topic = 'general', days, includeDomains, excludeDomains, includeAnswer = true } = {}) {
+export async function search(query, { depth = 'advanced', maxResults = 8, topic = 'general', days, includeDomains, excludeDomains, includeAnswer = true, country } = {}) {
   const body = {
     query, search_depth: depth, max_results: Math.min(maxResults, 20),
     topic, include_answer: includeAnswer, include_raw_content: false,
-    country: UK.countryName,                       // bias results to the United Kingdom
+    country: country || UK.countryName,            // bias results to the target market (default UK)
   };
   if (topic === 'news' && days) body.days = days;
   if (includeDomains && includeDomains.length) body.include_domains = includeDomains;

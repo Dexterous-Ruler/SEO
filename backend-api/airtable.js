@@ -277,7 +277,7 @@ export function mapGaps(gaps, source, now) {
 // Gap keywords as WRITER-READY Article Writer rows (Title + Keyword + Content Brief),
 // not bare keyword rows whose stat fields get filtered away by the writer's field set.
 // This is what "push keyword gaps" should create: a row n8n can actually write from.
-export function mapGapBriefs(gaps, briefField, category) {
+export function mapGapBriefs(gaps, briefField, category, market) {
   return (gaps || []).map((g) => {
     if (!g || !g.keyword) return null;
     const kw = String(g.keyword).trim();
@@ -290,6 +290,7 @@ export function mapGapBriefs(gaps, briefField, category) {
       'Write the definitive page for this keyword: match the search intent, answer it better and more completely than the competitor page, and route readers to the relevant service/booking CTA.',
     ].filter((l) => l !== '');
     const row = { Title: title, Keyword: kw, 'Primary Keyword': kw, Category: category || 'Blog' };
+    if (market && market.country) { row.Jurisdiction = market.country; row.Language = market.language || 'English'; }
     const desc = [
       `Target keyword: ${kw}` + (g.volume ? ` (~${Number(g.volume).toLocaleString()} searches/mo)` : ''),
       g.competitor ? `gap vs ${g.competitor}` + (g.competitorPos ? ` (ranks #${g.competitorPos})` : '') : '',
@@ -358,12 +359,18 @@ export function mapOpportunities(clusters, now) {
 export function normalizeCategory(type) {
   const t = String(type || '').toLowerCase().trim();
   if (/recipe/.test(t)) return 'Recipes';
+  // Go Legal AI content types. Match the specific legal_* values FIRST, before the
+  // generic /definition/ rule below (else "legal_definition" would route to the
+  // GoodFor "Ingredient Definitions" branch). Underscore/space/hyphen all accepted.
+  if (/smart[\s_-]?template/.test(t)) return 'Smart Template';
+  if (/legal[\s_-]?pathway|pathway/.test(t)) return 'Legal Pathway';
+  if (/legal[\s_-]?definition/.test(t)) return 'Legal Definition';
   if (/definition|ingredient|glossary|term/.test(t)) return 'Ingredient Definitions';
-  if (/how[\s-]?to/.test(t)) return 'How To Guide';
+  if (/how[\s_-]?to/.test(t)) return 'How To Guide';
   return 'Blog';
 }
 
-export function mapArticleBrief(cluster, brief, briefField, fieldSet, category) {
+export function mapArticleBrief(cluster, brief, briefField, fieldSet, category, market) {
   const c = cluster || {};
   const b = (brief && typeof brief === 'object') ? brief : {};
   const title = b.title || c.suggestedTitle || c.label || c.primaryKeyword || c.keyword || '';
@@ -380,6 +387,8 @@ export function mapArticleBrief(cluster, brief, briefField, fieldSet, category) 
     'Primary Keyword': c.primaryKeyword || keyword,
     Category: category || 'Blog',  // drives the n8n Category switch (Blog/Recipes/Ingredient Definitions)
   };
+  // Jurisdiction + language so the writer produces the article for the right market.
+  if (market && market.country) { row.Jurisdiction = market.country; row.Language = market.language || 'English'; }
   if (b.angle) row['Goal of Article'] = b.angle;
   // Description: the generated meta when we have one, else a synthesised summary — never blank.
   row.Description = b.metaDescription || summaryFor(c, title);

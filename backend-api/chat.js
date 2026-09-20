@@ -655,6 +655,7 @@ ${s.stack ? 'Stack: ' + [s.stack.builder, s.stack.seo, s.stack.cache].filter(Boo
 ${s.scale ? `Scale: ${s.scale.posts || 0} posts, ${s.scale.pages || 0} pages.` : ''}
 ${s.scores ? `Latest scores — Perf ${s.scores.performance}, A11y ${s.scores.accessibility}, SEO ${s.scores.seo}.` : ''}
 ${s.competitors && s.competitors.length ? 'Tracked competitors: ' + s.competitors.join(', ') + '.' : ''}
+${s.semrush_db ? `\n=== TARGET JURISDICTION (write, research & recommend for this market) ===\n${marketFor(s.semrush_db).scope}\n` : ''}
 ${s.geo_context ? `\n=== THIS SITE'S NICHE & SERVICES (author strictly for this — do not drift generic) ===\n${geoContextForPrompt(s.geo_context)}\n` : ''}
 ${P('chat.assistant', siteId)}`;
 }
@@ -779,7 +780,7 @@ export async function chat({ messages = [], userText, images = [], siteId, siteC
   let ctx = siteCtx || {};
   if (siteId) {
     const s = await db.getSite(siteId).catch(() => null);
-    if (s) ctx = { name: s.name, url: s.url, stack: s.stack, scale: s.scale, scores: s.scores, competitors: s.competitors, geo_context: s.geo_context };
+    if (s) ctx = { name: s.name, url: s.url, stack: s.stack, scale: s.scale, scores: s.scores, competitors: s.competitors, geo_context: s.geo_context, semrush_db: s.semrush_db };
   }
   const system = buildSystem(ctx, siteId);
 
@@ -848,7 +849,7 @@ export async function chatStream({ messages = [], userText, images = [], siteId,
   let ctx = {};
   if (siteId) {
     const s = await db.getSite(siteId).catch(() => null);
-    if (s) ctx = { name: s.name, url: s.url, stack: s.stack, scale: s.scale, scores: s.scores, competitors: s.competitors, geo_context: s.geo_context };
+    if (s) ctx = { name: s.name, url: s.url, stack: s.stack, scale: s.scale, scores: s.scores, competitors: s.competitors, geo_context: s.geo_context, semrush_db: s.semrush_db };
   }
   const system = buildSystem(ctx, siteId);
   let convo = windowHistory([...messages]);
