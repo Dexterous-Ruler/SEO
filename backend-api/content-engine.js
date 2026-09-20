@@ -638,6 +638,47 @@ export async function ingestCompetitorSitemap(siteId, inputs, opts) {
   return { saved, error, notProvisioned, fetched: raw.length, unique: merged.length, scannedFor: wanted, perSource };
 }
 
+// On-topic keyword pool (REAL volumes) for a competitor topic in the site's market.
+// keyword_ideas is broad word-match SORTED BY VOLUME, so a shallow list is all generic
+// one-worders ("agreement", "service") — pull a DEEP list (500) and keep only phrases
+// that share ≥2 of the topic's stemmed words or contain its head phrase. related_keywords
+// is seeded with the head phrase ("shareholder agreement") because the full slug rarely
+// exists as a keyword. Returns diagnostics too (the /competitor-keyword-pool probe).
+const KW_STOP = new Set(['a', 'an', 'the', 'to', 'of', 'for', 'and', 'or', 'in', 'on', 'at', 'by', 'with', 'how', 'what', 'is', 'are', 'your', 'our', 'vs', 'uk', 'from', 'into']);
+const kwStem = (t) => t.replace(/ies$/, 'y').replace(/(ches|shes|sses|xes)$/, (m) => m.slice(0, -2)).replace(/s$/, '');
+const kwWords = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !KW_STOP.has(t));
+const kwToks = (s) => kwWords(s).map(kwStem);
+export async function competitorKeywordPool(site, seed, negatives = []) {
+  const topicToks = kwToks(seed);
+  const headStem = topicToks.slice(-2).join(' ');
+  const headRaw = kwWords(seed).slice(-2).join(' ');
+  const need = Math.min(2, topicToks.length || 1);
+  const onTopic = (kw) => { const kt = kwToks(kw); const ks = new Set(kt); let n = 0; for (const t of topicToks) if (ks.has(t)) n++; return n >= need || (headStem && kt.join(' ').includes(headStem)); };
+  const out = { keywords: [], raw: { related: 0, ideas: 0 }, passed: 0, droppedOffTopic: 0, droppedNegative: 0, errors: [], sampleDropped: [], seeds: {} };
+  if (!dfs.hasKey() || !seed) return out;
+  const relSeeds = [...new Set([headRaw, String(seed).toLowerCase()].filter(Boolean))].slice(0, 2);
+  const ideaSeeds = [...new Set([String(seed).toLowerCase(), headRaw, headStem].filter(Boolean))];
+  out.seeds = { related: relSeeds, ideas: ideaSeeds };
+  const results = await Promise.all([
+    ...relSeeds.map((s) => dfs.relatedKeywords(s, { db: site.semrush_db, limit: 100, depth: 2 }).then((r) => ({ kind: 'related', r })).catch((e) => ({ kind: 'related', r: [], err: String((e && e.message) || e) }))),
+    dfs.keywordIdeas(ideaSeeds, { db: site.semrush_db, limit: 500 }).then((r) => ({ kind: 'ideas', r })).catch((e) => ({ kind: 'ideas', r: [], err: String((e && e.message) || e) })),
+  ]);
+  const pool = new Map();
+  for (const res of results) {
+    if (res.err) out.errors.push(res.err);
+    out.raw[res.kind] += (res.r || []).length;
+    for (const k of (res.r || [])) {
+      const kw = String(k.keyword || '').toLowerCase().trim(); if (!kw) continue;
+      if (hitsNeg(kw, negatives)) { out.droppedNegative++; continue; }              // never build clusters in an excluded area
+      if (!onTopic(kw)) { out.droppedOffTopic++; if (out.sampleDropped.length < 12) out.sampleDropped.push(kw + '(' + (k.volume || 0) + ')'); continue; }
+      const prev = pool.get(kw); if (!prev || (k.volume || 0) > (prev.volume || 0)) pool.set(kw, { keyword: kw, volume: Number(k.volume) || 0 });
+    }
+  }
+  out.keywords = [...pool.values()].sort((a, b) => (b.volume || 0) - (a.volume || 0)).slice(0, 100);
+  out.passed = pool.size;
+  return out;
+}
+
 // ---- "Take over this topic": competitor article → 3-5 keyword clusters --------------
 // Karim: "click a button and get 3-5 keyword clusters based on that competitor article,
 // so I can create 3-5 more pieces around it, choose the type, and out-rank them."
@@ -661,37 +702,11 @@ export async function expandCompetitorTopic(siteId, oppId, { count = 4 } = {}) {
   const negatives = (Array.isArray(site.negative_keywords) ? site.negative_keywords : []).map((n) => String(n || '').toLowerCase().trim()).filter(Boolean);
   const scoreSite = { id: siteId, __nicheCtx: nicheCtx, __negatives: negatives };
 
-  // 1) Real keyword pool (volumes) — DataForSEO expansions, each best-effort. Expand from
-  //    the full topic AND its head phrase ("amendment to service agreement" → "service
-  //    agreement"), then keep ONLY keywords that share the topic's words: keyword_ideas
-  //    matches single words, so "service agreement" otherwise floods with "dvla customer
-  //    service" / "audi service plan" (exactly what went wrong in the first live test).
-  const STOPW = new Set(['a', 'an', 'the', 'to', 'of', 'for', 'and', 'or', 'in', 'on', 'at', 'by', 'with', 'how', 'what', 'is', 'are', 'your', 'our', 'vs', 'uk', 'from', 'into']);
-  // Stem lightly so plural/singular match ("shareholders" ↔ "shareholder agreement",
-  // "agreements" ↔ "agreement") — DataForSEO returns the singular far more often.
-  const stem = (t) => t.replace(/ies$/, 'y').replace(/(ches|shes|sses|xes)$/, (m) => m.slice(0, -2)).replace(/s$/, '');
-  const toks = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !STOPW.has(t)).map(stem);
-  const topicToks = toks(seed);
-  const headStem = topicToks.slice(-2).join(' ');
-  const headRaw = String(seed || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !STOPW.has(t)).slice(-2).join(' ');
-  const seeds = [...new Set([seed.toLowerCase(), headRaw, headStem].filter(Boolean))];
-  const need = Math.min(2, topicToks.length || 1);
-  const onTopic = (kw) => { const kt = toks(kw); const ks = new Set(kt); let n = 0; for (const t of topicToks) if (ks.has(t)) n++; return n >= need || (headStem && kt.join(' ').includes(headStem)); };
-  const pool = new Map();
-  const dfsErrors = [];
-  if (dfs.hasKey() && seed) {
-    const [rel, ideas] = await Promise.all([
-      dfs.relatedKeywords(seed, { db: site.semrush_db, limit: 80, depth: 2 }).catch((e) => { dfsErrors.push(String((e && e.message) || e)); return []; }),
-      dfs.keywordIdeas(seeds, { db: site.semrush_db, limit: 120 }).catch((e) => { dfsErrors.push(String((e && e.message) || e)); return []; }),
-    ]);
-    for (const k of [...rel, ...ideas]) {
-      const kw = String(k.keyword || '').toLowerCase().trim(); if (!kw) continue;
-      if (hitsNeg(kw, negatives)) continue;                 // never build clusters in an excluded area
-      if (!onTopic(kw)) continue;                            // drop word-match noise
-      const prev = pool.get(kw); if (!prev || (k.volume || 0) > (prev.volume || 0)) pool.set(kw, { keyword: kw, volume: Number(k.volume) || 0 });
-    }
-  }
-  const keywords = [...pool.values()].sort((a, b) => (b.volume || 0) - (a.volume || 0)).slice(0, 100);
+  // 1) Real keyword pool (volumes), on-topic filtered — see competitorKeywordPool().
+  const poolInfo = await competitorKeywordPool(site, seed, negatives);
+  const keywords = poolInfo.keywords;
+  const pool = new Map(keywords.map((k) => [k.keyword, k]));
+  const dfsErrors = poolInfo.errors;
 
   // 2) Claude → clusters.
   let clusters = [];
@@ -737,7 +752,7 @@ export async function expandCompetitorTopic(siteId, oppId, { count = 4 } = {}) {
   const res = await persist(siteId, raw);
   if (res.notProvisioned) return { ...NOT_PROVISIONED, clusters: [] };
   const rows = (res.rows || []).map((r) => ({ id: r.id, title: r.title, status: r.status, primaryKeyword: r.primary_keyword, keywords: (r.payload && r.payload.keywords) || [], totalVolume: (r.payload && r.payload.totalVolume) || 0, angle: (r.payload && r.payload.angle) || '', format: (r.payload && r.payload.format) || '', intent: r.intent, suggestedType: (r.payload && r.payload.suggestedType) || 'blog', jurisdiction: (r.payload && r.payload.jurisdiction) || 'Not stated' }));
-  return { clusters: rows, saved: res.saved || 0, pool: keywords.length, volumesReal: keywords.length > 0, dfsErrors: dfsErrors.length ? dfsErrors : undefined, error: res.error };
+  return { clusters: rows, saved: res.saved || 0, pool: keywords.length, volumesReal: keywords.length > 0, dfsErrors: dfsErrors.length ? dfsErrors : undefined, poolInfo: { raw: poolInfo.raw, passed: poolInfo.passed, droppedOffTopic: poolInfo.droppedOffTopic, seeds: poolInfo.seeds, sampleDropped: poolInfo.sampleDropped }, error: res.error };
 }
 
 export async function persist(siteId, opps) {

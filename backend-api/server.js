@@ -4762,6 +4762,14 @@ const routes = {
   },
   // "Take over this topic": one competitor article → 3-5 keyword clusters (real volumes
   // from DataForSEO + Claude), each persisted as its own opportunity under the topic.
+  // Preview / diagnostic: the on-topic keyword pool (real volumes) for a topic — no persistence.
+  'POST /competitor-keyword-pool': async (body) => {
+    if (!body.siteId || !body.topic) return { error: 'siteId + topic required' };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    if (!site) return { error: 'Site not found.' };
+    const negatives = (Array.isArray(site.negative_keywords) ? site.negative_keywords : []).map((n) => String(n || '').toLowerCase().trim()).filter(Boolean);
+    return engine.competitorKeywordPool(site, String(body.topic), negatives);
+  },
   'POST /competitor-expand': async (body) => {
     if (!body.siteId || !body.id) return { error: 'siteId + id required' };
     return engine.expandCompetitorTopic(body.siteId, body.id, { count: body.count });
