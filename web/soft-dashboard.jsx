@@ -1955,6 +1955,8 @@ function ContentEngineScreen({ ctx }) {
   const [draftingAns,setDraftingAns] = useState(false);   // draft top-5 answer blocks in place
   const [syncing,setSyncing] = useState(false);   // sync published → monitor in flight
   const [openDraft,setOpenDraft] = useState("");   // in_review row id whose answer-block draft is expanded
+  const [csmUrl,setCsmUrl] = useState("");          // competitor website/sitemap URL to mine for topics
+  const [csmBusy,setCsmBusy] = useState(false);
 
   const load = ()=>{
     if(!live) return;
@@ -2064,6 +2066,23 @@ function ContentEngineScreen({ ctx }) {
       setItems(prev=>prev.map(x=>x.id===item.id?Object.assign({},x,next):x));
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
   };
+  // Competitor sitemap → "out-rank them": scrape a competitor's sitemap, add the
+  // topics that fit this site's niche/jurisdiction into the worklist below.
+  const runCompetitorSitemap = ()=>{
+    if(!live||csmBusy) return;
+    const url=csmUrl.trim();
+    if(!url){ ctx.toast("Paste a competitor's website or sitemap URL first","gold"); return; }
+    setCsmBusy(true);
+    ctx.toast("Scanning "+url.replace(/^https?:\/\//,"").slice(0,40)+" for topics to out-rank…","teal");
+    API.competitorSitemapPoll(s.id, url).then(r=>{
+      if(r && r.notProvisioned){ setNotProv(true); return; }
+      if(r && r.error && !r.saved){ ctx.toast("Sitemap: "+r.error,"clay"); return; }
+      const n=(r&&r.saved)||0, found=(r&&r.fetched)||0;
+      ctx.toast(n>0?("Found "+found+" competitor topics — added "+n+" new to the worklist ✓"):"No new competitor topics found (already listed, or none matched your niche/jurisdiction)", n>0?"teal":"gold");
+      setCsmUrl("");
+      load();
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setCsmBusy(false));
+  };
 
   // action_type → distinct tone; intent → tone (mirrors OpportunitiesScreen).
   const actionTone = { article:"teal", answer_block:"plum", geo:"gold" };
@@ -2113,6 +2132,22 @@ function ContentEngineScreen({ ctx }) {
             Auto-pilot{s.auto_content_pilot?" ON":""}
           </button>
         </div>
+      )}
+
+      {live && !notProv && (
+        <SoftCard hover={false}>
+          <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap", padding:"2px 2px" }}>
+            <div style={{ minWidth:220, flex:"1 1 300px" }}>
+              <div style={{ fontSize:13, fontWeight:800, color:"var(--ink)", marginBottom:2 }}>Out-rank a competitor</div>
+              <div style={{ fontSize:12, color:"var(--muted)", lineHeight:1.45 }}>Paste a competitor's website (or their sitemap URL). We read every topic they cover and add the ones that fit this site's niche &amp; jurisdiction to the worklist below — then pick a content type and push the ones you want to beat.</div>
+            </div>
+            <input value={csmUrl} onChange={e=>setCsmUrl(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") runCompetitorSitemap(); }} placeholder="e.g. competitor.com" disabled={csmBusy}
+              style={{ flex:"1 1 240px", padding:"10px 13px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none" }} />
+            <NeoButton kind="primary" icon={csmBusy?undefined:"search"} disabled={csmBusy||!live} onClick={runCompetitorSitemap}>
+              {csmBusy&&<Icon name="cog" size={16} className="audit-spin" />}{csmBusy?"Scanning…":"Find articles to out-rank"}
+            </NeoButton>
+          </div>
+        </SoftCard>
       )}
 
       {!live && <SoftCard hover={false}><div style={{ padding:"12px 4px", color:"var(--muted)", fontSize:13.5 }}>Connect a live WordPress site to run the Content Engine.</div></SoftCard>}

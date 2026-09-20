@@ -120,4 +120,63 @@ function googleLang(market) {
   return L[String((market && market.language) || '').toLowerCase()] || 'en';
 }
 
-export default { parseFeed, fetchFeed, googleNewsRss, sourceToUrl, stripTags, unwrapUrl };
+// --- competitor sitemap fetch + parse --------------------------------------
+// Pull every content URL from a competitor's XML sitemap so we can mine the topics
+// they cover (and out-rank them). Walks a sitemap INDEX (fetches child sitemaps
+// concurrently, capped) or a flat <urlset>. Uses a browser UA because a bot-like UA
+// gets 403'd by CDN/security firewalls (Hostinger hcdn, Cloudflare, Wordfence).
+// Every fetch is hard-timeout-bounded and the whole walk is capped so a route
+// caller stays well under the gateway request timeout. Zero-dep.
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+function extractLocs(xml) {
+  const out = []; const re = /<loc>\s*([^<\s]+)\s*<\/loc>/gi; let m;
+  while ((m = re.exec(String(xml || ''))) !== null) out.push(decodeEntities(m[1]).trim());
+  return out;
+}
+async function fetchXml(url, timeoutMs = 10000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA, Accept: 'application/xml, text/xml, */*' }, signal: ctrl.signal, redirect: 'follow' });
+    if (!res.ok) return { error: `HTTP ${res.status}`, xml: '' };
+    return { xml: await res.text() };
+  } catch (e) {
+    return { error: e && e.name === 'AbortError' ? 'timed out' : String((e && e.message) || e).slice(0, 120), xml: '' };
+  } finally { clearTimeout(t); }
+}
+// input: a competitor homepage OR an explicit sitemap URL. Returns { sitemapUrl, urls[] }.
+export async function fetchSitemap(input, { maxUrls = 400, maxChildren = 12 } = {}) {
+  const raw = String(input || '').trim();
+  if (!raw) return { error: 'no url', urls: [] };
+  let origin = '';
+  try { origin = new URL(raw.startsWith('http') ? raw : 'https://' + raw).origin; }
+  catch { return { error: 'bad url', urls: [] }; }
+  const isXml = (u) => /\.xml(\?|#|$)/i.test(u);
+  const candidates = isXml(raw)
+    ? [raw.startsWith('http') ? raw : 'https://' + raw]
+    : [origin + '/sitemap_index.xml', origin + '/sitemap.xml', origin + '/wp-sitemap.xml', origin + '/sitemap-index.xml'];
+  let doc = null, usedUrl = '';
+  for (const c of candidates) {
+    const r = await fetchXml(c);
+    if (r.xml && /<(urlset|sitemapindex|rss|feed)\b/i.test(r.xml)) { doc = r.xml; usedUrl = c; break; }
+  }
+  if (!doc) return { error: 'no sitemap found (tried sitemap_index.xml, sitemap.xml, wp-sitemap.xml)', urls: [] };
+  const locs = extractLocs(doc);
+  const isIndex = /<sitemapindex/i.test(doc) || (locs.length > 0 && locs.every(isXml));
+  const urls = new Set();
+  if (isIndex) {
+    const children = locs.filter(isXml).slice(0, maxChildren);
+    // Fetch child sitemaps CONCURRENTLY (bounded) so the walk stays inside the request budget.
+    const docs = await Promise.all(children.map((c) => fetchXml(c)));
+    for (const r of docs) {
+      if (!r.xml) continue;
+      for (const loc of extractLocs(r.xml)) { if (isXml(loc)) continue; urls.add(loc); if (urls.size >= maxUrls) break; }
+      if (urls.size >= maxUrls) break;
+    }
+  } else {
+    for (const loc of locs) { if (isXml(loc)) continue; urls.add(loc); if (urls.size >= maxUrls) break; }
+  }
+  return { sitemapUrl: usedUrl, urls: [...urls] };
+}
+
+export default { parseFeed, fetchFeed, googleNewsRss, sourceToUrl, stripTags, unwrapUrl, fetchSitemap };

@@ -345,7 +345,7 @@ function authOk(req) {
 // The dashboard's kill switch was per-tab React state — another tab (or the API)
 // happily kept writing. Now it's persisted (app_secrets) and enforced HERE, at the
 // dispatcher, for every route that can mutate WordPress/Airtable/n8n. 10s cache.
-const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|engine-clean-negatives|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
+const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|engine-clean-negatives|competitor-sitemap-poll|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
 let _kill = { v: false, exp: 0 };
 async function killSwitchOn() {
   if (Date.now() < _kill.exp) return _kill.v;
@@ -4672,6 +4672,30 @@ const routes = {
       .sort((a, b) => String(b.published || '').localeCompare(String(a.published || '')) || (b.score - a.score));
     return { items };
   },
+  // ── Competitor sitemap → "out-rank them" opportunities ──────────────────
+  // Scrape a competitor's sitemap (or a pasted sitemap/website URL) and turn every
+  // topic they cover into a niche-scored opportunity in this site's Content Engine
+  // worklist (source 'competitor_sitemap'), so you can target the same topics and
+  // out-rank them. Bounded + concurrent (stays under the gateway timeout). `urls`
+  // (array) / `url` (single) override the competitors already saved for the site.
+  'POST /competitor-sitemap-poll': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const inputs = Array.isArray(body.urls) ? body.urls : (body.url ? [body.url] : null);
+    const r = await engine.ingestCompetitorSitemap(body.siteId, inputs);
+    return { ok: !r.error, ...r };
+  },
+  // List this site's competitor-sitemap opportunities (source 'competitor_sitemap').
+  'POST /competitor-sitemap-items': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const wl = await engine.worklist(body.siteId, { source: 'competitor_sitemap', limit: Math.min(body.limit || 120, 300) }).catch(() => ({ items: [] }));
+    if (wl.notProvisioned) return { notProvisioned: true, items: [], note: wl.error };
+    const items = (wl.items || [])
+      .filter((o) => !['dismissed', 'queued', 'published'].includes(o.status))
+      .map((o) => ({ id: o.id, title: o.title, score: o.score, status: o.status, competitor: (o.payload && o.payload.competitor) || '', link: o.payload && o.payload.link, primaryKeyword: o.primary_keyword }))
+      .sort((a, b) => (b.score - a.score));
+    return { items };
+  },
+
   // One radar item → a writer-ready brief in the Article Writer (Status BLANK).
   // Reuses the proven opportunities → mapArticleBrief → pushToArticleWriter path.
   'POST /radar-draft': async (body) => {

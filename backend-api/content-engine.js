@@ -458,6 +458,69 @@ export async function ingestFeeds(siteId, sources) {
   return { saved: res.saved || 0, error: res.error, notProvisioned: res.notProvisioned, fetched: raw.length, unique: merged.length, perSource };
 }
 
+// ---- competitor-sitemap producer (source 'competitor_sitemap') -------------
+// Karim's ask: "scrape/upload a competitor's sitemap and give me articles to write
+// and out-rank them." Walk each competitor's sitemap, turn every content URL into a
+// niche-scored opportunity (their topic → our page), deduped by URL. These flow into
+// the SAME Content Engine worklist as every other opportunity, niche-scored against
+// geo_context (off-niche/excluded topics sink) and one-click draftable to the writer.
+// Titles come from the URL slug (cheap, no per-page fetch); volume is unknown so these
+// rely on niche-fit + the "competitor covers this" signal, complementing keywordGap
+// (which already gives ranked they-rank-we-don't keywords with volume).
+function slugTitle(u) {
+  try {
+    const seg = decodeURIComponent(new URL(u).pathname.replace(/\/+$/, '').split('/').filter(Boolean).pop() || '');
+    if (!seg) return '';
+    return seg.replace(/\.[a-z0-9]+$/i, '').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim()
+      .replace(/(^|\s)\S/g, (c) => c.toUpperCase());
+  } catch { return ''; }
+}
+const CSM_NONCONTENT = /\/(wp-content|wp-admin|wp-json|wp-includes|cart|checkout|my-account|account|login|tag|category|author|feed|comments|attachment|page\/\d)/i;
+
+export async function ingestCompetitorSitemap(siteId, inputs) {
+  const site = await db.getSite(siteId).catch(() => null);
+  if (!site) return { error: 'Site not found.', saved: 0 };
+  // Explicit URLs win; otherwise fall back to the competitors already saved for this site.
+  let list = (Array.isArray(inputs) && inputs.length) ? inputs : (Array.isArray(site.competitors) ? site.competitors : []);
+  list = [...new Set(list.map((x) => String(x || '').trim()).filter(Boolean))].slice(0, 4);
+  if (!list.length) return { error: 'No competitor website/sitemap URL provided (and none saved for this site).', saved: 0, needsInput: true };
+  const scoreSite = { id: siteId, __nicheCtx: geoFor(siteId) || '', __negatives: (Array.isArray(site.negative_keywords) ? site.negative_keywords : []).map((n) => String(n || '').toLowerCase().trim()).filter(Boolean) };
+  const raw = [];
+  // Fetch every competitor's sitemap CONCURRENTLY (each is internally bounded) so the
+  // whole run stays inside the gateway request budget.
+  const fetched = await Promise.all(list.map((input) => feeds.fetchSitemap(input, { maxUrls: 250, maxChildren: 10 }).catch((e) => ({ error: String((e && e.message) || e), urls: [] }))));
+  const perSource = [];
+  for (let i = 0; i < list.length; i++) {
+    const input = list[i]; const sm = fetched[i] || { urls: [] };
+    let comp = input; try { comp = new URL(input.startsWith('http') ? input : 'https://' + input).hostname.replace(/^www\./, ''); } catch {}
+    if (sm.error) { perSource.push({ input, competitor: comp, error: sm.error, urls: 0, made: 0 }); continue; }
+    const urls = (sm.urls || []).filter((u) => !CSM_NONCONTENT.test(u));
+    let made = 0;
+    for (const u of urls) {
+      const title = slugTitle(u);
+      if (!title || title.length < 6) continue;
+      const o = makeOpp(siteId, {
+        source: 'competitor_sitemap',
+        sourceRef: comp,
+        title,
+        primaryKeyword: title,
+        intent: 'informational',
+        actionType: 'article',
+        evidence: [{ source: 'competitor_sitemap', detail: `A competitor covers this: ${comp}` }],
+        payload: { link: u, competitor: comp, fromCompetitor: true, sourceType: 'competitor_sitemap' },
+      });
+      o.dedupeKey = 'csm:' + feedHash(String(u).replace(/[#?].*$/, '').toLowerCase());
+      score(o, scoreSite);
+      raw.push(o);
+      if (++made >= 180) break;
+    }
+    perSource.push({ input, competitor: comp, sitemap: sm.sitemapUrl, urls: urls.length, made });
+  }
+  const merged = dedupeMerge(raw);
+  const res = await persist(siteId, merged);
+  return { saved: res.saved || 0, error: res.error, notProvisioned: res.notProvisioned, fetched: raw.length, unique: merged.length, perSource };
+}
+
 export async function persist(siteId, opps) {
   if (!SB || !SRV) return { ...NOT_PROVISIONED, error: 'Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE missing).' };
   const list = (opps || []).filter((o) => o && o.dedupeKey);
