@@ -717,6 +717,26 @@ export async function worklist(siteId, { status, actionType, source, excludeSour
 }
 
 // ---- 7) setStatus / dismiss ------------------------------------------------
+// Fetch specific opportunities BY ID (any status / score). The explicit-push path must not
+// depend on the top-N worklist window — a low-scored competitor topic sits far outside it
+// once a site has thousands of rows (Go Legal AI: "selected opportunity not found").
+export async function fetchByIds(siteId, ids) {
+  if (!SB || !SRV) return { ...NOT_PROVISIONED, items: [] };
+  const list = [...new Set((ids || []).map((x) => String(x || '').trim()).filter(Boolean))].slice(0, 100);
+  if (!list.length) return { items: [] };
+  const inList = list.map((k) => `"${k.replace(/"/g, '')}"`).join(',');
+  try {
+    const res = await fetch(`${SB}/rest/v1/content_opportunities?site_id=eq.${encodeURIComponent(siteId)}&id=in.(${encodeURIComponent(inList)})&select=*`, { headers: headers() });
+    const text = await res.text();
+    if (!res.ok) {
+      if (isMissingTable(res.status, text)) return { ...NOT_PROVISIONED, items: [] };
+      return { error: `content_opportunities read → ${res.status} ${text.slice(0, 200)}`, items: [] };
+    }
+    let data; try { data = text ? JSON.parse(text) : []; } catch { data = []; }
+    return { items: Array.isArray(data) ? data : [] };
+  } catch (e) { return { error: String(e.message || e), items: [] }; }
+}
+
 export async function setStatus(id, status) {
   if (!SB || !SRV) return { ...NOT_PROVISIONED, error: 'Supabase not configured.' };
   try {
@@ -999,13 +1019,13 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids, category, j
 
   let items;
   if (idList.length) {
-    // Explicit per-row push: pull the full worklist (any status) and pick the chosen ids —
-    // a row the user clicked should always go, regardless of score/status.
-    const wl = await worklist(siteId, { limit: 500 });
-    if (wl && wl.notProvisioned) return { ...NOT_PROVISIONED, drafted: 0 };
-    if (wl && wl.error && !(wl.items && wl.items.length)) return { error: wl.error, drafted: 0 };
-    const idSet = new Set(idList);
-    items = (wl.items || []).filter((it) => idSet.has(it.id)).slice(0, 50);
+    // Explicit per-row push: fetch the chosen rows BY ID (any status / score) — a row the
+    // user clicked should always go. (Previously filtered the top-500 worklist window, which
+    // silently dropped low-scored competitor topics on sites with thousands of rows.)
+    const got = await fetchByIds(siteId, idList);
+    if (got && got.notProvisioned) return { ...NOT_PROVISIONED, drafted: 0 };
+    if (got && got.error && !(got.items && got.items.length)) return { error: got.error, drafted: 0 };
+    items = (got.items || []).slice(0, 50);
     if (!items.length) return { drafted: 0, skipped: true, reason: 'selected opportunity not found' };
   } else {
     // 1) Top SCORED opportunities (highest score first). Over-fetch (n×4) BEFORE the
