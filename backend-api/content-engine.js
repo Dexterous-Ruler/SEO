@@ -1130,7 +1130,7 @@ function marketsForLabels(labels, defaultMarket) {
   return out;
 }
 
-export async function autoDraft(siteId, { topN = 5, actionType, ids, category, jurisdictions } = {}) {
+export async function autoDraft(siteId, { topN = 5, actionType, ids, category, jurisdictions, force } = {}) {
   if (!siteId) return { error: 'No site selected.' };
   const n = Math.min(Math.max(Number(topN) || 5, 1), 50);
   const idList = Array.isArray(ids) ? ids.filter(Boolean) : (ids ? [ids] : []);
@@ -1160,6 +1160,21 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids, category, j
     // even if actionType was left blank.
     items = (wl.items || []).filter((it) => it.action_type !== 'answer_block' && it.action_type !== 'geo').slice(0, n);
     if (!items.length) return { drafted: 0, skipped: true, reason: 'no scored article opportunities to draft' };
+  }
+
+  // 1b) VERIFICATION GATE. A legal/case-law brief carries a verification result; NEVER push
+  //     one whose cited cases/statutes/rules aren't verified (Karim: "only push once it's
+  //     verified"). `force` overrides after the operator has reviewed the flags.
+  let blocked = [];
+  if (!force) {
+    const ok = [];
+    for (const it of items) {
+      const v = it.payload && it.payload.brief && it.payload.brief.verification;
+      if (v && v.status && v.status !== 'verified') blocked.push({ id: it.id, title: it.title, verifyStatus: v.status, summary: v.summary });
+      else ok.push(it);
+    }
+    items = ok;
+    if (!items.length && blocked.length) return { drafted: 0, skipped: true, reason: 'verification-blocked', blocked, candidates: blocked.length };
   }
 
   // 2) Resolve the Article Writer table — the ONE n8n-watched table (cfg.table_gaps).
@@ -1247,7 +1262,7 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids, category, j
   let queued = 0;
   for (const id of createdIds) { const r = await setStatus(id, 'queued').catch(() => null); if (r && r.updated) queued++; }
 
-  return { drafted: pushed, queued, skippedDup, candidates: items.length, table: tbl.name, jurisdictions: markets.map((m) => m.country), perJurisdiction };
+  return { drafted: pushed, queued, skippedDup, candidates: items.length, table: tbl.name, jurisdictions: markets.map((m) => m.country), perJurisdiction, blocked: blocked.length ? blocked : undefined };
 }
 
 // ---- 12) syncPublished -----------------------------------------------------

@@ -1971,7 +1971,8 @@ function CompetitorsScreen({ ctx }) {
   const [expanding,setExpanding] = useState("");    // parent id being expanded
   const [briefing,setBriefing] = useState("");      // id whose researched brief is being generated
   const [briefOpen,setBriefOpen] = useState({});    // id → brief panel open?
-  const [briefData,setBriefData] = useState({});    // id → { brief, sources, briefFor, competitorRead }
+  const [briefData,setBriefData] = useState({});    // id → { brief, sources, briefFor, competitorRead, verification }
+  const [blockedIds,setBlockedIds] = useState({});  // id → true when a push was blocked (citations unverified)
   const [types,setTypes] = useState({});            // item id → content type chosen before push
   const [busyId,setBusyId] = useState("");
   const [shown,setShown] = useState(100);          // rows rendered so far (client-side "Show more" — the list itself is unlimited)
@@ -2096,40 +2097,77 @@ function CompetitorsScreen({ ctx }) {
   };
   // Push ONE topic/cluster to the Article Writer as the chosen type → the row is created in
   // Airtable and it flips to "Pushed ✓" here. A detailed, RESEARCHED brief is produced first
-  // (Karim: pushed competitor articles were thin) so the writer starts from real research.
-  const push = async (it)=>{
+  // (Karim: pushed competitor articles were thin). For legal/case-law content the brief's
+  // cited cases/statutes/rules are VERIFIED, and the push is BLOCKED until verified (Karim:
+  // "only push once it's verified") unless the operator reviews and chooses "Push anyway".
+  const push = async (it, force)=>{
     if(busyId) return;
     const type = types[it.id] || it.suggestedType || (TYPES[0]&&TYPES[0][0]) || "blog";
     const jxs = pushJx.length ? pushJx : (siteJx ? [siteJx] : []);
     setBusyId(it.id);
     try{
+      let vstatus = it.verifyStatus || null;
       let researched = !!it.hasBrief;
-      if(!researched){ const b = await ensureBrief(it); researched = !!b; if(!researched) ctx.toast("Couldn't research this one — pushing with the basic brief","gold"); }
-      const r = await API.engineAutodraft(s.id, Object.assign({ ids:[it.id], category:type }, jxs.length?{ jurisdictions: jxs }:{}));
+      if(!researched){ const b = await ensureBrief(it); if(!b){ ctx.toast("Couldn't research this one — not pushed","gold"); return; } researched = true; vstatus = (b.verification && b.verification.status) || null; }
+      if(!force && vstatus && vstatus!=="verified"){
+        setBlockedIds(m=>Object.assign({},m,{[it.id]:true}));
+        viewBrief(it);
+        ctx.toast("⚠ Not pushed — its cases/rules couldn't all be verified. Review the brief, then “Push anyway” if you're happy.","gold");
+        return;
+      }
+      const r = await API.engineAutodraft(s.id, Object.assign({ ids:[it.id], category:type, force: !!force }, jxs.length?{ jurisdictions: jxs }:{}));
       if(r && r.notProvisioned){ setNotProv(true); return; }
+      if(r && r.reason==="verification-blocked"){ setBlockedIds(m=>Object.assign({},m,{[it.id]:true})); viewBrief(it); ctx.toast("⚠ Not pushed — "+((r.blocked&&r.blocked[0]&&r.blocked[0].summary)||"citations not verified")+" Review, then “Push anyway”.","gold"); return; }
       if(r && r.skipped){ ctx.toast(r.reason||"Couldn't push — connect the Airtable Article Writer first","gold"); loadItems(); return; }
       if(r && r.error){ ctx.toast("Push: "+r.error,"clay"); return; }
       const n=(r&&r.drafted!=null)?r.drafted:0;
       const where = jxs.length>1 ? (n+" jurisdiction"+(n===1?"":"s")+" ("+Object.keys(r.perJurisdiction||{}).join(", ")+")") : "the writer";
-      ctx.toast(n>0?("Pushed to "+where+" as "+typeLabel(type)+(researched?" with a researched brief":"")+" ✓ — marked done"+((r.skippedDup||0)>0?(" · "+r.skippedDup+" already there"):"")):(r&&r.skippedDup?"Already in the Article Writer for those jurisdictions — marked done":"Nothing pushed"), n>0?"teal":"gold");
+      ctx.toast(n>0?("Pushed to "+where+" as "+typeLabel(type)+" with a researched"+(vstatus==="verified"?", verified":"")+" brief ✓ — marked done"+((r.skippedDup||0)>0?(" · "+r.skippedDup+" already there"):"")):(r&&r.skippedDup?"Already in the Article Writer for those jurisdictions — marked done":"Nothing pushed"), n>0?"teal":"gold");
+      setBlockedIds(m=>{ const x=Object.assign({},m); delete x[it.id]; return x; });
       loadItems();
     }catch(e){ ctx.toast(e.message,"clay"); }
     finally{ setBusyId(""); }
+  };
+  // A small verification chip for a topic/cluster that carries a legal brief.
+  const verifyChip = (it)=>{
+    if(!it.hasBrief || !it.verifyStatus) return null;
+    const ok = it.verifyStatus==="verified";
+    return <span title={ok?"Every cited case, statute and rule was checked against authoritative sources":"Some cited cases/statutes/rules couldn't be verified — open the brief to review"} style={{ fontSize:11.5, fontWeight:700, padding:"3px 8px", borderRadius:"var(--r-pill)", background:ok?"var(--t-50)":"var(--clay-bg)", color:ok?"var(--t-700)":"var(--clay)", boxShadow:"var(--neo-in)" }}>{ok?"Verified ✓":"⚠ Unverified"}</span>;
   };
   // Inline preview of the researched brief (what the writer will receive).
   const briefPanel = (it)=>{
     const d = briefData[it.id]; if(!briefOpen[it.id] || !d || !d.brief) return null;
     const b = d.brief;
+    const cl = b.caseLaw && typeof b.caseLaw==="object" ? b.caseLaw : null;
+    const v = d.verification || b.verification || null;
+    const verdictColor = (x)=> x==="verified"?"var(--t-700)":(x==="misstated"?"var(--gold)":"var(--clay)");
     return (
       <div style={{ margin:"0 4px 10px 22px", padding:"10px 12px", borderRadius:"var(--r-md)", background:"var(--surface)", boxShadow:"var(--neo-xs)", fontSize:12.5, lineHeight:1.5 }}>
-        <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:4 }}>Researched brief{d.briefFor?(" for "+d.briefFor):""} · {(d.sources||[]).length} live source{(d.sources||[]).length===1?"":"s"}{d.competitorRead?" · competitor's page read":""} — this is what the writer receives.</div>
+        <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:4 }}>Researched brief{d.briefFor?(" for "+d.briefFor):""} · {(d.sources||[]).length} live source{(d.sources||[]).length===1?"":"s"}{d.competitorRead?" · competitor's page read":""}{d.caseLaw?(d.judgmentRead?" · judgment read":" · case-law"):""} — this is what the writer receives.</div>
         {b.title && <div style={{ fontWeight:800, color:"var(--ink)" }}>{b.title}</div>}
         {b.angle && <div style={{ marginTop:4 }}><b>Angle:</b> {b.angle}</div>}
-        {b.metaDescription && <div style={{ marginTop:4, color:"var(--muted)" }}><b>Meta:</b> {b.metaDescription}</div>}
-        {Array.isArray(b.outline) && b.outline.length>0 && (<div style={{ marginTop:6 }}><b>Outline</b><ul style={{ margin:"4px 0 0 18px", padding:0 }}>{b.outline.map((o,i)=><li key={i}>{o.h2}{Array.isArray(o.points)&&o.points.length?<span style={{ color:"var(--muted)" }}> — {o.points.slice(0,3).join("; ")}{o.points.length>3?"…":""}</span>:null}</li>)}</ul></div>)}
+        {cl && (
+          <div style={{ marginTop:6, padding:"8px 10px", borderRadius:8, background:"var(--bg)", boxShadow:"var(--neo-in)" }}>
+            {(cl.caseName||cl.neutralCitation) && <div style={{ fontWeight:800 }}>{cl.caseName} {cl.neutralCitation}</div>}
+            {(cl.court||cl.date) && <div style={{ color:"var(--muted)", fontSize:11.5 }}>{[cl.court,cl.date,cl.judges].filter(Boolean).join(" · ")}</div>}
+            {cl.background && <div style={{ marginTop:4 }}><b>Background:</b> {String(cl.background).slice(0,300)}</div>}
+            {Array.isArray(cl.issues)&&cl.issues.length>0 && <div style={{ marginTop:4 }}><b>Issues:</b><ul style={{ margin:"2px 0 0 18px", padding:0 }}>{cl.issues.slice(0,4).map((i,k)=><li key={k}>{i}</li>)}</ul></div>}
+            {cl.decision && <div style={{ marginTop:4 }}><b>Decision:</b> {String(cl.decision).slice(0,300)}</div>}
+            {Array.isArray(cl.impact)&&cl.impact.length>0 && <div style={{ marginTop:4 }}><b>Impact:</b><ul style={{ margin:"2px 0 0 18px", padding:0 }}>{cl.impact.slice(0,4).map((x,k)=><li key={k}>{x.stakeholder?<b>{x.stakeholder}: </b>:null}{x.effect||String(x)}</li>)}</ul></div>}
+          </div>
+        )}
+        {!cl && Array.isArray(b.outline) && b.outline.length>0 && (<div style={{ marginTop:6 }}><b>Outline</b><ul style={{ margin:"4px 0 0 18px", padding:0 }}>{b.outline.map((o,i)=><li key={i}>{o.h2}{Array.isArray(o.points)&&o.points.length?<span style={{ color:"var(--muted)" }}> — {o.points.slice(0,3).join("; ")}{o.points.length>3?"…":""}</span>:null}</li>)}</ul></div>)}
         {Array.isArray(b.keyFacts) && b.keyFacts.length>0 && (<div style={{ marginTop:6 }}><b>Key facts</b><ul style={{ margin:"4px 0 0 18px", padding:0 }}>{b.keyFacts.slice(0,6).map((f,i)=><li key={i}>{f.fact}{f.source?<span style={{ color:"var(--muted)" }}> [{f.source}]</span>:null}</li>)}</ul></div>)}
+        {Array.isArray(b.citations) && b.citations.length>0 && (
+          <div style={{ marginTop:6 }}><b>Citations {v?<span style={{ fontWeight:600, color:v.status==="verified"?"var(--t-700)":"var(--clay)" }}>· {v.status==="verified"?"all verified ✓":(v.summary||v.status)}</span>:null}</b>
+            <ul style={{ margin:"4px 0 0 18px", padding:0 }}>{b.citations.slice(0,8).map((c,i)=>{ const label=[c.name,c.citation||c.section].filter(Boolean).join(" "); const chk=v&&Array.isArray(v.checks)?v.checks.find(x=>String(x.item||"").toLowerCase()===label.toLowerCase()):null; return (
+              <li key={i}>{label}{c.proposition?<span style={{ color:"var(--muted)" }}> — {c.proposition}</span>:null}{chk?<span style={{ color:verdictColor(chk.verdict), fontWeight:700 }}> · {chk.verdict==="verified"?"✓":"⚠ "+chk.verdict}{chk.note&&chk.verdict!=="verified"?(" ("+String(chk.note).slice(0,80)+")"):""}</span>:null}{c.sourceUrl?<a href={c.sourceUrl} target="_blank" rel="noopener noreferrer" style={{ marginLeft:6, color:"var(--t-700)" }}>source ↗</a>:null}</li>); })}</ul>
+          </div>
+        )}
+        {Array.isArray(b.unverifiedClaims) && b.unverifiedClaims.length>0 && <div style={{ marginTop:6, color:"var(--clay)" }}><b>⚠ Not verified (writer told to omit/caveat):</b> {b.unverifiedClaims.slice(0,4).join(" · ")}</div>}
         {Array.isArray(b.faqs) && b.faqs.length>0 && <div style={{ marginTop:6 }}><b>FAQs:</b> {b.faqs.length} included</div>}
         {b.wordCount && <div style={{ marginTop:4, color:"var(--muted)" }}>Target length ~{b.wordCount} words</div>}
+        {v && v.status!=="verified" && <div style={{ marginTop:6 }}><NeoButton kind="primary" size="sm" disabled={busyId===it.id} onClick={()=>push(it,true)}>Push anyway</NeoButton></div>}
       </div>
     );
   };
@@ -2171,9 +2209,12 @@ function CompetitorsScreen({ ctx }) {
               </label>
             )}
             {c.status!=="dismissed" && <NeoButton kind="ghost" size="sm" disabled={briefing===c.id||busyId===c.id} onClick={()=>viewBrief(c)} title={c.hasBrief?"Show the researched brief that goes to the writer":"Research a detailed brief before pushing"}>{briefing===c.id?"Researching…":(c.hasBrief?(briefOpen[c.id]?"Hide brief":"Brief ✓ · View"):"Research brief")}</NeoButton>}
+            {verifyChip(c)}
             {isPushed(c.status) && <span style={{ fontSize:12, fontWeight:700, color:"var(--t-700)", background:"var(--t-50)", padding:"5px 10px", borderRadius:"var(--r-pill)" }}>Pushed ✓</span>}
             {c.status==="dismissed" && <span style={{ fontSize:12, fontWeight:700, color:"var(--muted)", background:"var(--surface)", padding:"5px 10px", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-xs)" }}>Hidden</span>}
-            {c.status==="scored" && <NeoButton kind="primary" size="sm" disabled={busyId===c.id} onClick={()=>push(c)}>{busyId===c.id?"Pushing…":(pushJx.length>1?("Push to "+pushJx.length+" jurisdictions"):"Push to writer")}</NeoButton>}
+            {c.status==="scored" && (blockedIds[c.id]
+              ? <NeoButton kind="primary" size="sm" disabled={busyId===c.id} onClick={()=>push(c,true)} title="You've reviewed the flagged citations — create it anyway">{busyId===c.id?"Pushing…":"Push anyway"}</NeoButton>
+              : <NeoButton kind="primary" size="sm" disabled={busyId===c.id} onClick={()=>push(c)}>{busyId===c.id?"Pushing…":(pushJx.length>1?("Push to "+pushJx.length+" jurisdictions"):"Push to writer")}</NeoButton>)}
             {c.status==="scored" && <NeoButton kind="ghost" size="sm" disabled={busyId===c.id} onClick={()=>hide(c)}>Hide</NeoButton>}
             {c.status==="dismissed" && <NeoButton kind="ghost" size="sm" disabled={busyId===c.id} onClick={()=>unhide(c)}>Unhide</NeoButton>}
           </div>
@@ -2331,9 +2372,12 @@ function CompetitorsScreen({ ctx }) {
                 ? <NeoButton kind="soft" size="sm" onClick={()=>setOpenCl(o=>Object.assign({},o,{[it.id]:!o[it.id]}))} title="Show the keyword clusters found around this topic">{it.clusterCount+" cluster"+(it.clusterCount===1?"":"s")+(openCl[it.id]?" ▴":" ▾")}</NeoButton>
                 : <NeoButton kind="soft" size="sm" icon={expanding===it.id?undefined:"sparkles"} disabled={!!expanding} onClick={()=>expand(it)} title="Find 3–5 keyword clusters around this competitor article so you can surround and out-rank it">{expanding===it.id?"Finding…":"Take over this topic"}</NeoButton>)}
               {it.status!=="dismissed" && <NeoButton kind="ghost" size="sm" disabled={briefing===it.id||busyId===it.id} onClick={()=>viewBrief(it)} title={it.hasBrief?"Show the researched brief that goes to the writer":"Research a detailed brief (competitor's page + live sources) before pushing"}>{briefing===it.id?"Researching…":(it.hasBrief?(briefOpen[it.id]?"Hide brief":"Brief ✓ · View"):"Research brief")}</NeoButton>}
+              {verifyChip(it)}
               {isPushed(it.status) && <span style={{ fontSize:12, fontWeight:700, color:"var(--t-700)", background:"var(--t-50)", padding:"5px 10px", borderRadius:"var(--r-pill)" }}>Pushed ✓</span>}
               {it.status==="dismissed" && <span style={{ fontSize:12, fontWeight:700, color:"var(--muted)", background:"var(--bg)", padding:"5px 10px", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-in)" }}>Hidden</span>}
-              {it.status==="scored" && <NeoButton kind="primary" size="sm" disabled={busyId===it.id} onClick={()=>push(it)} title={pushJx.length>1?("Create this in your Article Writer for "+pushJx.length+" jurisdictions ("+pushJx.join(", ")+") and mark it done here"):"Create this in your Article Writer and mark it done here"}>{busyId===it.id?"Pushing…":(pushJx.length>1?("Push to "+pushJx.length+" jurisdictions"):"Push to writer")}</NeoButton>}
+              {it.status==="scored" && (blockedIds[it.id]
+                ? <NeoButton kind="primary" size="sm" disabled={busyId===it.id} onClick={()=>push(it,true)} title="You've reviewed the flagged citations — create it anyway">{busyId===it.id?"Pushing…":"Push anyway"}</NeoButton>
+                : <NeoButton kind="primary" size="sm" disabled={busyId===it.id} onClick={()=>push(it)} title={pushJx.length>1?("Create this in your Article Writer for "+pushJx.length+" jurisdictions ("+pushJx.join(", ")+") and mark it done here"):"Create this in your Article Writer and mark it done here"}>{busyId===it.id?"Pushing…":(pushJx.length>1?("Push to "+pushJx.length+" jurisdictions"):"Push to writer")}</NeoButton>)}
               {it.status==="scored" && <NeoButton kind="ghost" size="sm" disabled={busyId===it.id} onClick={()=>hide(it)} title="Not interested — hide it">Hide</NeoButton>}
               {it.status==="dismissed" && <NeoButton kind="ghost" size="sm" disabled={busyId===it.id} onClick={()=>unhide(it)}>Unhide</NeoButton>}
             </div>

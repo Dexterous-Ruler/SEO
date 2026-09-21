@@ -566,6 +566,17 @@ async function competitorSourcesFor(siteId) {
 async function saveCompetitorSources(siteId, list) { await db.setAppSecret('competitor_sources:' + siteId, JSON.stringify(list)); return list; }
 // In-flight researched-brief jobs for competitor topics/clusters, keyed by opportunity id.
 const CBRIEF_RUNS = new Map();
+// A legal/law site (all Karim's sites except GoodFor) → verify cited legislation/cases/rules.
+function isLegalSite(site) { const n = ((site && site.name) || '') + ' ' + ((site && site.url) || ''); return /legal|visa|settlement|\bila\b|solicitor|\blaw\b|lawyer/i.test(n) && !/good\s?for/i.test(n); }
+// A case-law topic → Background/Issues/Decision/Impact structure + read the judgment.
+function isCaseLawTopic(title, type) {
+  if (String(type || '').toLowerCase() === 'case_study') return true;
+  const s = String(title || '');
+  if (/\[\d{4}\]\s?(UKSC|UKPC|UKHL|EWCA|EWHC|EWCOP|UKUT|UKEAT|EAT|CSOH|CSIH|NICA|AC|QB|KB|WLR|All\s?ER|Ch|Fam)\b/i.test(s)) return true;   // neutral / law-report citation
+  if (/\b[A-Z][A-Za-z'&.()-]+\s+v\.?\s+[A-Z][A-Za-z'&.()-]+/.test(s)) return true;   // Party v Party
+  if (/\b(judgment|case law|case study|supreme court|court of appeal|high court|tribunal (ruling|decision)|landmark (ruling|case|decision)|the ruling in|reflective loss)\b/i.test(s)) return true;
+  return false;
+}
 
 // --- route handlers --------------------------------------------------------
 const routes = {
@@ -4618,7 +4629,7 @@ const routes = {
   // → { drafted, queued, skippedDup, candidates, table } | { skipped, reason } | { notProvisioned }.
   'POST /engine-autodraft': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    return engine.autoDraft(body.siteId, { topN: body.topN, actionType: body.actionType, ids: body.ids, category: body.category, jurisdictions: body.jurisdictions });
+    return engine.autoDraft(body.siteId, { topN: body.topN, actionType: body.actionType, ids: body.ids, category: body.category, jurisdictions: body.jurisdictions, force: body.force });
   },
 
   // Close the loop opposite autodraft: read the n8n-watched Article Writer table
@@ -4777,7 +4788,7 @@ const routes = {
     const payload = (opp.payload && typeof opp.payload === 'object') ? opp.payload : {};
     const stored = payload.brief && typeof payload.brief === 'object' && !payload.brief.error ? payload.brief : null;
     if (stored && (body.existing || !body.regenerate)) {
-      return { brief: stored, sources: payload.briefSources || [], briefFor: payload.briefFor || null, competitorRead: !!payload.briefCompetitorRead, existing: true };
+      return { brief: stored, sources: payload.briefSources || [], briefFor: payload.briefFor || null, competitorRead: !!payload.briefCompetitorRead, caseLaw: !!payload.briefCaseLaw, judgmentRead: !!payload.briefJudgmentRead, verification: payload.briefVerification || stored.verification || null, existing: true };
     }
     if (body.existing) return { error: 'No brief stored yet.' };
     const site = await db.getSite(body.siteId).catch(() => null);
@@ -4798,15 +4809,24 @@ const routes = {
       internalLinkCandidates = [...pg, ...ps].map((r) => ({ title: (r.title?.rendered || '').replace(/&[a-z]+;/g, ' ').trim(), url: r.link })).filter((p) => p.title && p.url);
     } catch (e) {}
     const keyword = opp.primary_keyword || opp.title;
+    // Legal content: read the judgment + Background/Issues/Decision/Impact for case law, and
+    // VERIFY every cited case / statute / rule before it can be pushed (Karim's requirement).
+    const suggestedType = payload.category || payload.suggestedType || 'blog';
+    const caseLaw = body.caseLaw != null ? !!body.caseLaw : isCaseLawTopic(opp.title, suggestedType);
+    const verify = body.verify != null ? !!body.verify : (isLegalSite(site) || caseLaw);
     let r;
     try {
-      r = await research.contentBrief({ keyword, intent: opp.intent, siteName: site.name, niche: site.niche || (site.stack && site.stack.type), excludeDomain, internalLinkCandidates, siteId: body.siteId, db: market.db, now: Date.now(), competitor });
+      r = await research.contentBrief({ keyword, intent: opp.intent, siteName: site.name, niche: site.niche || (site.stack && site.stack.type), excludeDomain, internalLinkCandidates, siteId: body.siteId, db: market.db, now: Date.now(), competitor, caseLaw, verify });
     } catch (e) { return { error: 'Brief research failed: ' + String((e && e.message) || e) }; }
     if (!r || r.error) return { error: (r && r.error) || 'Brief research failed.' };
     if (!r.brief || r.brief.error) return { error: 'Brief could not be structured — try again.' + (r.brief && r.brief._tail ? ' (output ended: …' + String(r.brief._tail).slice(-140).replace(/\s+/g, ' ') + ')' : '') };
     const briefSources = (r.sources || []).slice(0, 10).map((x) => ({ title: x.title || '', url: x.url }));
-    await engine.updateOpp(opp.id, { payload: Object.assign({}, payload, { brief: r.brief, briefSources, briefAt: new Date().toISOString(), briefFor: market.country, briefCompetitorRead: !!competitor, briefEngines: r.engines || null }) }).catch(() => {});
-    return { brief: r.brief, sources: briefSources, briefFor: market.country, competitorRead: !!competitor, engines: r.engines };
+    const verification = r.verification || null;
+    await engine.updateOpp(opp.id, { payload: Object.assign({}, payload, {
+      brief: r.brief, briefSources, briefAt: new Date().toISOString(), briefFor: market.country, briefCompetitorRead: !!competitor, briefEngines: r.engines || null,
+      briefCaseLaw: caseLaw, briefJudgmentRead: !!r.judgmentRead, briefVerification: verification, briefVerified: verification ? verification.status === 'verified' : null,
+    }) }).catch(() => {});
+    return { brief: r.brief, sources: briefSources, briefFor: market.country, competitorRead: !!competitor, engines: r.engines, caseLaw, judgmentRead: !!r.judgmentRead, judgmentUrl: r.judgmentUrl || null, verification };
   },
   // Background wrapper — research + several Claude calls can run past the ~95s request
   // cap (the Content Plan brief 504'd at 102s on a slow keyword). Start → poll, keyed by id.
@@ -4866,8 +4886,9 @@ const routes = {
     const LEGACY_JX = { UK: 'United Kingdom', US: 'United States' };
     const jxOf = (o) => { const j = (o.payload && o.payload.jurisdiction) || 'Not stated'; return LEGACY_JX[j] || j; };
     const hasBriefOf = (o) => !!(o.payload && o.payload.brief && typeof o.payload.brief === 'object' && !o.payload.brief.error);
+    const briefMeta = (o) => { const p = o.payload || {}; const v = p.briefVerification || (p.brief && p.brief.verification) || null; return { hasBrief: hasBriefOf(o), briefFor: p.briefFor || null, caseLaw: !!p.briefCaseLaw, verifyStatus: v ? v.status : null }; };
     const items = (wl.items || [])
-      .map((o) => ({ id: o.id, title: o.title, score: o.score, status: o.status, competitor: (o.payload && o.payload.competitor) || '', link: o.payload && o.payload.link, suggestedType: (o.payload && (o.payload.category || o.payload.suggestedType)) || 'blog', jurisdiction: jxOf(o), primaryKeyword: o.primary_keyword, hasBrief: hasBriefOf(o), briefFor: (o.payload && o.payload.briefFor) || null, createdAt: o.created_at || null, updatedAt: o.updated_at || null }))
+      .map((o) => Object.assign({ id: o.id, title: o.title, score: o.score, status: o.status, competitor: (o.payload && o.payload.competitor) || '', link: o.payload && o.payload.link, suggestedType: (o.payload && (o.payload.category || o.payload.suggestedType)) || 'blog', jurisdiction: jxOf(o), primaryKeyword: o.primary_keyword, createdAt: o.created_at || null, updatedAt: o.updated_at || null }, briefMeta(o)))
       .filter((o) => !want || String(o.competitor).toLowerCase() === want)
       .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || (b.score - a.score));
     const counts = { total: items.length, new: items.filter((i) => i.status === 'scored').length, pushed: items.filter((i) => ['queued', 'in_review', 'published', 'done'].includes(i.status)).length, hidden: items.filter((i) => i.status === 'dismissed').length };
@@ -4879,7 +4900,7 @@ const routes = {
       for (const o of rows) {
         const p = (o.payload && typeof o.payload === 'object') ? o.payload : {};
         const pid = p.parentId; if (!pid) continue;
-        (clustersByParent[pid] = clustersByParent[pid] || []).push({ id: o.id, title: o.title, status: o.status, primaryKeyword: o.primary_keyword, keywords: Array.isArray(p.keywords) ? p.keywords : [], totalVolume: p.totalVolume || 0, angle: p.angle || '', format: p.format || '', intent: o.intent || p.intent || '', suggestedType: p.category || p.suggestedType || 'blog', jurisdiction: p.jurisdiction || 'Not stated', competitor: p.competitor || '', volumesReal: !!p.volumesReal, link: p.link || '', hasBrief: hasBriefOf(o), briefFor: p.briefFor || null });
+        (clustersByParent[pid] = clustersByParent[pid] || []).push(Object.assign({ id: o.id, title: o.title, status: o.status, primaryKeyword: o.primary_keyword, keywords: Array.isArray(p.keywords) ? p.keywords : [], totalVolume: p.totalVolume || 0, angle: p.angle || '', format: p.format || '', intent: o.intent || p.intent || '', suggestedType: p.category || p.suggestedType || 'blog', jurisdiction: p.jurisdiction || 'Not stated', competitor: p.competitor || '', volumesReal: !!p.volumesReal, link: p.link || '' }, briefMeta(o)));
       }
       if (rows.length < 500) break;
     }

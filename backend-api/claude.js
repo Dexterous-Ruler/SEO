@@ -564,17 +564,22 @@ Be STRICT: a short, precise list is far more valuable than a broad one. High sea
 // Perplexity grounded answer). Claude structures + writes the brief but must use
 // ONLY the supplied research — every fact ties to a provided source, nothing
 // invented. UK audience, UK English. Returns structured JSON.
-export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor }) {
+export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText }) {
   const sources = (research.sources || []).map((s, i) => `[${i + 1}] ${s.title || ''} — ${s.url}`).join('\n');
   const material = (research.material || '').slice(0, 9000);
   const links = (internalLinkCandidates || []).slice(0, 25).map((p) => `${p.title} → ${p.url}`).join('\n');
   const country = (market && market.country) || 'United Kingdom';
   const scope = (market && market.scope) ? market.scope + '\n\n' : '';
+  const briefKey = caseLaw ? 'content.caseLawBrief' : 'content.brief';
+  // Case law: inject the actual judgment text so Background/Issues/Decision come from the source.
+  const judgeBlock = (caseLaw && judgmentText)
+    ? `\n\n=== JUDGMENT TEXT (base Background, Issues and Decision on THIS; capture the neutral citation, court, date and judges) ===\n${String(judgmentText).slice(0, 12000)}`
+    : '';
   // Competitors screen: the brief must OUT-DO the competitor's own article (we read it).
   const compBlock = (competitor && competitor.text)
     ? `\n\n=== COMPETITOR ARTICLE TO OUT-DO (${competitor.url || ''}) ===\nTitle: ${competitor.title || ''}\n${String(competitor.text).slice(0, 6000)}\n\nThis brief MUST out-do that competitor article: cover everything it covers, then add what it misses (depth, worked examples, current ${country} rules and figures, common mistakes, FAQs). Never copy its wording. Keep the JSON compact enough to finish: outline 5-8 sections × 2-4 points, keyFacts 5-8, faqs 3-5, internalLinks ≤5.`
     : '';
-  const userMsg = `${scope}TARGET MARKET: ${country}\nKEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}${compBlock}\n\nWrite the ${country} content brief as JSON.`;
+  const userMsg = `${scope}TARGET MARKET: ${country}\nKEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}${judgeBlock}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}${compBlock}\n\nWrite the ${country} ${caseLaw ? 'CASE-LAW brief (Background / Issues / Decision / Impact) — every case and statute in "citations" must be real and sourced from the research; anything you cannot source goes in "unverifiedClaims", never stated as fact' : 'content brief'} as JSON.`;
   // Strip ```json fences, slice the outer object, parse. null on failure (truncated JSON).
   const parse = (t) => {
     let s = String(t || '').trim();
@@ -584,8 +589,8 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
     try { return JSON.parse(s.slice(a, z + 1)); } catch { return null; }
   };
   const call = (maxTokens, content) => complete({
-    system: sys('content.brief', siteId),
-    promptKey: 'content.brief',
+    system: sys(briefKey, siteId),
+    promptKey: briefKey,
     maxTokens,
     // Runs inside a background job (not bound by the ~95s request cap), so give the
     // synthesis room: dense research + a competitor block make a LONG brief — 3000 tokens
@@ -593,7 +598,7 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
     timeoutMs: 85000, deadlineMs: 170000,
     messages: [{ role: 'user', content }],
   });
-  let txt = await call(competitor ? 5000 : 3000, userMsg);
+  let txt = await call((competitor || caseLaw) ? 5000 : 3000, userMsg);
   let o = parse(txt);
   if (!o) {
     // Truncated / non-JSON → ONE compact retry with more room.

@@ -453,6 +453,19 @@ function briefToText(b) {
   const lines = [];
   if (b.angle) lines.push('ANGLE: ' + b.angle);
   if (b.metaDescription) lines.push('META: ' + b.metaDescription);
+  // Case-law brief: the judgment-based structure the writer must follow.
+  const cl = b.caseLaw;
+  if (cl && typeof cl === 'object') {
+    lines.push('\n=== CASE ===');
+    if (cl.caseName) lines.push('Case: ' + cl.caseName + (cl.neutralCitation ? ' ' + cl.neutralCitation : ''));
+    if (cl.court || cl.date) lines.push([cl.court, cl.date].filter(Boolean).join(' · '));
+    if (cl.judges) lines.push('Judge(s): ' + cl.judges);
+    if (cl.background) lines.push('\nBACKGROUND:\n' + cl.background);
+    if (Array.isArray(cl.issues) && cl.issues.length) { lines.push('\nISSUES:'); cl.issues.forEach((i) => lines.push('• ' + i)); }
+    if (cl.decision) lines.push('\nDECISION:\n' + cl.decision);
+    if (cl.reasoning) lines.push('\nREASONING:\n' + cl.reasoning);
+    if (Array.isArray(cl.impact) && cl.impact.length) { lines.push('\nIMPACT ON STAKEHOLDERS:'); cl.impact.forEach((x) => lines.push('• ' + (x.stakeholder ? x.stakeholder + ': ' : '') + (x.effect || x))); }
+  }
   if (Array.isArray(b.outline)) { lines.push('\nOUTLINE:'); b.outline.forEach((o) => { lines.push('• ' + (o.h2 || '')); (o.points || []).forEach((p) => lines.push('   - ' + p)); }); }
   if (Array.isArray(b.keyFacts) && b.keyFacts.length) { lines.push('\nKEY FACTS:'); b.keyFacts.forEach((f) => lines.push(`• ${f.fact} [${f.source}]`)); }
   if (Array.isArray(b.faqs) && b.faqs.length) { lines.push('\nFAQ:'); b.faqs.forEach((f) => lines.push(`Q: ${f.q}\nA: ${f.a}`)); }
@@ -463,6 +476,20 @@ function briefToText(b) {
       else if (l && (l.url || l.to || l.title || l.anchor)) lines.push('• ' + (l.anchor || l.title || l.from || '') + (l.url ? ' → ' + l.url : (l.to ? ' → ' + l.to : '')) + (l.reason ? ' — ' + l.reason : ''));
     });
   }
+  // Verified citations the writer MUST use exactly (and only these).
+  if (Array.isArray(b.citations) && b.citations.length) {
+    const vmap = new Map();
+    if (b.verification && Array.isArray(b.verification.checks)) for (const c of b.verification.checks) vmap.set(String(c.item || '').toLowerCase(), c.verdict);
+    lines.push('\nCITATIONS (use ONLY these — all checked; do not add un-cited cases/statutes):');
+    b.citations.forEach((c) => {
+      const label = [c.name, c.citation || c.section].filter(Boolean).join(' ');
+      const verd = vmap.get(label.toLowerCase());
+      const mark = verd === 'verified' ? ' ✓verified' : (verd ? ' ⚠' + verd : '');
+      lines.push('• ' + label + (c.proposition ? ' — ' + c.proposition : '') + (c.sourceUrl ? ' [' + c.sourceUrl + ']' : '') + mark);
+    });
+  }
+  if (Array.isArray(b.unverifiedClaims) && b.unverifiedClaims.length) { lines.push('\nDO NOT STATE AS FACT (could not be verified — omit or clearly caveat):'); b.unverifiedClaims.forEach((u) => lines.push('• ' + u)); }
+  if (b.verification && b.verification.status) lines.push('\nVERIFICATION: ' + b.verification.status.toUpperCase() + (b.verification.summary ? ' — ' + b.verification.summary : ''));
   if (b.wordCount) lines.push('\nTarget length: ~' + b.wordCount + ' words');
   return lines.join('\n');
 }
