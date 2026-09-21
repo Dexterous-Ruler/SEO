@@ -573,7 +573,7 @@ function isCaseLawTopic(title, type) {
   if (String(type || '').toLowerCase() === 'case_study') return true;
   const s = String(title || '');
   if (/\[\d{4}\]\s?(UKSC|UKPC|UKHL|EWCA|EWHC|EWCOP|UKUT|UKEAT|EAT|CSOH|CSIH|NICA)\b/i.test(s)) return true;   // neutral citation (drop generic AC/QB/WLR — too noisy on slugs)
-  if (/\b[A-Z][A-Za-z'&.()-]{2,}\s+v\.?\s+[A-Z][A-Za-z'&.()-]{2,}/.test(s)) return true;   // Party v Party
+  if (/\b[A-Z][A-Za-z'&.()-]{2,}\s+[Vv]s?\.?\s+[A-Z][A-Za-z'&.()-]{2,}/.test(s)) return true;   // Party v/V/vs Party (slug titles are Title-Cased → "X V Y")
   // Specific case-law phrasing only — NOT bare "judgment"/"ruling"/"appeal" (those match
   // procedural how-tos like "how to enforce a county court judgment").
   if (/\b(case law|case study|case comment|supreme court (case|judgment|ruling|decision)|court of appeal (case|judgment|ruling|decision)|landmark (ruling|case|judgment|decision)|the (ruling|judgment|decision) in|reflective loss)\b/i.test(s)) return true;
