@@ -147,7 +147,20 @@ export async function contentBrief({ keyword, intent, siteName, niche, excludeDo
   if (verify && brief && !brief.error) {
     try { out.verification = await verifyLegal({ brief, market }); }
     catch (e) { out.verification = { status: 'unchecked', error: String((e && e.message) || e), checks: [] }; }
-    if (out.verification) brief.verification = out.verification;
+    if (out.verification) {
+      brief.verification = out.verification;
+      // Backfill the AUTHORITATIVE source the checker actually relied on onto each verified
+      // citation (the synthesiser sometimes attaches the wrong URL), so the writer links to
+      // the real BAILII / legislation.gov.uk page.
+      if (Array.isArray(out.verification.checks) && Array.isArray(brief.citations)) {
+        const chk = new Map(out.verification.checks.map((c) => [String(c.item || '').toLowerCase().trim(), c]));
+        for (const c of brief.citations) {
+          const label = [c.name, c.citation || c.section].filter(Boolean).join(' ').toLowerCase().trim();
+          const m = chk.get(label);
+          if (m && m.verdict === 'verified' && m.source && isLegalSource(m.source)) c.sourceUrl = m.source;
+        }
+      }
+    }
   }
   return out;
 }
