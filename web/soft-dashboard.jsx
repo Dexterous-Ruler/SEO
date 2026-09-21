@@ -2077,7 +2077,7 @@ function CompetitorsScreen({ ctx }) {
       if(st && st.error){ ctx.toast(st.error,"clay"); setBriefing(""); resolve(null); return; }
       let polls=0;
       const poll=()=>{ API.competitorBriefStatus(s.id, it.id).then(r=>{
-        if(!r || r.status==="running"){ if(++polls<45){ setTimeout(poll,4000); } else { ctx.toast("Still researching — try again in a minute","gold"); setBriefing(""); resolve(null); } return; }
+        if(!r || r.status==="running"){ if(++polls<75){ setTimeout(poll,4000); } else { ctx.toast("Still researching — reopen this in a minute to see it","gold"); setBriefing(""); resolve(null); } return; }
         if(r.status==="error" || r.error || !r.brief){ ctx.toast("Research failed: "+(r.error||r.reason||"unknown"),"clay"); setBriefing(""); resolve(null); return; }
         setBriefData(d=>Object.assign({},d,{[it.id]:r})); setBriefing(""); resolve(r);
       }).catch(e=>{ ctx.toast(e.message,"clay"); setBriefing(""); resolve(null); }); };

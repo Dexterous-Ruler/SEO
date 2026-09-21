@@ -566,14 +566,16 @@ Be STRICT: a short, precise list is far more valuable than a broad one. High sea
 // invented. UK audience, UK English. Returns structured JSON.
 export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText }) {
   const sources = (research.sources || []).map((s, i) => `[${i + 1}] ${s.title || ''} — ${s.url}`).join('\n');
-  const material = (research.material || '').slice(0, 9000);
+  // Case law: the judgment is the primary source, so keep the general material short and give
+  // the judgment room — a large judgment + 9k material + 5k output blew the 84s Claude timeout.
+  const material = (research.material || '').slice(0, caseLaw ? 3500 : 9000);
   const links = (internalLinkCandidates || []).slice(0, 25).map((p) => `${p.title} → ${p.url}`).join('\n');
   const country = (market && market.country) || 'United Kingdom';
   const scope = (market && market.scope) ? market.scope + '\n\n' : '';
   const briefKey = caseLaw ? 'content.caseLawBrief' : 'content.brief';
-  // Case law: inject the actual judgment text so Background/Issues/Decision come from the source.
+  // Case law: inject the (trimmed) judgment text so Background/Issues/Decision come from the source.
   const judgeBlock = (caseLaw && judgmentText)
-    ? `\n\n=== JUDGMENT TEXT (base Background, Issues and Decision on THIS; capture the neutral citation, court, date and judges) ===\n${String(judgmentText).slice(0, 12000)}`
+    ? `\n\n=== JUDGMENT TEXT (base Background, Issues and Decision on THIS; capture the neutral citation, court, date and judges) ===\n${String(judgmentText).slice(0, 7000)}`
     : '';
   // Competitors screen: the brief must OUT-DO the competitor's own article (we read it).
   const compBlock = (competitor && competitor.text)
@@ -593,9 +595,9 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
     promptKey: briefKey,
     maxTokens,
     // Runs inside a background job (not bound by the ~95s request cap), so give the
-    // synthesis room: dense research + a competitor block make a LONG brief — 3000 tokens
-    // truncated the JSON on the first competitor-aware run.
-    timeoutMs: 85000, deadlineMs: 170000,
+    // synthesis room: dense research + a competitor/judgment block make a LONG brief.
+    // 110s/attempt (was 85s → Uber case-law brief timed out) within a 200s overall deadline.
+    timeoutMs: 110000, deadlineMs: 200000,
     messages: [{ role: 'user', content }],
   });
   let txt = await call((competitor || caseLaw) ? 5000 : 3000, userMsg);
