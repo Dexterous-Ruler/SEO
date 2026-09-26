@@ -560,6 +560,26 @@ Be STRICT: a short, precise list is far more valuable than a broad one. High sea
   } catch (e) { return all; }
 }
 
+// A long judgment can't be sent whole, and a head-only slice loses the OUTCOME — English
+// judgments state the decision at the END ("Conclusion" / "Disposal" / "For these reasons…").
+// Keep the opening (parties, court, date, judges, issues) AND the conclusion, same budget.
+const JUDGMENT_END_RE = /\n[^\n]{0,12}\b(conclusions?|disposal|disposition|outcome|result|decision|summary of conclusions)\b[^\n]{0,40}\n|\bfor (?:all )?(?:these|those|the)\b[^.\n]{0,25}\breasons\b/gi;
+export function judgmentExcerpt(text, budget = 7000) {
+  // Drop trailing page chrome (footer/nav = a run of short lines) so it doesn't eat the budget.
+  const lines = String(text || '').trimEnd().split('\n');
+  for (let n = 0; n < 80 && lines.length > 1 && lines[lines.length - 1].trim().length < 60; n++) lines.pop();
+  const t = lines.join('\n');
+  if (t.length <= budget) return t;
+  const headLen = Math.round(budget * 0.45), tailLen = budget - headLen;
+  // The LAST conclusion marker in the back half of the judgment (not a contents-page entry).
+  let at = -1;
+  for (const m of t.matchAll(JUDGMENT_END_RE)) if (m.index > t.length / 2) at = m.index;
+  const tail = at >= 0 && t.length - at <= tailLen * 3
+    ? t.slice(at, at + tailLen)
+    : t.slice(-tailLen);
+  return `${t.slice(0, headLen)}\n\n[... middle of the judgment omitted ...]\n\n${tail}`;
+}
+
 // Synthesize a writer-ready content brief from web RESEARCH (Tavily sources +
 // Perplexity grounded answer). Claude structures + writes the brief but must use
 // ONLY the supplied research — every fact ties to a provided source, nothing
@@ -573,9 +593,9 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
   const country = (market && market.country) || 'United Kingdom';
   const scope = (market && market.scope) ? market.scope + '\n\n' : '';
   const briefKey = caseLaw ? 'content.caseLawBrief' : 'content.brief';
-  // Case law: inject the (trimmed) judgment text so Background/Issues/Decision come from the source.
+  // Case law: inject the judgment (opening + conclusion) so Background/Issues/Decision come from the source.
   const judgeBlock = (caseLaw && judgmentText)
-    ? `\n\n=== JUDGMENT TEXT (base Background, Issues and Decision on THIS; capture the neutral citation, court, date and judges) ===\n${String(judgmentText).slice(0, 7000)}`
+    ? `\n\n=== JUDGMENT TEXT (opening + conclusion; base Background, Issues and Decision on THIS; capture the neutral citation, court, date and judges; take the OUTCOME from the conclusion) ===\n${judgmentExcerpt(judgmentText)}`
     : '';
   // Competitors screen: the brief must OUT-DO the competitor's own article (we read it).
   const compBlock = (competitor && competitor.text)
