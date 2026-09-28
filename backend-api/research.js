@@ -15,7 +15,7 @@ import * as claude from './claude.js';
 import { UK } from './uk.js';
 import { marketFor } from './market.js';
 import { P, modelFor, tempFor, geoFor } from './prompts.js';
-import { resolveJudgment } from './judgments.js';
+import { resolveJudgment, citationsIn } from './judgments.js';
 // Prepend the site's niche/context to a Perplexity system prompt so grounded
 // research stays on-niche (the same off-niche fix applied to trending).
 const withNiche = (base, ctx) => (ctx ? `=== THIS SITE'S NICHE & CONTEXT (keep findings strictly relevant to this) ===\n${ctx}\n\n${base}` : base);
@@ -169,7 +169,7 @@ export async function contentBrief({ keyword, title = '', intent, siteName, nich
 
   // Verify every cited case / statute / rule BEFORE the brief is allowed to push.
   if (verify && brief && !brief.error) {
-    try { out.verification = await verifyLegal({ brief, market }); }
+    try { out.verification = await verifyLegal({ brief, market, judgment: judgment ? { text: judgment, url: research.judgmentUrl || '' } : null }); }
     catch (e) { out.verification = { status: 'unchecked', error: String((e && e.message) || e), checks: [] }; }
     if (out.verification) {
       brief.verification = out.verification;
@@ -192,7 +192,50 @@ export async function contentBrief({ keyword, title = '', intent, siteName, nich
 // Verify the legal citations in a brief against authoritative sources (grounded Perplexity).
 // Returns { status:'verified'|'issues'|'unchecked', checks:[{item,type,verdict,note,source}],
 // summary, checkedAt }. status is 'verified' ONLY when every case/legislation check verifies.
-export async function verifyLegal({ brief, market }) {
+// Is this citation GROUNDED in the judgment text we actually read? Deterministic and strict:
+//  • a neutral citation ([2026] EWHC 2386 (Ch)) must appear in the text (leading zeros ignored);
+//  • a case without one must appear as "<party> … v … <party>";
+//  • a statute/rule must appear by name (or its usual abbreviation, e.g. "IA 1986", "CA 2006",
+//    "CPR") AND, if a section/rule/schedule number is given, THAT number must appear as one —
+//    so a wrong section number is never waved through.
+// Brand-new judgments aren't indexed by web search yet, so the grounded web checker failed
+// EVERY citation of a 6-day-old judgment (6/6 "unverified") — including the judgment itself.
+const normCit = (s) => String(s || '').replace(/\s+/g, ' ').replace(/\b0+(\d)/g, '$1').toLowerCase();
+const escRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function groundedInJudgment(item, jText, jNorm) {
+  const it = String(item || '');
+  const cits = citationsIn(it);
+  if (cits.length) return cits.every((c) => jNorm.includes(normCit(c.raw)));
+  const vm = it.match(/(.+?)\s+v\.?\s+(.+)/i);
+  if (vm && !/\b(Act|Rules|Regulations|Order|Code|Directive)\b/.test(it)) {
+    const key = (s) => (s.replace(/\(.*?\)/g, ' ').match(/[A-Za-z][A-Za-z'&-]{3,}/g) || []).filter((w) => !/^(Limited|Ltd|plc|LLP|Inc|The|and|Anor|Ors|Others|Commissioners|Company|Holdings|Group)$/i.test(w)).sort((a, b) => b.length - a.length)[0];
+    const a = key(vm[1]), b = key(vm[2]);
+    if (!a || !b) return false;
+    return new RegExp(`${escRe(a)}[^\\n]{0,80}\\bv\\.?\\s[^\\n]{0,80}${escRe(b)}`, 'i').test(jText);
+  }
+  const act = (it.match(/((?:[A-Z][A-Za-z]*|\((?:[^)]+)\)|and|of|the|for)(?:\s+(?:[A-Z][A-Za-z]*|\([^)]+\)|and|of|the|for))*\s+(?:Act|Rules|Regulations|Order)\s+\d{4})/) || [])[1];
+  const cpr = /\b(Civil Procedure Rules|CPR)\b/i.test(it);
+  if (!act && !cpr) return false;
+  let actHit = false;
+  if (act) {
+    const words = act.replace(/\([^)]*\)/g, ' ').split(/\s+/).filter(Boolean);
+    const year = words[words.length - 1];
+    const abbr = words.slice(0, -1).filter((w) => /^[A-Z]/.test(w)).map((w) => w[0]).join('') + ' ' + year;   // Insolvency Act 1986 → IA 1986
+    actHit = new RegExp(escRe(act).replace(/\\ /g, '\\s+'), 'i').test(jText) || new RegExp(`\\b${escRe(abbr)}\\b`).test(jText);
+  } else actHit = /\b(Civil Procedure Rules|CPR)\b/.test(jText);
+  if (!actHit) return false;
+  const sec = it.match(/\b(?:section|sections|s\.|ss\.|s)\s*(\d+[A-Z]*)/i);
+  const rule = it.match(/\b(?:rule|rules|r\.|rr\.|r)\s*(\d+(?:\.\d+)+|\d+)/i);
+  const sch = it.match(/\bSchedule\s*(\d+)/i);
+  const part = it.match(/\bPart\s*(\d+[A-Z]?)/i);
+  if (sec && !new RegExp(`\\b(?:section|sections|s\\.?|ss\\.?)\\s*${escRe(sec[1])}\\b`, 'i').test(jText)) return false;
+  if (rule && !sec && !new RegExp(`\\b(?:rule|rules|r\\.?|rr\\.?)\\s*${escRe(rule[1])}\\b`, 'i').test(jText)) return false;
+  if (sch && !new RegExp(`\\bSchedule\\s*${escRe(sch[1])}\\b`, 'i').test(jText)) return false;
+  if (part && !new RegExp(`\\bPart\\s*${escRe(part[1])}\\b`, 'i').test(jText)) return false;
+  return true;
+}
+
+export async function verifyLegal({ brief, market, judgment }) {
   const b = brief || {};
   const cites = Array.isArray(b.citations) ? b.citations : [];
   // Build the checklist: explicit citations + the case itself + any unsourced claims flagged.
@@ -200,9 +243,25 @@ export async function verifyLegal({ brief, market }) {
   if (b.caseLaw && (b.caseLaw.caseName || b.caseLaw.neutralCitation)) items.push({ item: [b.caseLaw.caseName, b.caseLaw.neutralCitation].filter(Boolean).join(' '), type: 'case', proposition: (b.caseLaw.decision || '').slice(0, 200) });
   for (const c of cites) { const label = [c.name, c.citation || c.section].filter(Boolean).join(' '); if (label) items.push({ item: label, type: c.type || 'case', proposition: c.proposition || '' }); }
   // de-dup by item
-  const seen = new Set(); const list = items.filter((x) => { const k = x.item.toLowerCase().trim(); if (!k || seen.has(k)) return false; seen.add(k); return true; }).slice(0, 20);
-  if (!list.length) return { status: 'verified', checks: [], summary: 'No specific case, statute or rule was cited to verify.', checkedAt: new Date().toISOString(), noneToCheck: true };
-  if (!perplexity.hasKey()) return { status: 'unchecked', checks: [], summary: 'Verification needs Perplexity (grounded search) — not configured.', checkedAt: new Date().toISOString() };
+  const seen = new Set(); const all = items.filter((x) => { const k = x.item.toLowerCase().trim(); if (!k || seen.has(k)) return false; seen.add(k); return true; }).slice(0, 20);
+  if (!all.length) return { status: 'verified', checks: [], summary: 'No specific case, statute or rule was cited to verify.', checkedAt: new Date().toISOString(), noneToCheck: true };
+
+  // 1) Ground against the judgment text we actually read (primary source) — no web needed.
+  const jText = judgment && judgment.text ? String(judgment.text) : '';
+  const jNorm = normCit(jText);
+  const grounded = new Map();
+  if (jText) for (const x of all) if (groundedInJudgment(x.item, jText, jNorm)) grounded.set(x.item, { item: x.item, type: x.type, verdict: 'verified', note: 'Checked against the judgment text itself', source: judgment.url || '' });
+  const list = all.filter((x) => !grounded.has(x.item));
+  const finish = (webChecks) => {
+    const byI = new Map(webChecks.map((c) => [c.item, c]));
+    const checks = all.map((x) => grounded.get(x.item) || byI.get(x.item));
+    const bad = checks.filter((c) => c.verdict !== 'verified');
+    return { status: bad.length ? 'issues' : 'verified', checks, summary: bad.length ? `${bad.length} of ${checks.length} citation(s) could not be verified or were misstated.` : `All ${checks.length} citation(s) verified${grounded.size ? ` (${grounded.size} against the judgment text)` : ''}.`, checkedAt: new Date().toISOString(), grounded: grounded.size };
+  };
+  if (!list.length) return finish([]);
+  if (!perplexity.hasKey()) {
+    return Object.assign(finish(list.map((x) => ({ item: x.item, type: x.type, verdict: 'unverified', note: 'not in the judgment text; web check not configured', source: '' }))), { status: 'issues' });
+  }
 
   const numbered = list.map((x, i) => `${i + 1}. [${x.type}] ${x.item}${x.proposition ? ` — claimed to establish: ${x.proposition}` : ''}`).join('\n');
   const pp = await perplexity.ask({
@@ -220,13 +279,7 @@ export async function verifyLegal({ brief, market }) {
     const verdict = m && /verified|misstated|unverified/.test(String(m.verdict || '')) ? m.verdict : 'unverified';
     return { item: x.item, type: x.type, verdict, note: (m && m.note) || (m ? '' : 'not confirmed by the checker'), source: (m && m.source) || '' };
   });
-  const bad = checks.filter((c) => c.verdict !== 'verified');
-  return {
-    status: bad.length ? 'issues' : 'verified',
-    checks,
-    summary: bad.length ? `${bad.length} of ${checks.length} citation(s) could not be verified or were misstated.` : `All ${checks.length} citation(s) verified against authoritative sources.`,
-    checkedAt: new Date().toISOString(),
-  };
+  return finish(checks);   // web verdicts + the ones already grounded in the judgment text
 }
 
 // Current UK trending topics in a niche (news-weighted), with sources.
