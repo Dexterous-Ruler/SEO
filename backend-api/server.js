@@ -3388,13 +3388,15 @@ const routes = {
     const type = /^[a-z0-9_-]{1,40}$/.test(String(body.type || '')) ? String(body.type) : 'posts';
     let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
     const wp = new WordPressClient(creds);
-    const FIELDS = '_fields=id,status,type,link,title,content,modified';
+    // meta/acf too: go-legal.ai's definition (glossary) and template (product) pages keep their
+    // text in custom fields (definition_content, guidance_571 …), not in the post content.
+    const FIELDS = '_fields=id,status,type,link,title,content,modified,meta,acf';
     const p = Number(body.postId)
       ? await wp.request(`/${type}/${Number(body.postId)}?context=edit&${FIELDS}`).catch((e) => ({ error: String((e && e.message) || e) }))
       : await wp.request(`/${type}?slug=${encodeURIComponent(slug)}&status=draft,pending,future,publish&context=edit&${FIELDS}`).then((a) => (Array.isArray(a) && a[0]) || { error: `No post with slug "${slug}"` }).catch((e) => ({ error: String((e && e.message) || e) }));
     if (!p || p.error || !p.id) return { error: (p && p.error) || 'Post not found' };
     if (p.status === 'private') return { error: `Post ${p.id} is private — not returned.` };
-    return { id: p.id, status: p.status, type: p.type, link: p.link, modified: p.modified, title: (p.title && (p.title.raw || p.title.rendered)) || '', content: (p.content && (p.content.raw != null ? p.content.raw : p.content.rendered)) || '' };
+    return { id: p.id, status: p.status, type: p.type, link: p.link, modified: p.modified, title: (p.title && (p.title.raw || p.title.rendered)) || '', content: (p.content && (p.content.raw != null ? p.content.raw : p.content.rendered)) || '', meta: p.meta || null, acf: p.acf || null };
   },
   'POST /fix-broken-embeds': async (body) => {
     if (!body.siteId) return { error: 'siteId required' };
