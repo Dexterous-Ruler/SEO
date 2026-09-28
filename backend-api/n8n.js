@@ -296,7 +296,7 @@ async function getWorkflowPrompts(baseUrl, apiKey, id) {
         prompts,
       });
     }
-    return { id: data.id, name: data.name, active: !!data.active, nodes, hasWebhook, connections: data.connections || {}, allNodes: rawNodes.map((n) => ({ name: n.name, type: shortType(n.type) })) };
+    return { id: data.id, name: data.name, active: !!data.active, versionId: data.versionId || null, activeVersionId: data.activeVersionId || null, nodes, hasWebhook, connections: data.connections || {}, allNodes: rawNodes.map((n) => ({ name: n.name, type: shortType(n.type) })) };
   } catch (e) {
     return apiError(0, null, apiKey, e);
   }
@@ -518,7 +518,10 @@ async function setActive(baseUrl, apiKey, id, active) {
     const action = active ? 'activate' : 'deactivate';
     const { ok, status, data } = await api('POST', baseUrl, apiKey, `/workflows/${encodeURIComponent(id)}/${action}`);
     if (!ok) return apiError(status, data, apiKey);
-    return { ok: true, id, active: !!(data && data.active), name: data && data.name };
+    // versionId = latest saved draft, activeVersionId = what production webhooks run. They differ
+    // when an edit was saved but never published (the go-legal writer silently ran a 2-week-old
+    // version this way) — returning both lets callers PROVE an edit is live.
+    return { ok: true, id, active: !!(data && data.active), name: data && data.name, versionId: (data && data.versionId) || null, activeVersionId: (data && data.activeVersionId) || null };
   } catch (e) { return apiError(0, null, apiKey, e); }
 }
 
