@@ -390,6 +390,19 @@ const TYPE_OF_ARTICLE = {
 };
 export function typeOfArticleFor(category) { return TYPE_OF_ARTICLE[category] || null; }
 
+// Land a value on the option that ALREADY exists in a single-select, ignoring case, spacing/
+// punctuation and a trailing plural "s". go-legal.ai's n8n master routes on the EXACT Category
+// option ("Legal Definitions", "How to Guide"); writing our "Legal Definition" / "How To Guide"
+// (typecast) would add a near-duplicate option the master doesn't know, so it fell through to the
+// Blog writer instead of the definition / how-to flows. No match (or no options) → unchanged.
+export function canonicalChoice(value, choices) {
+  const key = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '').replace(/s$/, '');
+  const k = key(value);
+  if (!k || !Array.isArray(choices)) return value;
+  const hit = choices.find((c) => key(c && c.name) === k);
+  return hit ? hit.name : value;
+}
+
 export function mapArticleBrief(cluster, brief, briefField, fieldSet, category, market) {
   const c = cluster || {};
   const b = (brief && typeof brief === 'object') ? brief : {};
@@ -473,9 +486,20 @@ function briefToText(b) {
     if (cl.reasoning) lines.push('\nREASONING:\n' + cl.reasoning);
     if (Array.isArray(cl.impact) && cl.impact.length) { lines.push('\nIMPACT ON STAKEHOLDERS:'); cl.impact.forEach((x) => lines.push('• ' + (x.stakeholder ? x.stakeholder + ': ' : '') + (x.effect || x))); }
   }
-  if (Array.isArray(b.outline)) { lines.push('\nOUTLINE:'); b.outline.forEach((o) => { lines.push('• ' + (o.h2 || '')); (o.points || []).forEach((p) => lines.push('   - ' + p)); }); }
-  if (Array.isArray(b.keyFacts) && b.keyFacts.length) { lines.push('\nKEY FACTS:'); b.keyFacts.forEach((f) => lines.push(`• ${f.fact} [${f.source}]`)); }
-  if (Array.isArray(b.faqs) && b.faqs.length) { lines.push('\nFAQ:'); b.faqs.forEach((f) => lines.push(`Q: ${f.q}\nA: ${f.a}`)); }
+  // Tolerant of a site's own brief schema (outline items with extra fields, question/answer FAQs,
+  // claim-style facts): the standard shapes print exactly as before, anything extra is kept.
+  if (Array.isArray(b.outline)) {
+    lines.push('\nOUTLINE:');
+    b.outline.forEach((o) => {
+      if (!o || typeof o !== 'object') { if (o) lines.push('• ' + o); return; }
+      lines.push('• ' + (o.h2 || o.heading || o.title || ''));
+      (Array.isArray(o.points) ? o.points : []).forEach((p) => lines.push('   - ' + (p && typeof p === 'object' ? flatLine(p) : p)));
+      const rest = Object.fromEntries(Object.entries(o).filter(([k]) => !['h2', 'heading', 'title', 'points'].includes(k)));
+      renderBriefValue(rest, '   ', lines, 1);
+    });
+  }
+  if (Array.isArray(b.keyFacts) && b.keyFacts.length) { lines.push('\nKEY FACTS:'); b.keyFacts.forEach((f) => lines.push(f && typeof f === 'object' ? (f.fact ? `• ${f.fact} [${f.source}]` : '• ' + flatLine(f)) : '• ' + f)); }
+  if (Array.isArray(b.faqs) && b.faqs.length) { lines.push('\nFAQ:'); b.faqs.forEach((f) => lines.push(f && typeof f === 'object' ? `Q: ${f.q || f.question || ''}\nA: ${f.a || f.answer || ''}` : String(f))); }
   if (Array.isArray(b.internalLinks) && b.internalLinks.length) {
     lines.push('\nINTERNAL LINKS (link to these existing pages):');
     b.internalLinks.forEach((l) => {
@@ -506,8 +530,50 @@ function briefToText(b) {
   // NOTE: the verification status/summary is an INTERNAL QA signal (used by the push gate) and is
   // deliberately NOT written into the brief the writer receives — its summary text contains the
   // literal phrase "could not be verified", which the writer was echoing into the published page.
+  // Any OTHER section a site's own brief prompt asked for (e.g. Fast ILA's snapshot, SERP gaps,
+  // compliance flags, CTA): printed generically so a custom schema never silently loses content.
+  // Internal fields (sources list, verification, the operator's brief, "_" keys) are never printed.
+  for (const [k, v] of Object.entries(b)) {
+    if (BRIEF_HANDLED.has(k) || k.startsWith('_')) continue;
+    if (v == null || v === '' || (typeof v === 'object' && !Object.keys(v).length)) continue;
+    if (['outline', 'keyFacts', 'faqs', 'internalLinks', 'citations', 'unverifiedClaims'].includes(k) && Array.isArray(v)) continue;   // printed above
+    if (typeof v !== 'object') { lines.push(`\n${briefLabel(k)}: ${v}`); continue; }
+    lines.push(`\n${briefLabel(k)}:`);
+    renderBriefValue(v, '', lines, 0);
+  }
   if (b.wordCount) lines.push('\nTarget length: ~' + b.wordCount + ' words');
-  return lines.join('\n');
+  // A site's brief prompt names its inputs as {{APPROVED_FACTS}}-style placeholders, which the
+  // model then cites as if they were sources ("[{{APPROVED_FACTS}}]") — write them as plain words.
+  return lines.join('\n').replace(/\{\{\s*([A-Z][A-Z0-9_]*)\s*\}\}/g, (m, name) => name.toLowerCase().replace(/_/g, ' '));
+}
+// Keys briefToText prints explicitly (or must never print) — the generic pass skips them.
+const BRIEF_HANDLED = new Set(['title', 'metaDescription', 'intent', 'format', 'angle', 'caseLaw', 'wordCount', 'operatorNotes', 'sources', 'verification', 'error']);
+const briefLabel = (k) => String(k).replace(/^\d+[\s._-]*/, '').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().toUpperCase();
+// One line for a flat object: "claim: … | source: … | date: …".
+function flatLine(o) {
+  return Object.entries(o).filter(([, v]) => v != null && v !== '').map(([k, v]) => `${briefLabel(k).toLowerCase()}: ${v && typeof v === 'object' ? JSON.stringify(v) : v}`).join(' | ');
+}
+// Readable nested bullets for an arbitrary brief section (depth-capped).
+function renderBriefValue(v, pad, out, depth) {
+  if (v == null || v === '' || depth > 6) return;
+  if (typeof v !== 'object') { out.push(pad + v); return; }
+  if (Array.isArray(v)) {
+    for (const it of v) {
+      if (it == null || it === '') continue;
+      if (typeof it !== 'object') { out.push(pad + '• ' + it); continue; }
+      if (Array.isArray(it)) { renderBriefValue(it, pad + '   ', out, depth + 1); continue; }
+      const flat = Object.entries(it).filter(([, x]) => x == null || typeof x !== 'object');
+      const nested = Object.entries(it).filter(([, x]) => x != null && typeof x === 'object');
+      out.push(pad + '• ' + flatLine(Object.fromEntries(flat)));
+      for (const [k, x] of nested) { out.push(`${pad}   ${briefLabel(k).toLowerCase()}:`); renderBriefValue(x, pad + '      ', out, depth + 1); }
+    }
+    return;
+  }
+  for (const [k, x] of Object.entries(v)) {
+    if (x == null || x === '' || (typeof x === 'object' && !Object.keys(x).length)) continue;
+    if (typeof x !== 'object') out.push(`${pad}${briefLabel(k).toLowerCase()}: ${x}`);
+    else { out.push(`${pad}${briefLabel(k).toLowerCase()}:`); renderBriefValue(x, pad + '   ', out, depth + 1); }
+  }
 }
 // Build a Content Brief from a keyword cluster when no full brief was generated —
 // captures the same detail the old "Content Opportunities" table held (cluster,

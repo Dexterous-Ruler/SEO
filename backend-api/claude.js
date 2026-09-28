@@ -639,7 +639,7 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
   const opBlock = String(operatorNotes || '').trim()
     ? `\n\n=== OPERATOR'S BRIEF (AUTHORITATIVE — follow its angle, structure, sections and specifics; use the research and judgment above only to ground and verify it; never contradict or dilute it) ===\n${String(operatorNotes).slice(0, 8000)}`
     : '';
-  const userMsg = `${scope}TARGET MARKET: ${country}\nKEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}${judgeBlock}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}${compBlock}${opBlock}\n\nWrite the ${country} ${caseLaw ? 'CASE-LAW brief (Background / Issues / Decision / Impact) — every case and statute in "citations" must be real and sourced from the research; anything you cannot source goes in "unverifiedClaims", never stated as fact' : 'content brief'} as JSON.`;
+  const userMsg = `${scope}TARGET MARKET: ${country}\nKEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}${judgeBlock}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}${compBlock}${opBlock}\n\nWrite the ${country} ${caseLaw ? 'CASE-LAW brief (Background / Issues / Decision / Impact) — every case and statute in "citations" must be real and sourced from the research; anything you cannot source goes in "unverifiedClaims", never stated as fact' : 'content brief'} as JSON.\n\nThe numbered SOURCES list above is attached to the brief automatically: cite sources by number [n], and wherever your format asks for a consolidated source list give only the numbers — never re-type the whole list of titles and URLs.`;
   // Strip ```json fences, slice the outer object, parse. null on failure (truncated JSON).
   const parse = (t) => {
     let s = String(t || '').trim();
@@ -652,21 +652,61 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
     system: sys(briefKey, siteId),
     promptKey: briefKey,
     maxTokens,
-    // Runs inside a background job (not bound by the ~95s request cap), so give the
-    // synthesis room: dense research + a competitor/judgment block make a LONG brief.
-    // 110s/attempt (was 85s → Uber case-law brief timed out) within a 200s overall deadline.
-    timeoutMs: 110000, deadlineMs: 200000,
+    // Runs inside a background job (the push queue / brief jobs — not bound by the ~95s request
+    // cap), so give the synthesis room: dense research + a competitor/judgment block, or a site's
+    // own long brief spec, make a LONG brief. 240s/attempt within a 300s deadline per call.
+    timeoutMs: 240000, deadlineMs: 300000,
     messages: [{ role: 'user', content }],
   });
-  let txt = await call((competitor || caseLaw) ? 5000 : 3000, userMsg);
+  // Site brief prompts can ask for a lot (Fast ILA's is a 12-part spec: SERP gaps, schema,
+  // compliance flags, sources…): the old 3000/6000-token caps cut it off mid-JSON on BOTH tries,
+  // so every Fast ILA push failed with "Brief could not be structured". Output is billed per token
+  // actually written, so a higher cap only costs more when the brief really is that long.
+  let txt = await call((competitor || caseLaw) ? 10000 : 8000, userMsg);
   let o = parse(txt);
   if (!o) {
     // Truncated / non-JSON → ONE compact retry with more room.
-    txt = await call(6000, userMsg + '\n\nIMPORTANT: your previous answer was not complete, valid JSON. Return ONLY valid JSON — compact (outline ≤8 sections × ≤4 points, keyFacts ≤8, faqs ≤5, internalLinks ≤5) — no prose, no code fences.');
+    const first = txt;
+    txt = await call(12000, userMsg + '\n\nIMPORTANT: your previous answer was not complete, valid JSON. Return ONLY valid JSON — compact (outline ≤8 sections × ≤4 points, keyFacts ≤8, faqs ≤5, internalLinks ≤5, no re-typed source list) — no prose, no code fences.');
     o = parse(txt);
+    // Still cut off → keep every COMPLETE part of the longer answer rather than failing the push.
+    if (!o) {
+      const longer = String(txt || '').length >= String(first || '').length ? txt : first;
+      const s = salvageJson(longer);
+      if (s && Object.keys(s).length >= 4 && Object.keys(s).some((k) => /outline|structure|sections/i.test(k))) { o = s; o._salvaged = true; }
+    }
   }
   if (o) { o.sources = research.sources || []; return o; }
   return { title: keyword, error: 'brief synthesis parse failed', sources: research.sources || [], _raw: String(txt || '').slice(0, 400), _tail: String(txt || '').slice(-200) };
+}
+
+// Rescue a JSON object that was cut off by the output-token limit: keep every COMPLETE element
+// and close the brackets still open. One scan tracks strings/escapes and the bracket stack and
+// records each comma (outside strings) as a cut point; cut points are tried from the END, so the
+// result is the longest valid prefix — a half-written value is dropped, never kept truncated.
+// Returns the parsed object, or null.
+export function salvageJson(text) {
+  let s = String(text || '');
+  const fence = s.match(/```(?:json)?\s*([\s\S]*)/); if (fence) s = fence[1];
+  const a = s.indexOf('{'); if (a < 0) return null;
+  s = s.slice(a);
+  const stack = [], cuts = [];
+  let inStr = false, esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') inStr = true;
+    else if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']');
+    else if (ch === '}' || ch === ']') { stack.pop(); if (!stack.length) { try { return JSON.parse(s.slice(0, i + 1)); } catch { return null; } } }
+    else if (ch === ',') cuts.push([i, stack.slice().reverse().join('')]);
+  }
+  // Cut right after a finished value (no trailing comma yet): the whole text + closing brackets —
+  // unless it ends on a digit (a number cut short, e.g. "wordCount": 2200 → 22, would be wrong).
+  if (!inStr && !/[0-9.eE+-]\s*$/.test(s)) { try { return JSON.parse(s + stack.slice().reverse().join('')); } catch { /* fall back to comma cuts */ } }
+  for (let k = cuts.length - 1, n = 0; k >= 0 && n < 400; k--, n++) {
+    try { return JSON.parse(s.slice(0, cuts[k][0]) + cuts[k][1]); } catch { /* try the previous cut */ }
+  }
+  return null;
 }
 
 // AEO answer-first block. For a TARGET QUERY + page, produce a question-format

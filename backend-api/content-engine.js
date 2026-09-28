@@ -1283,6 +1283,8 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids, category, j
   //    written in French, Germany in German, etc. Field-set-filtered so a differing
   //    per-site schema can't 422. `category` (per-push override) wins over anything stored.
   const markets = marketsForLabels(jurisdictions, market);
+  // The table's own Category options — the value we write must be one of them exactly.
+  const categoryChoices = ((tbl.fields || []).find((f) => f.name === 'Category') || {}).options;
   const planned = [];   // { id, row, keyword, jurisdiction, key: 'keyword|jurisdiction' }
   for (const it of items) {
     const cluster = oppToCluster(it);
@@ -1294,6 +1296,7 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids, category, j
       if (!force && v && v.status && v.status !== 'verified') { blocked.push({ id: it.id, title: it.title, jurisdiction: mk.country, verifyStatus: v.status, summary: v.summary }); continue; }
       const row = airtable.mapArticleBrief(cluster, brief, briefField, names, cat, mk);
       if (!row || !row.Keyword) continue;
+      if (row.Category) row.Category = airtable.canonicalChoice(row.Category, categoryChoices);
       if (extraFields) for (const [k, val] of Object.entries(extraFields)) if (names.has(k) && val != null && String(val).trim()) row[k] = val;
       const keyword = String(row.Keyword).trim().toLowerCase();
       planned.push({ id: it.id, row, keyword, jurisdiction: mk.country, key: keyword + '|' + String(mk.country || '').toLowerCase(), titleKey: String(row.Title || '').trim().toLowerCase() });
