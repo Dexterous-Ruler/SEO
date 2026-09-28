@@ -3376,6 +3376,20 @@ const routes = {
   // or "VIDEO_ID") is not a video and renders as YouTube's "An error occurred" player.
   // Deletes the whole video block — figure/lead-in/caption wrapper included — so no empty
   // shell is left behind. Revision-backed, read-back verified, idempotent.
+  // Read ONE post as WordPress stores it — including a DRAFT (context=edit), which the public site
+  // can't show. Read-only. Lets us QA what an n8n writer just saved: the writers post drafts, and
+  // most of them don't keep n8n execution data, so the draft is the only copy of the article.
+  // `type` = the REST collection (posts / pages / a custom post type). Private posts are refused.
+  'POST /wp-post-read': async (body) => {
+    if (!body.siteId || !Number(body.postId)) return { error: 'siteId + postId required' };
+    const type = /^[a-z0-9_-]{1,40}$/.test(String(body.type || '')) ? String(body.type) : 'posts';
+    let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
+    const wp = new WordPressClient(creds);
+    const p = await wp.request(`/${type}/${Number(body.postId)}?context=edit&_fields=id,status,type,link,title,content,modified`).catch((e) => ({ error: String((e && e.message) || e) }));
+    if (!p || p.error || !p.id) return { error: (p && p.error) || 'Post not found' };
+    if (p.status === 'private') return { error: `Post ${p.id} is private — not returned.` };
+    return { id: p.id, status: p.status, type: p.type, link: p.link, modified: p.modified, title: (p.title && (p.title.raw || p.title.rendered)) || '', content: (p.content && (p.content.raw != null ? p.content.raw : p.content.rendered)) || '' };
+  },
   'POST /fix-broken-embeds': async (body) => {
     if (!body.siteId) return { error: 'siteId required' };
     let creds; try { creds = await credsForSite(body.siteId); } catch (e) { return { error: 'Connect this WordPress site first.', needsConnect: true }; }
