@@ -4688,8 +4688,7 @@ const routes = {
       perplexity: { configured: research.hasPerplexity ? research.hasPerplexity() : !!process.env.PERPLEXITY_API_KEY, usedFor: 'grounded research + web citation check' },
       tavily: { configured: !!process.env.TAVILY_API_KEY, usedFor: 'source search + page extraction' },
       firecrawl: { configured: firecrawl, usedFor: 'reading bot-protected competitor pages' },
-      westlaw: { configured: false, usedFor: 'not connected — needs an API agreement with Thomson Reuters' },
-      lexis: { configured: false, usedFor: 'not connected — needs an API agreement with LexisNexis' },
+      westlaw: { configured: false, usedFor: 'not connected (no API) — use the Westlaw UK shortcut on Competitors / AI chat and paste the right cases in' },
     };
     return r;
   },

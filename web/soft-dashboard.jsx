@@ -2091,6 +2091,16 @@ function N8nScreen({ ctx }){
    Karim's spec (plain English): save competitor websites/sitemaps so I can come back to
    them; scan what they publish; see each topic with where it came from; pick the content
    type; push it → it's marked done; everything stays here so I can track done vs not. */
+/* Westlaw UK shortcut — Karim checks cases in the firm's own subscription and feeds the right
+   ones in by hand (AI chat / a topic's judgment box). The system never uses his login.
+   Legal sites only (every connected site except GoodFor). */
+const WESTLAW_URL = "https://uk.westlaw.com/";
+function isLegalSiteUI(site){ const n=((site&&site.name)||"")+" "+((site&&site.url)||""); return /legal|visa|settlement|\bila\b|solicitor|\blaw\b|lawyer/i.test(n) && !/good\s?for/i.test(n); }
+function WestlawLink(){
+  return <a href={WESTLAW_URL} target="_blank" rel="noopener noreferrer" title="Open Westlaw UK (sign in with your own account)"
+    style={{ display:"inline-flex", alignItems:"center", gap:5, padding:"5px 12px", borderRadius:"var(--r-pill)", background:"var(--surface)", boxShadow:"var(--neo-xs)", color:"var(--t-700)", fontWeight:700, fontSize:12.5, textDecoration:"none", whiteSpace:"nowrap" }}>Westlaw UK ↗</a>;
+}
+
 function CompetitorsScreen({ ctx }) {
   const s = ctx.site;
   const API = window.SentinelAPI;
@@ -2120,24 +2130,17 @@ function CompetitorsScreen({ ctx }) {
   const [adv,setAdv] = useState({});                // id → { judgmentUrl, judgmentText, competitorUrl }
   const setAdvField = (id,k,v)=> setAdv(a=>Object.assign({},a,{[id]:Object.assign({},a[id],{[k]:v})}));
   const advOpts = (id)=>{ const a=adv[id]||{}; const o={}; if(a.judgmentUrl&&a.judgmentUrl.trim())o.judgmentUrl=a.judgmentUrl.trim(); if(a.judgmentText&&a.judgmentText.trim())o.judgmentText=a.judgmentText.trim(); if(a.competitorUrl&&a.competitorUrl.trim())o.competitorUrl=a.competitorUrl.trim(); return o; };
-  // Karim checks cases in the firm's own Westlaw / Lexis+ subscriptions and feeds the relevant
-  // judgments in by hand (his login is for him — the system never uses it). Their searches need
-  // a login, so those links copy the case name and open the site; the National Archives (free)
-  // opens with the search already filled in.
-  const legalSite = (()=>{ const n=(s.name||"")+" "+(s.url||""); return /legal|visa|settlement|\bila\b|solicitor|\blaw\b|lawyer/i.test(n) && !/good\s?for/i.test(n); })();
-  const LEGAL_DBS = [
-    { key:"westlaw", label:"Westlaw UK", url:"https://uk.westlaw.com/" },
-    { key:"lexis", label:"Lexis+ UK", url:"https://plus.lexis.com/uk" },
-    { key:"tna", label:"National Archives", url:"https://caselaw.nationalarchives.gov.uk/", search:(q)=>"https://caselaw.nationalarchives.gov.uk/search?query="+encodeURIComponent(q) },
-  ];
+  // Karim checks cases in the firm's own Westlaw UK subscription and feeds the right ones in by
+  // hand — into the AI chat or a topic's judgment box (his login is for him; the system never
+  // uses it). Westlaw's search needs his login, so "Look it up" copies the case name and opens it.
+  const legalSite = isLegalSiteUI(s);
   // "Emirates NBD Bank v Al Kuwari: When can…" → "Emirates NBD Bank v Al Kuwari"; other topics → the title.
   const caseQuery = (title)=>{ const t=String(title||""); const head=t.split(/[:|?–—]/)[0].trim(); return (/\s[vV]s?\.?\s/.test(head)?head:t).slice(0,90).trim(); };
-  const lookUp = (db, title)=>{
+  const lookUpWestlaw = (title)=>{
     const q = caseQuery(title);
-    if(db.search){ window.open(db.search(q), "_blank", "noopener"); return; }
     try{ if(navigator.clipboard) navigator.clipboard.writeText(q).catch(()=>{}); }catch(e){}
-    window.open(db.url, "_blank", "noopener");
-    ctx.toast("Copied “"+q+"” — paste it into "+db.label+"'s search. Found the judgment? Paste its text back here.","teal");
+    window.open(WESTLAW_URL, "_blank", "noopener");
+    ctx.toast("Copied “"+q+"” — paste it into Westlaw's search. Found the right judgment? Paste it into the AI chat or back here.","teal");
   };
   const [blockedIds,setBlockedIds] = useState({});  // id → true when a push was blocked (citations unverified)
   const [types,setTypes] = useState({});            // item id → content type chosen before push
@@ -2315,12 +2318,9 @@ function CompetitorsScreen({ ctx }) {
       <div style={{ margin:"0 4px 10px 22px", padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--surface)", boxShadow:"var(--neo-xs)" }}>
         <div style={{ fontSize:12, color:"var(--muted)", marginBottom:2 }}>The court judgment is found automatically (the National Archives, and links in the competitor's own article). Paste it here if it wasn't found, it picked the wrong case, or it's an older case the National Archives doesn't hold. All optional.</div>
         {legalSite && (
-          <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap", margin:"8px 0 2px", fontSize:12 }}>
-            <span style={{ color:"var(--muted)", fontWeight:600 }}>Look it up:</span>
-            {LEGAL_DBS.map(d=>(
-              <button key={d.key} onClick={()=>lookUp(d, it.title)} title={d.search?("Search the National Archives for “"+caseQuery(it.title)+"”"):("Copies “"+caseQuery(it.title)+"” and opens "+d.label+" — paste it into the search box")}
-                style={{ padding:"4px 10px", borderRadius:"var(--r-pill)", border:"none", cursor:"pointer", background:"var(--bg)", boxShadow:"var(--neo-xs)", color:"var(--t-700)", fontWeight:700, fontSize:12 }}>{d.label} ↗</button>
-            ))}
+          <div style={{ margin:"8px 0 2px" }}>
+            <button onClick={()=>lookUpWestlaw(it.title)} title={"Copies “"+caseQuery(it.title)+"” and opens Westlaw UK — paste it into the search box"}
+              style={{ padding:"4px 10px", borderRadius:"var(--r-pill)", border:"none", cursor:"pointer", background:"var(--bg)", boxShadow:"var(--neo-xs)", color:"var(--t-700)", fontWeight:700, fontSize:12 }}>Look it up on Westlaw ↗</button>
           </div>
         )}
         <div style={lab}>Court judgment link <span style={{ color:"var(--muted)", fontWeight:500 }}>(paste the BAILII or caselaw.nationalarchives.gov.uk page for this case)</span></div>
@@ -2456,11 +2456,8 @@ function CompetitorsScreen({ ctx }) {
       </PageHead>
       {legalSite && (
         <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", margin:"-6px 0 14px", fontSize:12.5, color:"var(--muted)" }}>
-          <span style={{ fontWeight:600 }}>Your legal databases:</span>
-          {LEGAL_DBS.map(d=>(
-            <a key={d.key} href={d.url} target="_blank" rel="noopener noreferrer" style={{ padding:"4px 11px", borderRadius:"var(--r-pill)", background:"var(--surface)", boxShadow:"var(--neo-xs)", color:"var(--t-700)", fontWeight:700, textDecoration:"none" }}>{d.label} ↗</a>
-          ))}
-          <span>Check a case there, then paste the judgment into a topic's “＋ Judgment / competitor link”.</span>
+          <WestlawLink />
+          <span>Check cases there, then paste the right ones into the AI chat or a topic's “＋ Judgment / competitor link”.</span>
         </div>
       )}
 
@@ -6735,6 +6732,7 @@ function ChatScreen({ ctx }) {
           <p style={{ margin:"6px 0 0", fontSize:14, color:"var(--muted)" }}>Connected to your live data — audits, keywords, gaps, AI visibility.</p>
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+          {isLegalSiteUI(active) && <WestlawLink />}
           <span style={{ fontSize:12.5, fontWeight:700, color:"var(--muted)" }}>Working on</span>
           <div style={{ position:"relative" }}>
             <select value={chatSite||""} onChange={e=>setChatSite(e.target.value)}
