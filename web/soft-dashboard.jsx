@@ -2294,7 +2294,7 @@ function CompetitorsScreen({ ctx }) {
     const busy = briefing===it.id;
     return (
       <div style={{ margin:"0 4px 10px 22px", padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--surface)", boxShadow:"var(--neo-xs)" }}>
-        <div style={{ fontSize:12, color:"var(--muted)", marginBottom:2 }}>The court judgment is found automatically (National Archives, the competitor's own links, CaseMine). Only paste it here if it wasn't found or it picked the wrong case. All optional.</div>
+        <div style={{ fontSize:12, color:"var(--muted)", marginBottom:2 }}>The court judgment is found automatically (the National Archives, and links in the competitor's own article). Paste it here if it wasn't found, it picked the wrong case, or it's an older case the National Archives doesn't hold. All optional.</div>
         <div style={lab}>Court judgment link <span style={{ color:"var(--muted)", fontWeight:500 }}>(paste the BAILII or caselaw.nationalarchives.gov.uk page for this case)</span></div>
         <input style={inp} placeholder="https://caselaw.nationalarchives.gov.uk/…" value={a.judgmentUrl||""} onChange={e=>setAdvField(it.id,"judgmentUrl",e.target.value)} />
         <div style={lab}>…or paste the judgment text <span style={{ color:"var(--muted)", fontWeight:500 }}>(if you have the full text)</span></div>

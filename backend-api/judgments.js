@@ -27,7 +27,7 @@ export const JUDGMENT_SITES = [
   { domain: 'judiciary.uk', name: 'Courts and Tribunals Judiciary', notes: 'Selected judgments, sentencing remarks.' },
   { domain: 'tribunalsdecisions.service.gov.uk', name: 'Upper Tribunal (Immigration & Asylum) decisions', notes: 'Official tribunal decisions.' },
   { domain: 'gov.uk', name: 'GOV.UK tribunal decisions', notes: 'Employment Tribunal, tax and other tribunal decision finders.' },
-  { domain: 'casemine.com', name: 'CaseMine', notes: 'Freemium; searchable, but full text sits behind a sign-up wall.' },
+  { domain: 'casemine.com', name: 'CaseMine', notes: 'Freemium; full text behind a sign-up wall, and it refuses requests from cloud servers (verified from Koyeb 28 Sep 2026) — works only from a normal computer.' },
   { domain: 'bailii.org', name: 'BAILII', notes: 'Free and broad (incl. older cases) but blocks automated reading.' },
   { domain: 'vlex.co.uk', name: 'vLex / Justis', notes: 'Subscription.' },
   { domain: 'iclr.co.uk', name: 'ICLR (Law Reports)', notes: 'Official law reports; subscription.' },
@@ -255,7 +255,12 @@ export async function sourcesHealth() {
     timed('National Archives — new judgments feed', async () => { const r = await fetchCourtFeed(COURT_GROUPS.tax.courts, { perPage: 5 }); return { ok: !r.error && r.items.length > 0, detail: r.error || `${r.items.length} latest tax judgments, newest ${String((r.items[0] || {}).published || '').slice(0, 10)}` }; }),
     timed('National Archives — search by party names', async () => { const r = await searchNationalArchives('Emirates NBD Al Kuwari', { max: 3 }); const hit = r.find((x) => /Emirates/i.test(x.title)); return { ok: !!hit, detail: hit ? `found ${hit.citation}` : `no match (${r.length} results)` }; }),
     timed('National Archives — full judgment text', async () => { const r = await readJudgment(`${NA}/ewhc/ch/2026/1468`); return { ok: !!(r && r.text), detail: r && r.text ? `${r.text.length.toLocaleString()} characters read` : 'could not read' }; }),
-    timed('CaseMine — search', async () => { const u = await searchCaseMine('Emirates NBD Al Kuwari'); return { ok: u.length > 0, detail: u.length ? `found ${u.length} judgment page(s)` : 'no results (blocked or changed)', sample: u[0] || null }; }),
+    timed('CaseMine — search', async () => {
+      const r = await fetchText('https://www.casemine.com/search/uk?q=' + encodeURIComponent('Emirates NBD Al Kuwari'), { timeoutMs: 15000 });
+      const n = new Set([...String(r.body || '').matchAll(/href="(\/judgement\/uk\/[a-f0-9]{16,32})"/g)].map((m) => m[1])).size;
+      const why = !r.status ? 'no response' : (r.status >= 400 ? `refused (HTTP ${r.status})` : (/just a moment|cf-chl|captcha|verify you are human|access denied/i.test(r.body) ? `bot-check page (HTTP ${r.status})` : `HTTP ${r.status}, ${String(r.body || '').length} bytes, no results`));
+      return { ok: n > 0, detail: n ? `found ${n} judgment page(s)` : `blocked from this server — ${why}` };
+    }),
     timed('CaseMine — judgment page', async () => { const u = (await searchCaseMine('Emirates NBD Al Kuwari'))[0]; if (!u) return { ok: false, detail: 'no page to read (search failed)' }; const r = await readJudgment(u); return { ok: !!(r && r.text), detail: r && r.text ? `${r.text.length.toLocaleString()} characters (partial — rest is behind CaseMine's sign-up)` : 'page not readable from this server' }; }),
     timed('BAILII', async () => { const r = await fetchText('https://www.bailii.org/uk/cases/UKSC/2021/5.html', { timeoutMs: 15000 }); const blocked = !r.body || r.body.length < 8000 || /robot|captcha|verify you are human/i.test(r.body.slice(0, 5000)); return { ok: true, blocked, detail: blocked ? `blocks automated reading (HTTP ${r.status || 'n/a'}, ${r.body.length} bytes) — BAILII links are read from the National Archives copy instead` : 'readable' }; }),
     timed('Employment Tribunal decisions (GOV.UK)', async () => { const r = await fetchText('https://www.gov.uk/employment-tribunal-decisions.atom', { timeoutMs: 15000 }); const n = (r.body.match(/<entry>/g) || []).length; return { ok: n > 0, detail: n ? `${n} recent decisions in the feed` : `feed empty or blocked (HTTP ${r.status || 'n/a'})` }; }),
