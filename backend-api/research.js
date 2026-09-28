@@ -122,7 +122,7 @@ const isLegalSource = (url) => { const d = domainOf(url); return LEGAL_DOMAINS.s
 // `caseLaw` → Background/Issues/Decision/Impact structure + read the judgment (extract the
 // full text of a judgment URL) + bias research to legal sources.
 // `verify` → after the brief, run legal citation verification (verifyLegal) and attach it.
-export async function contentBrief({ keyword, title = '', intent, siteName, niche, excludeDomain, internalLinkCandidates, siteId, db, now = 0, competitor, caseLaw = false, verify = false, judgmentUrl = '', judgmentText = '' }) {
+export async function contentBrief({ keyword, title = '', intent, siteName, niche, excludeDomain, internalLinkCandidates, siteId, db, now = 0, competitor, caseLaw = false, verify = false, judgmentUrl = '', judgmentText = '', operatorNotes = '' }) {
   if (!perplexity.hasKey() && !tavily.hasKey()) return { error: 'No research engine configured — add PERPLEXITY_API_KEY and/or TAVILY_API_KEY.' };
   const market = marketFor(db);
   // A user-supplied judgment (URL or pasted text) is the reliable primary source Karim's
@@ -164,7 +164,11 @@ export async function contentBrief({ keyword, title = '', intent, siteName, nich
   }
 
   // A full primary-source judgment gets the bigger budget (worked examples + the decision survive).
-  const brief = await claude.synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText: judgment, judgmentBudget: judgmentFull ? 12000 : 7000 });
+  const notes = String(operatorNotes || '').trim();
+  const brief = await claude.synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText: judgment, judgmentBudget: judgmentFull ? 12000 : 7000, operatorNotes: notes });
+  // The operator's own brief (AI chat / AI-visibility gap / news hook) rides along VERBATIM so the
+  // writer gets it untouched on top of the researched, verified structure (briefToText prints it).
+  if (notes && brief && typeof brief === 'object' && !brief.error) brief.operatorNotes = notes.slice(0, 12000);
   const out = { keyword, intent, brief, country: market.country, sources: research.sources, engines: research.engines, researchCost: research.cost, caseLaw, judgmentRead: !!judgment, judgmentUrl: research.judgmentUrl || null, judgment: judgmentInfo };
 
   // Verify every cited case / statute / rule BEFORE the brief is allowed to push.

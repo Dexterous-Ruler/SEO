@@ -17,6 +17,8 @@ import { prioritizeFindings } from './prioritization.js';
 import { suggestForSite as suggestInternalLinks } from './internal-links.js';
 import { findOpportunities } from './content-opportunities.js';
 import * as airtable from './airtable.js';
+import * as engine from './content-engine.js';
+import * as pushQueue from './push-queue.js';
 import { P } from './prompts.js';
 import { discoverUrls } from '../src/lib/crawler.js';
 import { marketFor } from './market.js';
@@ -499,6 +501,15 @@ async function runTool(name, input, siteId, turn) {
         }
       } catch (e) { /* filter is best-effort — never block the push */ }
       if (!keywords.length) return 'After niche-filtering, none of those keywords fit this site’s services — nothing pushed.';
+      // THE ONE FLOW: each keyword gets a researched brief before its Article Writer row exists.
+      {
+        const made = await engine.ensurePushOpps(siteId, keywords.map((k) => ({ keyword: String(k).trim(), title: String(k).trim(), source: 'ai_chat_keywords' })).filter((x) => x.keyword)).catch((e) => ({ error: String((e && e.message) || e) }));
+        if (made && Array.isArray(made.ids) && made.ids.some(Boolean)) {
+          const q = await pushQueue.enqueue(siteId, made.ids.map((id, i) => id && { oppId: id, title: keywords[i], source: 'ai_chat_keywords' }).filter(Boolean));
+          await db.logAirtableSync({ site_id: siteId, kind: 'keywords', records_pushed: 0, status: 'queued' }).catch(() => {});
+          return JSON.stringify({ done: true, queued: q.queued, alreadyQueued: q.merged, candidates: keywords.length, note: 'Each keyword is being researched into a full brief (reads any court judgment, checks citations) and lands in the Article Writer when ready — usually 1–2 minutes each. Tell the user they can track them in the push queue on the Airtable screen.' });
+        }
+      }
       const res = await airtable.pushKeywords(pat, cfg.base_id, cfg.table_gaps, cfg.table_content || 'Keyword', keywords);
       await db.logAirtableSync({ site_id: siteId, kind: 'keywords', records_pushed: res.pushed, status: 'ok' }).catch(() => {});
       await db.upsertAirtableConfig(siteId, { last_sync: new Date().toISOString() }).catch(() => {});
@@ -528,6 +539,26 @@ async function runTool(name, input, siteId, turn) {
       } else if (turn && [...turn.reads.values()].some((r) => !r.ok) && ![...turn.reads.values()].some((r) => r.ok)) {
         // Every read this turn failed and no source was declared → the brief cannot be grounded.
         return 'REJECTED: every page read in this conversation failed, so a brief would be invented. Tell the user you could not read the source and ask them to paste the text.';
+      }
+      // (Was referenced below without ever being defined → "start writing" always crashed.)
+      const site = await db.getSite(siteId).catch(() => null) || {};
+      // THE ONE FLOW: the chat's brief is kept VERBATIM as the operator's brief (top of the
+      // Content Brief), and a researched, verified brief is built around it — reads any court
+      // judgment, checks every citation, per jurisdiction — before the row is created or updated
+      // (upsert by Title, as before). "Start writing" still fires once the row lands.
+      {
+        let desc0 = String(input.description || '').trim() || String(input.goal || '').trim();
+        if (!desc0 && brief) { const line = brief.split('\n').map((l) => l.replace(/^[#>*\-\s]+/, '').trim()).find((l) => l.length > 40 && !/^[A-Z\s]{6,}$/.test(l)); if (line) desc0 = line; }
+        const readOnly = !!input.startWriting && site.write_armed === false;
+        const made = await engine.ensurePushOpps(siteId, [{ title, keyword, category: 'Blog', source: 'ai_chat', operatorNotes: brief ? brief + sourceNote : '', payload: { goal: input.goal ? String(input.goal) : null } }]).catch((e) => ({ error: String((e && e.message) || e) }));
+        if (made && Array.isArray(made.ids) && made.ids[0]) {
+          await pushQueue.enqueue(siteId, [{ oppId: made.ids[0], title, source: 'ai_chat', category: 'Blog', upsertBy: 'Title', extraFields: { 'Goal of Article': input.goal ? String(input.goal) : '', Description: desc0.slice(0, 500) }, startWriting: !!input.startWriting && !readOnly }]);
+          await db.logAirtableSync({ site_id: siteId, kind: 'article_brief', records_pushed: 0, status: 'queued' }).catch(() => {});
+          return `QUEUED "${title}" for the Article Writer. Your brief is kept word-for-word at the top, and a researched, verified brief is being built around it (it reads any court judgment and checks every citation) — it will appear in Airtable in about 1–2 minutes` +
+            (input.startWriting ? (readOnly ? `. Writing will NOT start automatically: "${site.name || 'this site'}" is READ-ONLY (write not armed) — ask the user to arm writes, then set Status to "Write Article".` : ', and the writer will start automatically once it lands.') : '. Tell the user to set Status to "Write Article" in Airtable when they want it written.') +
+            ' They can track it in the push queue on the Airtable screen.';
+        }
+        // Queue unavailable → fall through to the direct write below.
       }
       // Resolve the Article Writer table (stored as table_gaps) + ensure the Content Brief column exists.
       let tables = [];

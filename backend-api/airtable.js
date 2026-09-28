@@ -451,6 +451,13 @@ function briefToText(b) {
   if (!b) return '';
   if (typeof b === 'string') return b;
   const lines = [];
+  // The operator's own brief (e.g. what Karim refined in the AI chat) FIRST and VERBATIM — the
+  // researched structure below grounds it; it never replaces it.
+  if (b.operatorNotes && String(b.operatorNotes).trim()) {
+    lines.push("=== OPERATOR'S BRIEF (authoritative — keep its angle, structure and specifics) ===");
+    lines.push(String(b.operatorNotes).trim());
+    lines.push("=== END OF OPERATOR'S BRIEF — researched and verified detail follows ===\n");
+  }
   if (b.angle) lines.push('ANGLE: ' + b.angle);
   if (b.metaDescription) lines.push('META: ' + b.metaDescription);
   // Case-law brief: the judgment-based structure the writer must follow.

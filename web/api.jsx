@@ -199,6 +199,9 @@
     competitorBrief(siteId, id, opts) { return engine("/competitor-brief", Object.assign({ siteId, id }, opts || {})); },
     competitorBriefStart(siteId, id, opts) { return engine("/competitor-brief-start", Object.assign({ siteId, id }, opts || {})); },
     competitorBriefStatus(siteId, id) { return engine("/competitor-brief-status", { siteId, id }); },
+    // Research → push queue: every Article Writer push researches a brief first, in the background.
+    pushQueue(siteId) { return engine("/push-queue", { siteId }); },
+    pushQueueAction(siteId, key, action) { return engine("/push-queue-action", { siteId, key, action }); },
     trendingIntel(siteId, niche, db) { return engine("/trending-intel", { siteId, niche, db }); },
     peopleAlsoAsk(siteId, keyword, depth) { return engine("/people-also-ask", { siteId, keyword, depth }); },
     // Same route with push:true → sends each PAA question to the Airtable Article Writer; returns { ..., airtable }.

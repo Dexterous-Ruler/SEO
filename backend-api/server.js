@@ -50,6 +50,7 @@ import { generateA11yFixes } from './a11y-fixes.js';
 import { findOpportunities } from './content-opportunities.js';
 import * as research from './research.js';
 import * as judgments from './judgments.js';
+import * as pushQueue from './push-queue.js';
 import * as imageOpt from './image-optimize.js';
 import * as prompts from './prompts.js';
 import * as perplexity from './perplexity.js';
@@ -346,7 +347,7 @@ function authOk(req) {
 // The dashboard's kill switch was per-tab React state — another tab (or the API)
 // happily kept writing. Now it's persisted (app_secrets) and enforced HERE, at the
 // dispatcher, for every route that can mutate WordPress/Airtable/n8n. 10s cache.
-const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|engine-clean-negatives|competitor-sitemap-poll|competitor-expand|competitor-brief|competitor-brief-start|competitor-source-save|competitor-source-remove|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
+const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|engine-clean-negatives|competitor-sitemap-poll|competitor-expand|competitor-brief|competitor-brief-start|competitor-source-save|competitor-source-remove|push-queue-action|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
 let _kill = { v: false, exp: 0 };
 async function killSwitchOn() {
   if (Date.now() < _kill.exp) return _kill.v;
@@ -580,6 +581,83 @@ function isCaseLawTopic(title, type) {
   if (/\b(case law|case study|case comment|supreme court (case|judgment|ruling|decision)|court of appeal (case|judgment|ruling|decision)|landmark (ruling|case|judgment|decision)|the (ruling|judgment|decision) in|reflective loss)\b/i.test(s)) return true;
   return false;
 }
+
+// Research the brief for ONE opportunity in ONE market — the single researched-brief step every
+// push goes through (Competitors "Research brief", Radar judgments, and the research→push queue
+// for keywords / Keyword Gap / Content Plan / People Also Ask / AI Visibility / Radar news / AI
+// chat / auto-pilot). Reads the competitor or news article, finds + reads the court judgment for
+// case law, follows any operator's brief (AI chat), verifies citations on legal sites. Stores it
+// per market (payload.briefsByMarket[country]) so multi-jurisdiction pushes get a brief researched
+// for THAT country (go-legal.ai is multilingual); `primary` also sets the brief the UI shows.
+async function researchOppBrief(siteId, oppId, opts = {}) {
+  const got = await engine.fetchByIds(siteId, [oppId]);
+  const opp = (got.items || [])[0];
+  if (!opp) return { error: 'That topic is no longer here.' };
+  const payload = (opp.payload && typeof opp.payload === 'object') ? opp.payload : {};
+  const site = await db.getSite(siteId).catch(() => null);
+  if (!site) return { error: 'Site not found.' };
+  let market = marketFor(opts.marketDb || site.semrush_db);
+  if (opts.jurisdiction) { const c = semrush.COUNTRIES.find((x) => x.label.toLowerCase() === String(opts.jurisdiction).toLowerCase()); if (c) market = marketFor(c.db); }
+  // The competitor's own article (best-effort, external tiers) so the brief out-does it. The
+  // operator can override the auto-scanned link with the EXACT competitor URL to outrank. A court
+  // judgment item's link IS the judgment — read it as the primary source, never as a competitor.
+  const isJudgment = payload.kind === 'judgment' || !!payload.judgmentUrl;
+  let competitor = null;
+  const compUrl = (opts.competitorUrl && String(opts.competitorUrl).trim()) || (isJudgment ? '' : payload.link);
+  if (compUrl) {
+    try { const pg = await chatbot.readPage(compUrl); if (pg && !pg.error && pg.text) competitor = { url: compUrl, title: pg.title || opp.title, text: String(pg.text).slice(0, 6000) }; } catch (e) {}
+  }
+  const excludeDomain = (site.url || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  let internalLinkCandidates = [];
+  try {
+    const { baseUrl, username, appPassword } = await credsForSite(siteId);
+    const wp = new WordPressClient({ baseUrl, username, appPassword });
+    const [pg, ps] = await Promise.all([wp.list('pages', { perPage: 100, fields: 'title,link' }).catch(() => []), wp.list('posts', { perPage: 100, fields: 'title,link' }).catch(() => [])]);
+    internalLinkCandidates = [...pg, ...ps].map((r) => ({ title: (r.title?.rendered || '').replace(/&[a-z]+;/g, ' ').trim(), url: r.link })).filter((p) => p.title && p.url);
+  } catch (e) {}
+  const keyword = opp.primary_keyword || opp.title;
+  const suggestedType = payload.category || payload.suggestedType || 'blog';
+  // A pasted court judgment (URL or text) forces case-law structure + verification.
+  const judgmentUrl = (opts.judgmentUrl && String(opts.judgmentUrl).trim()) || (isJudgment ? String(payload.judgmentUrl || payload.link || '') : '');
+  const judgmentText = (opts.judgmentText && String(opts.judgmentText).trim()) || '';
+  const hasJudgment = !!(judgmentUrl || judgmentText);
+  const caseLaw = opts.caseLaw != null ? !!opts.caseLaw : (hasJudgment || isCaseLawTopic(opp.title, suggestedType));
+  const verify = opts.verify != null ? !!opts.verify : (isLegalSite(site) || caseLaw);
+  let r;
+  try {
+    r = await research.contentBrief({ keyword, title: opp.title, intent: opp.intent, siteName: site.name, niche: site.niche || (site.stack && site.stack.type), excludeDomain, internalLinkCandidates, siteId, db: market.db, now: Date.now(), competitor, caseLaw, verify, judgmentUrl, judgmentText, operatorNotes: payload.operatorNotes || '' });
+  } catch (e) { return { error: 'Brief research failed: ' + String((e && e.message) || e) }; }
+  if (!r || r.error) return { error: (r && r.error) || 'Brief research failed.' };
+  if (!r.brief || r.brief.error) return { error: 'Brief could not be structured — try again.' + (r.brief && r.brief._tail ? ' (output ended: …' + String(r.brief._tail).slice(-140).replace(/\s+/g, ' ') + ')' : '') };
+  const briefSources = (r.sources || []).slice(0, 10).map((x) => ({ title: x.title || '', url: x.url }));
+  const verification = r.verification || null;
+  // Re-read the payload just before writing so a brief for another market (researched moments
+  // earlier by the queue) is never overwritten.
+  const fresh = ((await engine.fetchByIds(siteId, [oppId]).catch(() => ({ items: [] }))).items || [])[0];
+  const base = (fresh && fresh.payload && typeof fresh.payload === 'object') ? fresh.payload : payload;
+  const perMarket = { brief: r.brief, sources: briefSources, at: new Date().toISOString(), competitorRead: !!competitor, caseLaw, judgmentRead: !!r.judgmentRead, judgmentUrl: r.judgmentUrl || null, judgment: r.judgment || null, verification };
+  const patch = { briefsByMarket: Object.assign({}, base.briefsByMarket || {}, { [market.country]: perMarket }) };
+  if (opts.primary !== false || !base.brief) Object.assign(patch, {
+    brief: r.brief, briefSources, briefAt: perMarket.at, briefFor: market.country, briefCompetitorRead: !!competitor, briefEngines: r.engines || null,
+    briefCaseLaw: caseLaw, briefJudgmentRead: !!r.judgmentRead, briefJudgmentUrl: r.judgmentUrl || null, briefJudgment: r.judgment || null, briefVerification: verification, briefVerified: verification ? verification.status === 'verified' : null,
+  });
+  await engine.updateOpp(opp.id, { payload: Object.assign({}, base, patch) }).catch(() => {});
+  return { brief: r.brief, sources: briefSources, briefFor: market.country, competitorRead: !!competitor, engines: r.engines, caseLaw, judgmentRead: !!r.judgmentRead, judgmentUrl: r.judgmentUrl || null, judgment: r.judgment || null, verification };
+}
+
+// Send ANY article push through the research → push queue (the one flow). items: [{ title,
+// keyword, intent, category, source, link, operatorNotes, brief, briefFor, payload }].
+// → { queued, merged, ids } | { error } | { notProvisioned } — callers fall back to their old
+// direct push on an error so a push is never lost.
+async function queueArticlePushes(siteId, items, { jurisdictions, category, force, upsertBy, extraFields, startWriting } = {}) {
+  const made = await engine.ensurePushOpps(siteId, items).catch((e) => ({ error: String((e && e.message) || e) }));
+  if (!made || made.error || made.notProvisioned || !Array.isArray(made.ids)) return made || { error: 'could not queue' };
+  const entries = made.ids.map((id, i) => id && { oppId: id, title: items[i].title || items[i].keyword, source: items[i].source, category: items[i].category || category, jurisdictions, force, upsertBy, extraFields, startWriting }).filter(Boolean);
+  if (!entries.length) return { error: 'nothing to queue' };
+  const q = await pushQueue.enqueue(siteId, entries);
+  return { queued: q.queued, merged: q.merged, ids: made.ids };
+}
+const QUEUED_NOTE = 'Researching a brief for each (reads any court judgment, checks citations) — each lands in the Article Writer when ready, usually 1–2 minutes apiece. Track them in the push queue.';
 
 // --- route handlers --------------------------------------------------------
 const routes = {
@@ -2209,7 +2287,7 @@ const routes = {
         answer: q.answer,   // Google's PAA snippet → the row's Description
       }));
       try {
-        res.airtable = await routes['POST /airtable-sync']({ siteId: body.siteId, kinds: ['opportunities'], clusters });
+        res.airtable = await routes['POST /airtable-sync']({ siteId: body.siteId, kinds: ['opportunities'], clusters, source: 'people_also_ask' });
       } catch (e) { res.airtable = { error: 'Airtable push failed: ' + e.message }; }
     }
     return res;
@@ -3801,6 +3879,17 @@ const routes = {
     }
     if (!keywords.length) return { error: 'No content-gap keywords found to push — run a Content Plan first, or add competitors/connect Search Console.', pushed: 0 };
 
+    // THE ONE FLOW: every keyword gets a researched brief before its Article Writer row exists.
+    {
+      const titleFor = (k) => { const c = (gapClusters || []).find((x) => String(x.primaryKeyword || '').trim().toLowerCase() === String(k).trim().toLowerCase()); return (c && c.suggestedTitle) || String(k).trim(); };
+      const q = await queueArticlePushes(siteId, keywords.map((k) => ({ keyword: String(k).trim(), title: titleFor(k), category: body.category || null, source: 'keyword_push' })).filter((x) => x.keyword), { category: body.category || null });
+      if (q && !q.error && !q.notProvisioned) {
+        await db.logAirtableSync({ site_id: siteId, kind: 'keywords', records_pushed: 0, status: 'queued' }).catch(() => {});
+        return { ok: true, queued: q.queued, merged: q.merged, pushed: 0, candidates: keywords.length, derived, researched: true, note: QUEUED_NOTE };
+      }
+      // Queue unavailable (content table not provisioned) → fall through to the direct push below.
+    }
+
     // Make every pushed keyword arrive as a WRITER-READY row — Title + Description (+ a
     // Content Brief and topic-matched Internal Links) — not a bare keyword with empty
     // Title/Description. That empty-row bug ("keyword push doesn't add the title and the
@@ -3993,13 +4082,18 @@ const routes = {
       // Writer-ready rows (Title + Keyword + Content Brief) — NOT bare keyword rows whose
       // stat fields get filtered away, leaving half-empty "ghost" rows in the master list.
       const aw = await articleWriterTarget();
-      const rows = aw
-        ? airtable.mapGapBriefs(gaps || [], aw.briefField, airtable.normalizeCategory(body.category), market)
-        : airtable.mapGaps(gaps || [], 'DataForSEO', now);
-      // Land keywords in the Article Writer table (de-duped by Keyword); only if that
-      // table isn't configured do we fall back to a dedicated 'SEO Keyword Gaps' table.
-      const done = await pushToArticleWriter('gaps', rows, 'Keyword');
-      if (!done) await push('gaps', cfg.table_gaps, airtable.mapGaps(gaps || [], 'DataForSEO', now), airtable.SCHEMAS.gaps);
+      // THE ONE FLOW: each gap keyword gets a researched brief before its row is created.
+      const gq = aw ? await queueArticlePushes(siteId, (gaps || []).filter((g) => g && g.keyword).map((g) => ({ keyword: String(g.keyword).trim(), title: String(g.keyword).trim(), category: body.category || null, source: 'keyword_gap', payload: { gapVolume: g.volume || g.searchVolume || null } })), { category: body.category || null }) : null;
+      if (gq && !gq.error && !gq.notProvisioned) out.gaps = { queued: gq.queued, merged: gq.merged, note: QUEUED_NOTE };
+      else {
+        const rows = aw
+          ? airtable.mapGapBriefs(gaps || [], aw.briefField, airtable.normalizeCategory(body.category), market)
+          : airtable.mapGaps(gaps || [], 'DataForSEO', now);
+        // Land keywords in the Article Writer table (de-duped by Keyword); only if that
+        // table isn't configured do we fall back to a dedicated 'SEO Keyword Gaps' table.
+        const done = await pushToArticleWriter('gaps', rows, 'Keyword');
+        if (!done) await push('gaps', cfg.table_gaps, airtable.mapGaps(gaps || [], 'DataForSEO', now), airtable.SCHEMAS.gaps);
+      }
     }
     // 2) Content suggestions (passed from the UI's content-intel result).
     //    NOTE: cfg.table_content stores the KEYWORD FIELD name (see /airtable-config), not
@@ -4036,7 +4130,15 @@ const routes = {
     if (kinds.includes('opportunities')) {
       const aw = await articleWriterTarget();
       const clusters = body.clusters || [];
-      if (aw) {
+      // THE ONE FLOW: a cluster that already carries a researched brief keeps it (no re-research
+      // for its own market); a text brief rides along as the operator's brief; the rest get one.
+      const cq = aw ? await queueArticlePushes(siteId, clusters.filter(Boolean).map((c) => {
+        const kw = String(c.primaryKeyword || c.keyword || c.title || c.suggestedTitle || '').trim();
+        const structured = c.brief && typeof c.brief === 'object' && !c.brief.error ? c.brief : null;
+        return { keyword: kw, title: c.suggestedTitle || c.title || kw, intent: c.intent, category: c.category || body.category || null, source: body.source || 'content_plan', brief: structured, briefFor: structured ? market.country : null, operatorNotes: typeof c.brief === 'string' ? c.brief : '' };
+      }).filter((x) => x.keyword), { category: body.category || null }) : null;
+      if (cq && !cq.error && !cq.notProvisioned) out.opportunities = { queued: cq.queued, merged: cq.merged, note: QUEUED_NOTE };
+      else if (aw) {
         const rows = clusters.map((c) => airtable.mapArticleBrief(c, c.brief || null, aw.briefField, null, airtable.normalizeCategory(c.category || body.category), market));
         await pushToArticleWriter('opportunities', rows, 'Title', { upsert: true });
       } else {
@@ -4053,7 +4155,16 @@ const routes = {
     if (kinds.includes('geo_opportunities')) {
       const opps = (body.geoOpportunities || []).filter((r) => r && r.prompt && !r.error);
       const aw = await articleWriterTarget();
-      if (aw && opps.length) {
+      // THE ONE FLOW: each AI-visibility query gets a researched brief; the "AI answers this
+      // without citing us" context rides along as the operator's brief.
+      const vq = (aw && opps.length) ? await queueArticlePushes(siteId, opps.map((r) => {
+        const q = String(r.prompt).trim();
+        const cited = (r.citedDomains || []).join(', ');
+        const notes = [`AI-visibility gap: AI assistants answer this query WITHOUT citing us.`, `Query: ${q}`, r.intent ? `Intent: ${r.intent}` : '', cited ? `Currently cited instead: ${cited}` : '', 'Write the definitive, directly-quotable answer to this query: lead with a crisp 2-3 sentence answer, then the supporting detail, so AI assistants can cite us for it.'].filter(Boolean).join('\n');
+        return { keyword: q, title: q.charAt(0).toUpperCase() + q.slice(1), category: 'Blog', source: 'ai_visibility', operatorNotes: notes };
+      }), {}) : null;
+      if (vq && !vq.error && !vq.notProvisioned) out.geo_opportunities = { queued: vq.queued, merged: vq.merged, note: QUEUED_NOTE };
+      else if (aw && opps.length) {
         const rows = opps.map((r) => {
           const q = String(r.prompt).trim();
           const title = q.charAt(0).toUpperCase() + q.slice(1);
@@ -4106,9 +4217,18 @@ const routes = {
       const aw = await articleWriterTarget();
       if (!aw) { out.article_brief = { error: 'No Article Writer table configured for this site.' }; }
       else {
-        const row = airtable.mapArticleBrief(body.cluster || {}, body.brief || null, aw.briefField, null, airtable.normalizeCategory(body.category), market);
-        if (!row) { out.article_brief = { pushed: 0, note: 'no brief' }; }
-        else { await pushToArticleWriter('article_brief', [row], 'Title', { upsert: true }); }
+        // THE ONE FLOW: the Content Plan brief is kept (structured = its market's brief; text =
+        // the operator's brief) and still gets the judgment/citation checks where it lacks them.
+        const c = body.cluster || {};
+        const kw = String(c.primaryKeyword || c.keyword || c.title || c.suggestedTitle || '').trim();
+        const structured = body.brief && typeof body.brief === 'object' && !body.brief.error ? body.brief : null;
+        const bq = kw ? await queueArticlePushes(siteId, [{ keyword: kw, title: c.suggestedTitle || c.title || kw, intent: c.intent, category: body.category || null, source: 'content_plan', brief: structured, briefFor: structured ? market.country : null, operatorNotes: typeof body.brief === 'string' ? body.brief : '' }], { category: body.category || null }) : null;
+        if (bq && !bq.error && !bq.notProvisioned) out.article_brief = { queued: bq.queued, merged: bq.merged, note: QUEUED_NOTE };
+        else {
+          const row = airtable.mapArticleBrief(body.cluster || {}, body.brief || null, aw.briefField, null, airtable.normalizeCategory(body.category), market);
+          if (!row) { out.article_brief = { pushed: 0, note: 'no brief' }; }
+          else { await pushToArticleWriter('article_brief', [row], 'Title', { upsert: true }); }
+        }
       }
     }
 
@@ -4645,7 +4765,25 @@ const routes = {
   // → { drafted, queued, skippedDup, candidates, table } | { skipped, reason } | { notProvisioned }.
   'POST /engine-autodraft': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    return engine.autoDraft(body.siteId, { topN: body.topN, actionType: body.actionType, ids: body.ids, category: body.category, jurisdictions: body.jurisdictions, force: body.force });
+    // Answer blocks are drafted in place, not via the Article Writer — unchanged.
+    if (body.actionType === 'answer_block' && !(Array.isArray(body.ids) && body.ids.length)) {
+      return engine.autoDraft(body.siteId, { topN: body.topN, actionType: body.actionType, ids: body.ids, category: body.category, jurisdictions: body.jurisdictions, force: body.force });
+    }
+    // THE ONE FLOW: every item needs a brief researched for EVERY target jurisdiction. Those that
+    // have them push now (Competitors / Radar judgments research first, so they go straight
+    // through); the rest are queued — researched per jurisdiction, then pushed.
+    const ids = (Array.isArray(body.ids) && body.ids.length) ? body.ids.filter(Boolean) : await engine.topArticleIds(body.siteId, Math.min(Math.max(Number(body.topN) || 5, 1), 50));
+    if (!ids.length) return { drafted: 0, skipped: true, reason: 'no scored article opportunities to draft' };
+    const site = await db.getSite(body.siteId).catch(() => null);
+    const got = await engine.fetchByIds(body.siteId, ids);
+    if (got && got.notProvisioned) return engine.autoDraft(body.siteId, { ids, category: body.category, jurisdictions: body.jurisdictions, force: body.force });
+    const ready = [], later = [];
+    for (const it of (got.items || [])) (engine.marketsNeedingBrief(it, body.jurisdictions, site && site.semrush_db).length ? later : ready).push(it);
+    let now = { drafted: 0 };
+    if (ready.length) now = await engine.autoDraft(body.siteId, { ids: ready.map((x) => x.id), category: body.category, jurisdictions: body.jurisdictions, force: body.force });
+    if (!later.length) return now;
+    const q = await pushQueue.enqueue(body.siteId, later.map((it) => ({ oppId: it.id, title: it.title, source: 'content_engine', category: body.category || null, jurisdictions: Array.isArray(body.jurisdictions) && body.jurisdictions.length ? body.jurisdictions : null, force: !!body.force })));
+    return Object.assign({}, now, { queued: q.queued + q.merged, queuedIds: later.map((x) => x.id), note: QUEUED_NOTE });
   },
 
   // Close the loop opposite autodraft: read the n8n-watched Article Writer table
@@ -4676,6 +4814,17 @@ const routes = {
   // have). Fetched items flow into the SAME content_opportunities queue (source
   // 'feeds'), niche-scored + deduped, then one click drafts a brief into the
   // Article Writer with Status BLANK (human-in-the-loop — nothing auto-publishes).
+  // Research → push queue status for a site (what's being researched, sent, held back or failed).
+  'POST /push-queue': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    return pushQueue.status(body.siteId);
+  },
+  // Operator action on a queued push: 'force' (push anyway after reviewing held citations),
+  // 'retry' (a failed one) or 'remove'.
+  'POST /push-queue-action': async (body) => {
+    if (!body.siteId || !body.key) return { error: 'siteId + key required' };
+    return pushQueue.action(body.siteId, body.key, body.action);
+  },
   // Read-only: is each court-judgment source reachable FROM THE SERVER (datacenter IPs get
   // treated differently from a laptop), and which API keys the research pipeline has.
   // Returns only true/false for keys — never the key values.
@@ -4845,52 +4994,7 @@ const routes = {
       return { brief: stored, sources: payload.briefSources || [], briefFor: payload.briefFor || null, competitorRead: !!payload.briefCompetitorRead, caseLaw: !!payload.briefCaseLaw, judgmentRead: !!payload.briefJudgmentRead, judgmentUrl: payload.briefJudgmentUrl || null, judgment: payload.briefJudgment || null, verification: payload.briefVerification || stored.verification || null, existing: true };
     }
     if (body.existing) return { error: 'No brief stored yet.' };
-    const site = await db.getSite(body.siteId).catch(() => null);
-    if (!site) return { error: 'Site not found.' };
-    let market = marketFor(site.semrush_db);
-    if (body.jurisdiction) { const c = semrush.COUNTRIES.find((x) => x.label.toLowerCase() === String(body.jurisdiction).toLowerCase()); if (c) market = marketFor(c.db); }
-    // The competitor's own article (best-effort, external tiers) so the brief out-does it.
-    // Operator can override the auto-scanned sitemap link with the EXACT competitor URL to outrank.
-    // A Content Radar court-judgment item's link IS the judgment — read it as the primary source,
-    // never as a competitor article to out-do.
-    const isJudgment = payload.kind === 'judgment' || !!payload.judgmentUrl;
-    let competitor = null;
-    const compUrl = (body.competitorUrl && String(body.competitorUrl).trim()) || (isJudgment ? '' : payload.link);
-    if (compUrl) {
-      try { const pg = await chatbot.readPage(compUrl); if (pg && !pg.error && pg.text) competitor = { url: compUrl, title: pg.title || opp.title, text: String(pg.text).slice(0, 6000) }; } catch (e) {}
-    }
-    const excludeDomain = (site.url || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-    let internalLinkCandidates = [];
-    try {
-      const { baseUrl, username, appPassword } = await credsForSite(body.siteId);
-      const wp = new WordPressClient({ baseUrl, username, appPassword });
-      const [pg, ps] = await Promise.all([wp.list('pages', { perPage: 100, fields: 'title,link' }).catch(() => []), wp.list('posts', { perPage: 100, fields: 'title,link' }).catch(() => [])]);
-      internalLinkCandidates = [...pg, ...ps].map((r) => ({ title: (r.title?.rendered || '').replace(/&[a-z]+;/g, ' ').trim(), url: r.link })).filter((p) => p.title && p.url);
-    } catch (e) {}
-    const keyword = opp.primary_keyword || opp.title;
-    // Legal content: read the judgment + Background/Issues/Decision/Impact for case law, and
-    // VERIFY every cited case / statute / rule before it can be pushed (Karim's requirement).
-    const suggestedType = payload.category || payload.suggestedType || 'blog';
-    // Operator can paste the exact court judgment (URL or full text). Supplying one forces case-law
-    // structure + verification (Karim: "add the court judgment URL as part of the flow").
-    const judgmentUrl = (body.judgmentUrl && String(body.judgmentUrl).trim()) || (isJudgment ? String(payload.judgmentUrl || payload.link || '') : '');
-    const judgmentText = (body.judgmentText && String(body.judgmentText).trim()) || '';
-    const hasJudgment = !!(judgmentUrl || judgmentText);
-    const caseLaw = body.caseLaw != null ? !!body.caseLaw : (hasJudgment || isCaseLawTopic(opp.title, suggestedType));
-    const verify = body.verify != null ? !!body.verify : (isLegalSite(site) || caseLaw);
-    let r;
-    try {
-      r = await research.contentBrief({ keyword, title: opp.title, intent: opp.intent, siteName: site.name, niche: site.niche || (site.stack && site.stack.type), excludeDomain, internalLinkCandidates, siteId: body.siteId, db: market.db, now: Date.now(), competitor, caseLaw, verify, judgmentUrl, judgmentText });
-    } catch (e) { return { error: 'Brief research failed: ' + String((e && e.message) || e) }; }
-    if (!r || r.error) return { error: (r && r.error) || 'Brief research failed.' };
-    if (!r.brief || r.brief.error) return { error: 'Brief could not be structured — try again.' + (r.brief && r.brief._tail ? ' (output ended: …' + String(r.brief._tail).slice(-140).replace(/\s+/g, ' ') + ')' : '') };
-    const briefSources = (r.sources || []).slice(0, 10).map((x) => ({ title: x.title || '', url: x.url }));
-    const verification = r.verification || null;
-    await engine.updateOpp(opp.id, { payload: Object.assign({}, payload, {
-      brief: r.brief, briefSources, briefAt: new Date().toISOString(), briefFor: market.country, briefCompetitorRead: !!competitor, briefEngines: r.engines || null,
-      briefCaseLaw: caseLaw, briefJudgmentRead: !!r.judgmentRead, briefJudgmentUrl: r.judgmentUrl || null, briefJudgment: r.judgment || null, briefVerification: verification, briefVerified: verification ? verification.status === 'verified' : null,
-    }) }).catch(() => {});
-    return { brief: r.brief, sources: briefSources, briefFor: market.country, competitorRead: !!competitor, engines: r.engines, caseLaw, judgmentRead: !!r.judgmentRead, judgmentUrl: r.judgmentUrl || null, judgment: r.judgment || null, verification };
+    return researchOppBrief(body.siteId, body.id, { jurisdiction: body.jurisdiction, competitorUrl: body.competitorUrl, judgmentUrl: body.judgmentUrl, judgmentText: body.judgmentText, caseLaw: body.caseLaw, verify: body.verify, primary: true });
   },
   // Background wrapper — research + several Claude calls can run past the ~95s request
   // cap (the Content Plan brief 504'd at 102s on a slow keyword). Start → poll, keyed by id.
@@ -4978,6 +5082,18 @@ const routes = {
   'POST /radar-draft': async (body) => {
     if (!body.siteId || !body.item) return { error: 'siteId + item required' };
     const it = body.item;
+    // THE ONE FLOW: the story becomes a researched brief (the story itself is read as the news
+    // hook; this angle is the operator's brief) before its Article Writer row exists.
+    if (body.oppId) {
+      const got = await engine.fetchByIds(body.siteId, [body.oppId]).catch(() => ({ items: [] }));
+      const opp = (got.items || [])[0];
+      if (opp) {
+        const angle = `News hook: "${it.title}"${it.link ? ' (' + it.link + ')' : ''}. Write an ORIGINAL, in-depth article for our audience prompted by this development: explain what happened and, more importantly, what it means for our readers/clients and what they should do. Do NOT copy the source — use it only as the news hook and verify facts independently.${it.summary ? '\nStory summary: ' + String(it.summary).slice(0, 600) : ''}`;
+        await engine.updateOpp(opp.id, { payload: Object.assign({}, opp.payload || {}, { operatorNotes: angle, category: body.category || (opp.payload && opp.payload.category) || undefined }) }).catch(() => {});
+        const q = await pushQueue.enqueue(body.siteId, [{ oppId: opp.id, title: it.title, source: 'radar_news', category: body.category || null }]);
+        return { ok: true, queued: q.queued + q.merged, note: QUEUED_NOTE };
+      }
+    }
     const cluster = {
       suggestedTitle: it.title,
       primaryKeyword: it.primaryKeyword || it.title,
@@ -5482,6 +5598,10 @@ server.listen(PORT, '0.0.0.0', () => {
   // Start the analysis-only automation scheduler (auto-index, GSC health alerts,
   // content-gap keyword push). Never writes to live pages. Disable: AUTOMATION_ENABLED=false.
   try { startScheduler(); } catch (e) { console.error('[scheduler] failed to start', e && e.message); }
+  // Research → push queue: every Article Writer push gets a researched brief first. Resume any
+  // push interrupted by this restart.
+  db.listSites().then((sites) => pushQueue.init({ research: researchOppBrief, killSwitchOn, siteIds: (sites || []).map((s) => s.id) }))
+    .then(() => console.log('[push-queue] ready')).catch((e) => console.error('[push-queue] init failed', e && e.message));
   // Register durable background-job handlers + start the worker pool. Long tasks
   // can be enqueued via /jobs/run and survive crashes/redeploys.
   try {

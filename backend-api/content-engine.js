@@ -1199,7 +1199,22 @@ function marketsForLabels(labels, defaultMarket) {
   return out;
 }
 
-export async function autoDraft(siteId, { topN = 5, actionType, ids, category, jurisdictions, force } = {}) {
+// The researched brief for one opportunity IN ONE MARKET. Multi-jurisdiction pushes (go-legal.ai
+// is multilingual: an NDA → France/Germany/UK…) need a brief researched for THAT country's law,
+// kept in payload.briefsByMarket[country]; payload.brief is the first/interactive one (briefFor).
+export function briefForMarket(it, country) {
+  const p = (it && it.payload) || {};
+  const bm = p.briefsByMarket && p.briefsByMarket[country];
+  if (bm && bm.brief && typeof bm.brief === 'object' && !bm.brief.error) return bm.brief;
+  if (p.brief && typeof p.brief === 'object' && !p.brief.error && (!p.briefFor || p.briefFor === country)) return p.brief;
+  return null;
+}
+// Which of these markets still need a researched brief for this opportunity.
+export function marketsNeedingBrief(it, jurisdictions, siteDb) {
+  return marketsForLabels(jurisdictions, marketFor(siteDb)).filter((mk) => !briefForMarket(it, mk.country));
+}
+
+export async function autoDraft(siteId, { topN = 5, actionType, ids, category, jurisdictions, force, upsertBy, extraFields, startWriting } = {}) {
   if (!siteId) return { error: 'No site selected.' };
   const n = Math.min(Math.max(Number(topN) || 5, 1), 50);
   const idList = Array.isArray(ids) ? ids.filter(Boolean) : (ids ? [ids] : []);
@@ -1231,20 +1246,10 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids, category, j
     if (!items.length) return { drafted: 0, skipped: true, reason: 'no scored article opportunities to draft' };
   }
 
-  // 1b) VERIFICATION GATE. A legal/case-law brief carries a verification result; NEVER push
-  //     one whose cited cases/statutes/rules aren't verified (Karim: "only push once it's
-  //     verified"). `force` overrides after the operator has reviewed the flags.
-  let blocked = [];
-  if (!force) {
-    const ok = [];
-    for (const it of items) {
-      const v = it.payload && it.payload.brief && it.payload.brief.verification;
-      if (v && v.status && v.status !== 'verified') blocked.push({ id: it.id, title: it.title, verifyStatus: v.status, summary: v.summary });
-      else ok.push(it);
-    }
-    items = ok;
-    if (!items.length && blocked.length) return { drafted: 0, skipped: true, reason: 'verification-blocked', blocked, candidates: blocked.length };
-  }
+  // 1b) VERIFICATION GATE — applied PER (item, jurisdiction) below, on the brief researched for
+  //     THAT market: never push one whose cited cases/statutes/rules aren't verified (Karim:
+  //     "only push once it's verified"). `force` overrides after the operator has reviewed.
+  const blocked = [];
 
   // 2) Resolve the Article Writer table — the ONE n8n-watched table (cfg.table_gaps).
   let pat = null, cfg = null;
@@ -1281,27 +1286,35 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids, category, j
   const planned = [];   // { id, row, keyword, jurisdiction, key: 'keyword|jurisdiction' }
   for (const it of items) {
     const cluster = oppToCluster(it);
-    const brief = (it.payload && it.payload.brief && typeof it.payload.brief === 'object') ? it.payload.brief : {};
     const cat = airtable.normalizeCategory(category || (it.payload && (it.payload.category || it.payload.suggestedType)) || (cluster && cluster.category));
     for (const mk of markets) {
+      // The brief researched for THIS market (falls back to the single stored brief for legacy rows).
+      const brief = briefForMarket(it, mk.country) || ((it.payload && it.payload.brief && typeof it.payload.brief === 'object') ? it.payload.brief : {});
+      const v = brief && brief.verification;
+      if (!force && v && v.status && v.status !== 'verified') { blocked.push({ id: it.id, title: it.title, jurisdiction: mk.country, verifyStatus: v.status, summary: v.summary }); continue; }
       const row = airtable.mapArticleBrief(cluster, brief, briefField, names, cat, mk);
       if (!row || !row.Keyword) continue;
+      if (extraFields) for (const [k, val] of Object.entries(extraFields)) if (names.has(k) && val != null && String(val).trim()) row[k] = val;
       const keyword = String(row.Keyword).trim().toLowerCase();
-      planned.push({ id: it.id, row, keyword, jurisdiction: mk.country, key: keyword + '|' + String(mk.country || '').toLowerCase() });
+      planned.push({ id: it.id, row, keyword, jurisdiction: mk.country, key: keyword + '|' + String(mk.country || '').toLowerCase(), titleKey: String(row.Title || '').trim().toLowerCase() });
     }
   }
+  if (!planned.length && blocked.length) return { drafted: 0, skipped: true, reason: 'verification-blocked', blocked, candidates: items.length };
   if (!planned.length) return { drafted: 0, skipped: true, reason: 'nothing mappable to draft', candidates: items.length };
 
   // De-dupe by (Keyword, Jurisdiction) against rows already in the table, so the same
   // keyword CAN exist once per country but never twice for the same one. An older row with
-  // no Jurisdiction cell counts as the site's default market.
+  // no Jurisdiction cell counts as the site's default market. `upsertBy: 'Title'` (the AI
+  // chat's re-push) UPDATES the row with the same Title instead of skipping it.
   const existing = new Set();
+  const byTitle = new Map();
   try {
     let offset;
     do {
-      const page = await airtable.listRecords(pat, baseId, tbl.id, { pageSize: 100, offset, fields: ['Keyword', 'Jurisdiction'] });
+      const page = await airtable.listRecords(pat, baseId, tbl.id, { pageSize: 100, offset, fields: ['Keyword', 'Jurisdiction', 'Title'] });
       for (const rec of (page.records || [])) {
         const f = rec.fields || {};
+        const t = String(f.Title || '').trim().toLowerCase(); if (t && !byTitle.has(t)) byTitle.set(t, rec.id);
         const kw = String(f.Keyword || '').trim().toLowerCase(); if (!kw) continue;
         existing.add(kw + '|' + String(f.Jurisdiction || market.country || '').trim().toLowerCase());
       }
@@ -1309,10 +1322,11 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids, category, j
     } while (offset);
   } catch (e) { /* read failed → treat as none existing */ }
 
-  const toCreate = [], seen = new Set(), createdIds = new Set(), dupIds = new Set();
+  const toCreate = [], toUpdate = [], seen = new Set(), createdIds = new Set(), dupIds = new Set();
   const perJurisdiction = {};
   let skippedDup = 0;
   for (const p of planned) {
+    if (upsertBy === 'Title' && p.titleKey && byTitle.has(p.titleKey)) { toUpdate.push({ recId: byTitle.get(p.titleKey), row: p.row }); createdIds.add(p.id); perJurisdiction[p.jurisdiction] = (perJurisdiction[p.jurisdiction] || 0) + 1; continue; }
     if (existing.has(p.key) || seen.has(p.key)) { skippedDup++; dupIds.add(p.id); continue; }
     seen.add(p.key);
     toCreate.push(p.row); createdIds.add(p.id);
@@ -1321,17 +1335,82 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids, category, j
   // An item whose every jurisdiction is already in the writer → flip it to 'queued' so it
   // stops squatting in the scored top-N window (the auto-pilot wedge).
   for (const id of dupIds) if (!createdIds.has(id)) await setStatus(id, 'queued').catch(() => null);
-  if (!toCreate.length) return { drafted: 0, skipped: true, reason: 'all candidates already in Article Writer table (now marked queued)', candidates: items.length, skippedDup };
+  if (!toCreate.length && !toUpdate.length) return { drafted: 0, skipped: true, reason: 'all candidates already in Article Writer table (now marked queued)', candidates: items.length, skippedDup, blocked: blocked.length ? blocked : undefined };
 
-  // 4) Push to the n8n-watched table, then flip the drafted opportunities → 'queued'.
-  let pushed = 0;
-  try { pushed = await airtable.createRecords(pat, baseId, tbl.id, toCreate); }
-  catch (e) { return { error: `Article Writer push → ${String(e.message || e)}`, drafted: 0, candidates: items.length }; }
+  // 4) Push to the n8n-watched table, then flip the drafted opportunities → 'queued'. Row by row
+  //    when we need the record ids (upsert / start writing — AI chat pushes are single rows).
+  let pushed = 0, updated = 0;
+  const recIds = [];
+  try {
+    if (upsertBy || startWriting) {
+      for (const row of toCreate) { const r = await airtable.createRecord(pat, baseId, tbl.id, row); pushed++; if (r && r.id) recIds.push(r.id); }
+    } else if (toCreate.length) pushed = await airtable.createRecords(pat, baseId, tbl.id, toCreate);
+    for (const u of toUpdate) { await airtable.updateRecord(pat, baseId, tbl.id, u.recId, u.row); updated++; recIds.push(u.recId); }
+  } catch (e) { return { error: `Article Writer push → ${String(e.message || e)}`, drafted: pushed, updated, candidates: items.length }; }
+  // Start the writer now (AI chat "write it now") — a SEPARATE Status change so the n8n
+  // automation reliably fires. The caller has already checked the site is write-armed.
+  let triggered = 0;
+  if (startWriting && names.has('Status')) for (const id of recIds) { try { await airtable.updateRecord(pat, baseId, tbl.id, id, { Status: 'Write Article' }); triggered++; } catch (e) {} }
 
   let queued = 0;
   for (const id of createdIds) { const r = await setStatus(id, 'queued').catch(() => null); if (r && r.updated) queued++; }
 
-  return { drafted: pushed, queued, skippedDup, candidates: items.length, table: tbl.name, jurisdictions: markets.map((m) => m.country), perJurisdiction, blocked: blocked.length ? blocked : undefined };
+  return { drafted: pushed, updated, triggered, queued, skippedDup, candidates: items.length, table: tbl.name, jurisdictions: markets.map((m) => m.country), perJurisdiction, blocked: blocked.length ? blocked : undefined };
+}
+
+// Top-N scored ARTICLE opportunities (what the weekly auto-pilot drafts) — ids only.
+export async function topArticleIds(siteId, n = 5) {
+  const wl = await worklist(siteId, { status: 'scored', limit: n * 4 });
+  return ((wl && wl.items) || []).filter((it) => it.action_type !== 'answer_block' && it.action_type !== 'geo').slice(0, n).map((it) => it.id);
+}
+
+// Turn ANY push (keywords, Keyword Gap rows, Content Plan clusters, People Also Ask, AI-visibility
+// queries, an AI-chat brief) into content_opportunities so it can run through the ONE research →
+// push flow. Re-pushing the same keyword reuses its row and KEEPS any researched briefs.
+// items: [{ title, keyword, intent, category, source, link, operatorNotes, brief, briefFor, payload }]
+// → { ids: [...same order...] } | { notProvisioned } | { error }
+export async function ensurePushOpps(siteId, items) {
+  if (!SB || !SRV) return { ...NOT_PROVISIONED, error: 'Supabase not configured.' };
+  const list = (items || []).filter((x) => x && (x.keyword || x.title));
+  if (!list.length) return { ids: [] };
+  const keyOf = (x) => 'push:' + String(x.source || 'push').slice(0, 20) + ':' + feedHash(String(x.keyword || x.title).trim().toLowerCase());
+  const keys = list.map(keyOf);
+  // Existing rows (payload + status) so a re-push never wipes a researched brief.
+  const existing = new Map();
+  try {
+    const inList = [...new Set(keys)].map((k) => `"${k.replace(/"/g, '')}"`).join(',');
+    const res = await fetch(`${SB}/rest/v1/content_opportunities?site_id=eq.${encodeURIComponent(siteId)}&dedupe_key=in.(${encodeURIComponent(inList)})&select=id,dedupe_key,payload,status`, { headers: headers() });
+    const text = await res.text();
+    if (!res.ok) { if (isMissingTable(res.status, text)) return NOT_PROVISIONED; return { error: `content_opportunities read → ${res.status}` }; }
+    for (const r of (JSON.parse(text || '[]') || [])) existing.set(r.dedupe_key, r);
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+  const opps = list.map((x, i) => {
+    const prev = existing.get(keys[i]);
+    const payload = Object.assign({}, (prev && prev.payload) || {}, x.payload || {}, {
+      category: x.category || (prev && prev.payload && prev.payload.category) || undefined,
+      link: x.link || (prev && prev.payload && prev.payload.link) || undefined,
+      pushSource: x.source || 'push',
+    });
+    if (x.operatorNotes) payload.operatorNotes = String(x.operatorNotes).slice(0, 12000);
+    if (x.brief && typeof x.brief === 'object' && !x.brief.error) {
+      const country = x.briefFor || null;
+      payload.brief = x.brief; if (country) payload.briefFor = country;
+      if (country) payload.briefsByMarket = Object.assign({}, payload.briefsByMarket || {}, { [country]: { brief: x.brief, at: new Date().toISOString(), via: 'supplied' } });
+    }
+    const o = makeOpp(siteId, { source: 'push', sourceRef: x.source || 'push', title: x.title || x.keyword, primaryKeyword: x.keyword || x.title, intent: x.intent || 'informational', actionType: 'article', score: 0.5, evidence: [{ source: x.source || 'push', detail: 'pushed to the Article Writer' }], payload });
+    o.dedupeKey = keys[i];
+    return o;
+  });
+  const res = await persist(siteId, opps);
+  if (res && (res.notProvisioned || res.error)) return res;
+  // Resolve the ids (same order as the input).
+  try {
+    const inList = [...new Set(keys)].map((k) => `"${k.replace(/"/g, '')}"`).join(',');
+    const r2 = await fetch(`${SB}/rest/v1/content_opportunities?site_id=eq.${encodeURIComponent(siteId)}&dedupe_key=in.(${encodeURIComponent(inList)})&select=id,dedupe_key`, { headers: headers() });
+    const rows = await r2.json();
+    const idByKey = new Map((rows || []).map((r) => [r.dedupe_key, r.id]));
+    return { ids: keys.map((k) => idByKey.get(k) || null) };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
 }
 
 // ---- 12) syncPublished -----------------------------------------------------

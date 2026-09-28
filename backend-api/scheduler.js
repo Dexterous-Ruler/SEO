@@ -21,6 +21,7 @@ import * as imageOpt from './image-optimize.js';
 import { generateCssFixes } from './css-fixes.js';
 import * as semrush from './dataforseo.js';
 import * as engine from './content-engine.js';
+import * as pushQueue from './push-queue.js';
 import * as uxcrawl from './ux-crawl.js';
 import { WordPressClient } from '../src/wp/client.js';
 
@@ -178,8 +179,13 @@ async function jobEngineRefresh(site) {
 async function jobAutoDraft(site) {
   if (!site.auto_content_pilot) return;   // strictly opt-in per site
   try {
-    const r = await engine.autoDraft(site.id, { topN: 5 });
-    if (r && r.drafted) await note(site.id, `Auto-pilot: drafted ${r.drafted} top opportunity(ies) → Article Writer` + (r.skippedDup ? ` (${r.skippedDup} already there)` : ''));
+    // THE ONE FLOW: the top 5 get a researched brief (judgment + citation check) before they
+    // reach the Article Writer — queued, researched in the background, then pushed.
+    const ids = await engine.topArticleIds(site.id, 5);
+    if (!ids.length) return;
+    const got = await engine.fetchByIds(site.id, ids);
+    const q = await pushQueue.enqueue(site.id, ((got && got.items) || []).map((it) => ({ oppId: it.id, title: it.title, source: 'auto_pilot' })));
+    if (q && q.queued) await note(site.id, `Auto-pilot: researching briefs for ${q.queued} top opportunity(ies) — each goes to the Article Writer when ready`);
   } catch (e) { /* next week retries */ }
 }
 

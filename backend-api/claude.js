@@ -616,7 +616,7 @@ export function judgmentExcerpt(text, budget = 7000) {
 // Perplexity grounded answer). Claude structures + writes the brief but must use
 // ONLY the supplied research — every fact ties to a provided source, nothing
 // invented. UK audience, UK English. Returns structured JSON.
-export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText, judgmentBudget = 7000 }) {
+export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText, judgmentBudget = 7000, operatorNotes = '' }) {
   const sources = (research.sources || []).map((s, i) => `[${i + 1}] ${s.title || ''} — ${s.url}`).join('\n');
   // Case law: the judgment is the primary source, so keep the general material short and give
   // the judgment room — a large judgment + 9k material + 5k output blew the 84s Claude timeout.
@@ -634,7 +634,12 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
   const compBlock = (competitor && competitor.text)
     ? `\n\n=== COMPETITOR ARTICLE TO OUT-DO (${competitor.url || ''}) ===\nTitle: ${competitor.title || ''}\n${String(competitor.text).slice(0, 6000)}\n\nThis brief MUST out-do that competitor article: cover everything it covers, then add what it misses (depth, worked examples, current ${country} rules and figures, common mistakes, FAQs). Never copy its wording. Keep the JSON compact enough to finish: outline 5-8 sections × 2-4 points, keyFacts 5-8, faqs 3-5, internalLinks ≤5.`
     : '';
-  const userMsg = `${scope}TARGET MARKET: ${country}\nKEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}${judgeBlock}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}${compBlock}\n\nWrite the ${country} ${caseLaw ? 'CASE-LAW brief (Background / Issues / Decision / Impact) — every case and statute in "citations" must be real and sourced from the research; anything you cannot source goes in "unverifiedClaims", never stated as fact' : 'content brief'} as JSON.`;
+  // The operator's own brief (from the AI chat, an AI-visibility gap or a news hook) is the plan:
+  // keep its angle, structure and specifics; the research only grounds and verifies it.
+  const opBlock = String(operatorNotes || '').trim()
+    ? `\n\n=== OPERATOR'S BRIEF (AUTHORITATIVE — follow its angle, structure, sections and specifics; use the research and judgment above only to ground and verify it; never contradict or dilute it) ===\n${String(operatorNotes).slice(0, 8000)}`
+    : '';
+  const userMsg = `${scope}TARGET MARKET: ${country}\nKEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}${judgeBlock}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}${compBlock}${opBlock}\n\nWrite the ${country} ${caseLaw ? 'CASE-LAW brief (Background / Issues / Decision / Impact) — every case and statute in "citations" must be real and sourced from the research; anything you cannot source goes in "unverifiedClaims", never stated as fact' : 'content brief'} as JSON.`;
   // Strip ```json fences, slice the outer object, parse. null on failure (truncated JSON).
   const parse = (t) => {
     let s = String(t || '').trim();

@@ -1512,7 +1512,7 @@ function RadarScreen({ ctx }){
   };
   const draft = (it)=>{
     setBusyId(it.id);
-    API.radarDraft(s.id, { title:it.title, link:it.link, summary:it.summary, primaryKeyword:it.primaryKeyword }, it.id, draftType).then(r=>{ if(r&&r.error){ ctx.toast("Couldn't add: "+r.error,"clay"); return; } setItems(x=>x.filter(y=>y.id!==it.id)); ctx.toast("Added to the Article Writer as a "+((TYPES.find(t=>t[0]===draftType)||[])[1]||"draft")+" — open it there when you're ready to write it","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
+    API.radarDraft(s.id, { title:it.title, link:it.link, summary:it.summary, primaryKeyword:it.primaryKeyword }, it.id, draftType).then(r=>{ if(r&&r.error){ ctx.toast("Couldn't add: "+r.error,"clay"); return; } setItems(x=>x.filter(y=>y.id!==it.id)); if(queuedIn(r)>0){ ctx.toast(queuedMsg(queuedIn(r)),"teal"); return; } ctx.toast("Added to the Article Writer as a "+((TYPES.find(t=>t[0]===draftType)||[])[1]||"draft")+" — open it there when you're ready to write it","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
   };
   const dismiss = (it)=>{ setBusyId(it.id); API.engineDismiss(it.id).then(()=>setItems(x=>x.filter(y=>y.id!==it.id))).catch(()=>{}).finally(()=>setBusyId("")); };
   const addEmploymentTribunal = ()=>{
@@ -1554,6 +1554,7 @@ function RadarScreen({ ctx }){
       if(!it.hasBrief && !(briefs[it.id])){ const b = await researchJudgment(it); if(!b){ return; } vs = (b.verification&&b.verification.status)||null; }
       if(!force && vs && vs!=="verified"){ setBlocked(m=>Object.assign({},m,{[it.id]:true})); if(!briefs[it.id]) viewJudgmentBrief(it); ctx.toast("Held back: some citations couldn't be confirmed automatically. Check the brief, then “Push anyway”.","gold"); return; }
       const r = await API.engineAutodraft(s.id, { ids:[it.id], category:JTYPE, force:!!force });
+      if(queuedIn(r)>0){ setItems(xs=>xs.filter(x=>x.id!==it.id)); ctx.toast(queuedMsg(queuedIn(r)),"teal"); return; }
       if(r&&r.reason==="verification-blocked"){ setBlocked(m=>Object.assign({},m,{[it.id]:true})); ctx.toast("Held back: citations not confirmed. Check the brief, then “Push anyway”.","gold"); return; }
       if(r&&(r.error||r.skipped)){ ctx.toast("Couldn't push: "+(r.error||r.reason),"clay"); return; }
       setItems(xs=>xs.filter(x=>x.id!==it.id));
@@ -2091,6 +2092,18 @@ function N8nScreen({ ctx }){
    Karim's spec (plain English): save competitor websites/sitemaps so I can come back to
    them; scan what they publish; see each topic with where it came from; pick the content
    type; push it → it's marked done; everything stays here so I can track done vs not. */
+/* THE ONE FLOW: every Article Writer push now researches a brief first (reads any court judgment,
+   checks citations, per jurisdiction) in a background queue, then pushes. Pull the "queued" count
+   out of any push response shape (engine-autodraft / airtable-sync / push-keywords / radar-draft). */
+function queuedIn(r){
+  if(!r || typeof r!=="object") return 0;
+  let n = typeof r.queued==="number" ? r.queued + (r.merged||0) : 0;
+  const s = r.synced || (r.airtable && r.airtable.synced);
+  if(s && typeof s==="object") for(const k of Object.keys(s)){ const v=s[k]; if(v && typeof v==="object" && typeof v.queued==="number") n += v.queued + (v.merged||0); }
+  return n;
+}
+function queuedMsg(n){ return "Researching "+n+" brief"+(n===1?"":"s")+" (reads any court judgment, checks citations) — "+(n===1?"it lands":"each lands")+" in the Article Writer when ready, usually 1–2 min apiece. Track them on the Airtable screen."; }
+
 /* Case-law shortcuts — Karim checks cases and feeds the right ones in by hand (AI chat / a
    topic's judgment box). The National Archives (Find Case Law) is the free, official source the
    system itself reads judgments from; Westlaw UK is the firm's own subscription (the system never
@@ -2296,6 +2309,8 @@ function CompetitorsScreen({ ctx }) {
       }
       const r = await API.engineAutodraft(s.id, Object.assign({ ids:[it.id], category:type, force: !!force }, jxs.length?{ jurisdictions: jxs }:{}));
       if(r && r.notProvisioned){ setNotProv(true); return; }
+      // Multi-jurisdiction pushes research a brief PER COUNTRY in the background (go-legal.ai is multilingual).
+      if(queuedIn(r)>0){ ctx.toast((r.drafted>0?("Sent "+r.drafted+" now. "):"")+queuedMsg(queuedIn(r)),"teal"); setBlockedIds(m=>{ const x=Object.assign({},m); delete x[it.id]; return x; }); loadItems(); return; }
       if(r && r.reason==="verification-blocked"){ setBlockedIds(m=>Object.assign({},m,{[it.id]:true})); viewBrief(it); ctx.toast("⚠ Not pushed — "+((r.blocked&&r.blocked[0]&&r.blocked[0].summary)||"citations not verified")+" Review, then “Push anyway”.","gold"); return; }
       if(r && r.skipped){ ctx.toast(r.reason||"Couldn't push — connect the Airtable Article Writer first","gold"); loadItems(); return; }
       if(r && r.error){ ctx.toast("Push: "+r.error,"clay"); return; }
@@ -2686,6 +2701,7 @@ function ContentEngineScreen({ ctx }) {
     setDrafting(true);
     API.engineAutodraft(s.id, { topN:5, actionType:"article" }).then(r=>{
       if(r && r.notProvisioned){ setNotProv(true); return; }
+      if(queuedIn(r)>0){ ctx.toast((r.drafted>0?("Sent "+r.drafted+" now. "):"")+queuedMsg(queuedIn(r)),"teal"); return; }
       if(r && r.skipped){ ctx.toast(r.reason||"Nothing to auto-draft — connect Airtable Article Writer first","gold"); return; }
       if(r && r.error){ ctx.toast("Auto-draft: "+r.error,"clay"); return; }
       const n=(r&&r.drafted!=null)?r.drafted:0;
@@ -2736,6 +2752,7 @@ function ContentEngineScreen({ ctx }) {
     setBusyId(item.id);
     API.engineAutodraft(s.id, { ids:[item.id] }).then(r=>{
       if(r && r.notProvisioned){ setNotProv(true); return; }
+      if(queuedIn(r)>0){ ctx.toast(queuedMsg(queuedIn(r)),"teal"); return; }
       if(r && r.skipped){ ctx.toast(r.reason||"Couldn't push — connect the Airtable Article Writer first","gold"); return; }
       if(r && r.error){ ctx.toast("Push: "+r.error,"clay"); return; }
       const n=(r&&r.drafted!=null)?r.drafted:0;
@@ -2968,6 +2985,7 @@ function OpportunitiesScreen({ ctx }) {
     if(!kws.length){ ctx.toast("No trending topics to push — scan trends first","gold"); return; }
     setPushing("trend"); ctx.toast("Pushing "+kws.length+" trending topic(s) to Airtable…","teal");
     API.airtablePushKeywords(s.id, kws, draftType).then(r=>{ if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
+      if(queuedIn(r)>0){ ctx.toast(queuedMsg(queuedIn(r)),"teal"); return; }
       ctx.toast(r.pushed>0?("Pushed "+r.pushed+" trending topic(s) → Airtable ✓"+(r.skipped?" ("+r.skipped+" already there)":"")):"All trending topics already in Airtable", r.pushed>0?"teal":"gold");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(""));
   };
@@ -2983,6 +3001,7 @@ function OpportunitiesScreen({ ctx }) {
       const res=(r.synced&&r.synced.article_brief)||{};
       if(r.error||res.error){ ctx.toast("Push: "+(r.error||res.error),"clay"); setIdea(i,{ pushing:false }); return; }
       setIdea(i,{ pushing:false, pushed:true, edit:null });
+      if(queuedIn(r)>0){ ctx.toast(queuedMsg(queuedIn(r)),"teal"); return; }
       ctx.toast("Pushed “"+title.slice(0,38)+"” → Article Writer ✓ — set Status to “Write Article” to generate","teal");
     }).catch(e=>{ ctx.toast(e.message,"clay"); setIdea(i,{ pushing:false }); });
   };
@@ -3004,6 +3023,7 @@ function OpportunitiesScreen({ ctx }) {
     if(!kws.length){ ctx.toast("No questions to push — find questions first","gold"); return; }
     setPushing("paa"); ctx.toast("Pushing "+kws.length+" question(s) to Airtable…","teal");
     API.airtablePushKeywords(s.id, kws, draftType).then(r=>{ if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
+      if(queuedIn(r)>0){ ctx.toast(queuedMsg(queuedIn(r)),"teal"); return; }
       ctx.toast(r.pushed>0?("Pushed "+r.pushed+" question(s) → Airtable ✓"+(r.skipped?" ("+r.skipped+" already there)":"")):"All questions already in Airtable", r.pushed>0?"teal":"gold");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(""));
   };
@@ -3022,6 +3042,7 @@ function OpportunitiesScreen({ ctx }) {
     const clusters = chosen.map(q=>({ suggestedTitle:q.question, primaryKeyword:q.seed||fallbackSeed, keyword:q.seed||fallbackSeed, label:q.question, intent:q.pattern, format:q.snippetFormat, answer:q.answer }));
     API.airtableSync(s.id,{ kinds:["opportunities"], clusters, category:draftType }).then(r=>{
       if(r&&r.error){ ctx.toast("Push to writer: "+r.error,"clay"); return; }
+      if(queuedIn(r)>0){ ctx.toast(queuedMsg(queuedIn(r)),"teal"); return; }
       const o=(r&&r.synced&&r.synced.opportunities)||{};
       const n=(o.pushed||0)+(o.updated||0);
       ctx.toast(n>0?("Pushed "+n+" question(s) → Article Writer ✓ — set Status to “Write Article” to generate"+(o.skipped?(" ("+o.skipped+" already there)"):"")):"All selected questions are already in the writer", n>0?"teal":"gold");
@@ -3057,6 +3078,7 @@ function OpportunitiesScreen({ ctx }) {
       if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
       const res=(r.synced&&r.synced.opportunities)||{};
       if(res.error){ ctx.toast("Airtable: "+res.error,"clay"); return; }
+      if(queuedIn(r)>0){ ctx.toast(queuedMsg(queuedIn(r)),"teal"); return; }
       const n=res.pushed||0, u=res.updated||0;
       const parts=[]; if(n)parts.push(n+" added"); if(u)parts.push(u+" updated");
       ctx.toast((parts.join(", ")||"0 rows")+" → "+(res.table||"Article Writer")+" — set Status to “Write Article” to generate","teal");
@@ -3073,6 +3095,7 @@ function OpportunitiesScreen({ ctx }) {
       if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
       const res = r.synced && r.synced.article_brief;
       if(res && res.error){ ctx.toast("Article Writer: "+res.error,"clay"); return; }
+      if(queuedIn(r)>0){ ctx.toast(queuedMsg(queuedIn(r)),"teal"); return; }
       ctx.toast("Brief → Article Writer ✓ — set Status to “Write Article” in Airtable to generate","teal");
     }).catch(e=>ctx.toast("Airtable: "+e.message,"clay")).finally(()=>setPushing(""));
   };
@@ -3972,6 +3995,7 @@ function ContentScreen({ ctx }) {
     if(!kws.length){ ctx.toast("No keywords to push — analyze content first","gold"); return; }
     setPushing(true); ctx.toast("Pushing "+kws.length+" keyword(s) to Airtable…","teal");
     API.airtablePushKeywords(s.id, kws, draftType).then(r=>{ if(r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
+      if(queuedIn(r)>0){ ctx.toast(queuedMsg(queuedIn(r)),"teal"); return; }
       ctx.toast(r.pushed>0?("Pushed "+r.pushed+" new keyword(s) to Airtable ✓"+(r.skipped?" ("+r.skipped+" already there)":"")):"All keywords already in Airtable", r.pushed>0?"teal":"gold");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushing(false));
   };
@@ -4221,6 +4245,7 @@ function GeoScreen({ ctx }) {
     setPushingOpps(true); ctx.toast("Pushing opportunities to Airtable…","teal");
     API.airtableSync(s.id,{kinds:["geo_opportunities"],geoOpportunities:opportunities}).then(r=>{
       if(r.error){ ctx.toast(r.needsConnect?"Connect Airtable first (Integrations screen)":r.needsConfig?"Pick an Airtable base first (Integrations screen)":r.error,"clay"); return; }
+      if(queuedIn(r)>0){ ctx.toast(queuedMsg(queuedIn(r)),"teal"); return; }
       const g=(r.synced&&r.synced.geo_opportunities)||{}; const pushed=g.pushed||0; const skipped=(r.synced&&r.synced.geoOppsSkipped)||0;
       ctx.toast(pushed?("Pushed "+pushed+" opportunit"+(pushed===1?"y":"ies")+(skipped?" · "+skipped+" already there":"")):"All opportunities already in Airtable ✓","teal");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushingOpps(false));
@@ -4888,6 +4913,7 @@ function GscScreen({ ctx }) {
     setPushingQw(kw);
     API.airtablePushKeywords(ctx.site.id, [kw]).then(r=>{
       if(r&&r.error){ ctx.toast("Airtable: "+r.error,"clay"); return; }
+      if(queuedIn(r)>0){ ctx.toast(queuedMsg(queuedIn(r)),"teal"); return; }
       const pushed=(r&&r.pushed!=null)?r.pushed:0;
       ctx.toast(pushed>0?("Pushed “"+kw.slice(0,38)+"” → Article Writer ✓ — set Status to “Write Article” to generate"):"Already in the Article Writer", pushed>0?"teal":"gold");
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setPushingQw(""));
@@ -5803,6 +5829,7 @@ function SemrushScreen({ ctx }) {
     ctx.toast("Pushing "+list.length+" keyword(s) to the Article Writer…","teal");
     API.airtableSync(s.id,{ kinds:["gaps"], gaps:list, category:draftType }).then(r=>{
       if(r.error){ ctx.toast(r.error==="Airtable not connected"?"Connect Airtable first (Airtable Sync tab)":r.error, "clay"); return; }
+      if(queuedIn(r)>0){ ctx.toast(queuedMsg(queuedIn(r)),"teal"); return; }
       const g=(r.synced&&r.synced.gaps)||{};
       const n=g.pushed||0;
       ctx.toast(n>0?("Pushed "+n+" → Article Writer ✓ — set Status to “Write Article” to generate"+(g.skipped?(" ("+g.skipped+" already there)"):"")):(g.skipped?"All selected already in the Article Writer":"Nothing pushed"), n>0?"teal":"gold");
@@ -6374,6 +6401,54 @@ function AirtableGrid({ ctx, siteId }) {
 /* ---------------- Airtable Sync screen ---------------- */
 /* Controls the whole Airtable flow: connect (PAT) → pick base → map tables →
    sync DataForSEO keyword gaps + content suggestions + GEO results. Reuses UI atoms. */
+/* Push queue: every Article Writer push is researched (brief, court judgment, citation check —
+   per jurisdiction) in the background, then sent. Shows what's in progress, sent, held back
+   (citations not confirmed → "Push anyway" after a look) or failed ("Retry"). */
+function PushQueuePanel({ ctx, siteId }){
+  const API = window.SentinelAPI;
+  const [q,setQ] = useState({ entries:[], counts:{} });
+  const [busy,setBusy] = useState("");
+  const load = ()=>{ if(!siteId || !API || !API.pushQueue) return; API.pushQueue(siteId).then(r=>{ if(r && Array.isArray(r.entries)) setQ(r); }).catch(()=>{}); };
+  useEffect(()=>{ setQ({ entries:[], counts:{} }); load(); },[siteId]);
+  const inProgress = (q.entries||[]).some(e=>e.status==="pending"||e.status==="researching");
+  useEffect(()=>{ if(!inProgress) return; const t=setInterval(load, 8000); return ()=>clearInterval(t); },[inProgress, siteId]);
+  const act = (e, action)=>{ setBusy(e.key); API.pushQueueAction(siteId, e.key, action).then(r=>{ if(r&&r.error) ctx.toast(r.error,"clay"); else if(action==="force") ctx.toast("Sending “"+String(e.title||"").slice(0,40)+"” to the Article Writer","teal"); load(); }).catch(err=>ctx.toast(err.message,"clay")).finally(()=>setBusy("")); };
+  const SRC = { keyword_push:"Keywords", keyword_gap:"Keyword Gap", content_plan:"Content Plan", people_also_ask:"People Also Ask", ai_visibility:"AI Visibility", radar_news:"Content Radar", ai_chat:"AI chat", ai_chat_keywords:"AI chat", content_engine:"Content Engine / Competitors", auto_pilot:"Auto-pilot" };
+  const label = (e)=>{
+    if(e.status==="pending") return { t:"Waiting to be researched", c:"var(--muted)" };
+    if(e.status==="researching") return { t:(e.stage?(e.stage.charAt(0).toUpperCase()+e.stage.slice(1)):"Researching")+"…", c:"var(--t-700)" };
+    if(e.status==="pushed") return { t:"In the Article Writer ✓"+(e.result&&e.result.triggered?" · writing started":""), c:"var(--t-700)" };
+    if(e.status==="held") return { t:"Held back — "+(e.reason||"citations not confirmed"), c:"var(--gold)" };
+    if(e.status==="duplicate") return { t:"Already in the Article Writer", c:"var(--muted)" };
+    return { t:"Failed — "+(e.error||"unknown"), c:"var(--clay)" };
+  };
+  const entries = (q.entries||[]).slice(0, 25);
+  if(!entries.length) return null;
+  const c = q.counts||{};
+  return (
+    <SoftCard hover={false} style={{ marginBottom:16 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10, flexWrap:"wrap", gap:8 }}>
+        <div style={{ fontWeight:700, fontSize:15 }}>Push queue <span style={{ color:"var(--muted)", fontWeight:500, fontSize:12.5 }}>· every push gets a researched, checked brief before it reaches Airtable</span></div>
+        <div style={{ fontSize:12.5, color:"var(--muted)" }}>{(c.pending||0)+(c.researching||0)} in progress · {c.pushed||0} sent{c.held?(" · "+c.held+" held back"):""}{c.failed?(" · "+c.failed+" failed"):""}</div>
+      </div>
+      <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+        {entries.map(e=>{ const l=label(e); const why=(e.status==="held"&&Array.isArray(e.blocked)&&e.blocked[0]&&e.blocked[0].summary)?e.blocked[0].summary:""; return (
+          <div key={e.key} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 10px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5 }}>
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ fontWeight:700, color:"var(--ink)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{e.title||"Untitled"}</div>
+              <div style={{ color:"var(--muted)", fontSize:11.5 }}>{SRC[e.source]||e.source}{Array.isArray(e.jurisdictions)&&e.jurisdictions.length?(" · "+e.jurisdictions.join(", ")):""}{why?(" · "+why):""}</div>
+            </div>
+            <div style={{ color:l.c, fontWeight:600, textAlign:"right", maxWidth:"45%" }}>{l.t}</div>
+            {e.status==="held" && <NeoButton kind="primary" size="sm" disabled={busy===e.key} onClick={()=>act(e,"force")} title="You've checked the citations — send it anyway">Push anyway</NeoButton>}
+            {e.status==="failed" && <NeoButton kind="soft" size="sm" disabled={busy===e.key} onClick={()=>act(e,"retry")}>Retry</NeoButton>}
+            {(e.status==="failed"||e.status==="held"||e.status==="duplicate") && <button onClick={()=>act(e,"remove")} disabled={busy===e.key} title="Remove from this list" style={{ border:"none", background:"none", cursor:"pointer", color:"var(--muted)", padding:0, display:"flex" }}><Icon name="x" size={13} /></button>}
+          </div>
+        ); })}
+      </div>
+    </SoftCard>
+  );
+}
+
 function AirtableScreen({ ctx }) {
   const s = ctx.site;
   const API = window.SentinelAPI;
@@ -6446,6 +6521,7 @@ function AirtableScreen({ ctx }) {
     setBusy("push"); setAirErr(null); ctx.toast("Finding content-gap keywords…","teal");
     API.airtablePushKeywords(s.id).then(r=>{
       if(r.error){ setAirErr({ msg:r.error }); return; }
+      if(queuedIn(r)>0){ ctx.toast(queuedMsg(queuedIn(r)),"teal"); refresh(); return; }
       const msg = r.pushed>0 ? ("Pushed "+r.pushed+" keyword(s) to Airtable ✓"+(r.skipped?" ("+r.skipped+" already there)":"")) : (r.skipped? ("All "+r.skipped+" keyword(s) already in Airtable — nothing new"):"No new keywords to push");
       ctx.toast(msg, r.pushed>0?"teal":"gold");
       refresh();
@@ -6467,6 +6543,7 @@ function AirtableScreen({ ctx }) {
       </PageHead>
 
       {!live && <SoftCard hover={false}><div style={{ padding:"14px 4px", color:"var(--muted)", fontSize:13.5 }}>Connect a live WordPress site first to configure Airtable for it.</div></SoftCard>}
+      {live && <PushQueuePanel ctx={ctx} siteId={s.id} />}
 
       {live && (
         <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
