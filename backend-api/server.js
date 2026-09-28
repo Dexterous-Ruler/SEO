@@ -4676,6 +4676,23 @@ const routes = {
   // have). Fetched items flow into the SAME content_opportunities queue (source
   // 'feeds'), niche-scored + deduped, then one click drafts a brief into the
   // Article Writer with Status BLANK (human-in-the-loop — nothing auto-publishes).
+  // Read-only: is each court-judgment source reachable FROM THE SERVER (datacenter IPs get
+  // treated differently from a laptop), and which API keys the research pipeline has.
+  // Returns only true/false for keys — never the key values.
+  'POST /judgment-sources-check': async () => {
+    const r = await judgments.sourcesHealth();
+    let firecrawl = !!process.env.FIRECRAWL_API_KEY;
+    if (!firecrawl) { try { firecrawl = !!(await db.getAppSecret('firecrawl_api_key')); } catch (e) {} }
+    r.keys = {
+      anthropic: { configured: !!process.env.ANTHROPIC_API_KEY, usedFor: 'relevance scores, briefs, article structure' },
+      perplexity: { configured: research.hasPerplexity ? research.hasPerplexity() : !!process.env.PERPLEXITY_API_KEY, usedFor: 'grounded research + web citation check' },
+      tavily: { configured: !!process.env.TAVILY_API_KEY, usedFor: 'source search + page extraction' },
+      firecrawl: { configured: firecrawl, usedFor: 'reading bot-protected competitor pages' },
+      westlaw: { configured: false, usedFor: 'not connected — needs an API agreement with Thomson Reuters' },
+      lexis: { configured: false, usedFor: 'not connected — needs an API agreement with LexisNexis' },
+    };
+    return r;
+  },
   'POST /radar-sources': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
     // courtGroups: the "New court judgments" presets (Find Case Law court codes) for the UI.

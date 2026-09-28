@@ -245,6 +245,24 @@ export async function resolveJudgment({ title = '', keyword = '', competitor = n
   }
 }
 
+// ---- health check: is each judgment source reachable FROM THIS SERVER? ----------------
+// Sites treat a datacenter IP (Koyeb) differently from a laptop, so "works on my machine"
+// proves nothing — this runs every probe server-side. One bounded request per probe, in
+// parallel; BAILII gets a single polite request only to report whether it's blocking.
+export async function sourcesHealth() {
+  const timed = async (name, fn) => { const t0 = Date.now(); try { const r = await fn(); return { name, ...r, ms: Date.now() - t0 }; } catch (e) { return { name, ok: false, detail: String((e && e.message) || e).slice(0, 160), ms: Date.now() - t0 }; } };
+  const checks = await Promise.all([
+    timed('National Archives — new judgments feed', async () => { const r = await fetchCourtFeed(COURT_GROUPS.tax.courts, { perPage: 5 }); return { ok: !r.error && r.items.length > 0, detail: r.error || `${r.items.length} latest tax judgments, newest ${String((r.items[0] || {}).published || '').slice(0, 10)}` }; }),
+    timed('National Archives — search by party names', async () => { const r = await searchNationalArchives('Emirates NBD Al Kuwari', { max: 3 }); const hit = r.find((x) => /Emirates/i.test(x.title)); return { ok: !!hit, detail: hit ? `found ${hit.citation}` : `no match (${r.length} results)` }; }),
+    timed('National Archives — full judgment text', async () => { const r = await readJudgment(`${NA}/ewhc/ch/2026/1468`); return { ok: !!(r && r.text), detail: r && r.text ? `${r.text.length.toLocaleString()} characters read` : 'could not read' }; }),
+    timed('CaseMine — search', async () => { const u = await searchCaseMine('Emirates NBD Al Kuwari'); return { ok: u.length > 0, detail: u.length ? `found ${u.length} judgment page(s)` : 'no results (blocked or changed)', sample: u[0] || null }; }),
+    timed('CaseMine — judgment page', async () => { const u = (await searchCaseMine('Emirates NBD Al Kuwari'))[0]; if (!u) return { ok: false, detail: 'no page to read (search failed)' }; const r = await readJudgment(u); return { ok: !!(r && r.text), detail: r && r.text ? `${r.text.length.toLocaleString()} characters (partial — rest is behind CaseMine's sign-up)` : 'page not readable from this server' }; }),
+    timed('BAILII', async () => { const r = await fetchText('https://www.bailii.org/uk/cases/UKSC/2021/5.html', { timeoutMs: 15000 }); const blocked = !r.body || r.body.length < 8000 || /robot|captcha|verify you are human/i.test(r.body.slice(0, 5000)); return { ok: true, blocked, detail: blocked ? `blocks automated reading (HTTP ${r.status || 'n/a'}, ${r.body.length} bytes) — BAILII links are read from the National Archives copy instead` : 'readable' }; }),
+    timed('Employment Tribunal decisions (GOV.UK)', async () => { const r = await fetchText('https://www.gov.uk/employment-tribunal-decisions.atom', { timeoutMs: 15000 }); const n = (r.body.match(/<entry>/g) || []).length; return { ok: n > 0, detail: n ? `${n} recent decisions in the feed` : `feed empty or blocked (HTTP ${r.status || 'n/a'})` }; }),
+  ]);
+  return { checkedAt: new Date().toISOString(), checks };
+}
+
 // ---- "New court judgments" feed (Content Radar) --------------------------------
 // Karim: a rival "scans all the court judgments from certain courts, scores how relevant each
 // is to my clients, summarises it, then blogs it" — often live an hour after the judgment.
