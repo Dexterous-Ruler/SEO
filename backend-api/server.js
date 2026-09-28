@@ -625,7 +625,10 @@ async function researchOppBrief(siteId, oppId, opts = {}) {
   const verify = opts.verify != null ? !!opts.verify : (isLegalSite(site) || caseLaw);
   let r;
   try {
-    r = await research.contentBrief({ keyword, title: opp.title, intent: opp.intent, siteName: site.name, niche: site.niche || (site.stack && site.stack.type), excludeDomain, internalLinkCandidates, siteId, db: market.db, now: Date.now(), competitor, caseLaw, verify, judgmentUrl, judgmentText, operatorNotes: payload.operatorNotes || '' });
+    // The page TYPE being pushed (Legal Definition / How To Guide / Smart Template …): go-legal.ai's
+    // dedicated writers follow the brief's structure, so a definition push needs a definition brief.
+    const contentType = airtable.normalizeCategory(opts.category || payload.category || payload.suggestedType || '');
+    r = await research.contentBrief({ keyword, title: opp.title, intent: opp.intent, siteName: site.name, niche: site.niche || (site.stack && site.stack.type), excludeDomain, internalLinkCandidates, siteId, db: market.db, now: Date.now(), competitor, caseLaw, verify, judgmentUrl, judgmentText, operatorNotes: payload.operatorNotes || '', contentType });
   } catch (e) { return { error: 'Brief research failed: ' + String((e && e.message) || e) }; }
   if (!r || r.error) return { error: (r && r.error) || 'Brief research failed.' };
   if (!r.brief || r.brief.error) return { error: 'Brief could not be structured — try again.' + (r.brief && r.brief._tail ? ' (output ended: …' + String(r.brief._tail).slice(-140).replace(/\s+/g, ' ') + ')' : '') };

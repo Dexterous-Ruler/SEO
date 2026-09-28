@@ -196,7 +196,7 @@ async function processEntry(e) {
   const need = E().marketsNeedingBrief(opp, e.jurisdictions, site && site.semrush_db);
   for (const mk of need) {
     e.stage = `researching the brief for ${mk.country}`; e.updatedAt = nowIso(); await save(e.siteId);
-    const r = await deps.research(e.siteId, e.oppId, { marketDb: mk.db, primary: false });
+    const r = await deps.research(e.siteId, e.oppId, { marketDb: mk.db, primary: false, category: e.category });
     if (!r || r.error) { e.status = 'failed'; e.error = `${mk.country}: ${(r && r.error) || 'research failed'}`; return; }
   }
   // 2) Push (per-market verification gate, de-dupe, Jurisdiction + Language on each row).

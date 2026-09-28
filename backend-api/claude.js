@@ -616,7 +616,18 @@ export function judgmentExcerpt(text, budget = 7000) {
 // Perplexity grounded answer). Claude structures + writes the brief but must use
 // ONLY the supplied research — every fact ties to a provided source, nothing
 // invented. UK audience, UK English. Returns structured JSON.
-export async function synthesizeContentBrief({ keyword, title = '', intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText, judgmentBudget = 7000, operatorNotes = '' }) {
+// The page type a push is for (airtable.normalizeCategory values). Blog / unknown → no line, so a
+// normal article brief is unchanged. go-legal.ai's dedicated definition / how-to / template writers
+// follow the brief's structure, so their briefs must plan THAT page, not a blog article.
+const BRIEF_PAGE_TYPE = {
+  'Legal Definition': 'a LEGAL DEFINITION page (sections: the definition in plain words; worked examples; common questions) — plan THAT page, not a blog article',
+  'How To Guide': 'a HOW-TO GUIDE (what you need before you start; the numbered steps the reader follows; common mistakes; FAQs)',
+  'Smart Template': 'a SMART TEMPLATE page for a ready-to-use legal document template (document overview: what it is and when to use it; what the document covers and its key clauses; how to complete it; guidance notes; common questions) — plan THAT page, not a blog article',
+  'Legal Pathway': 'a LEGAL PATHWAY page (the route through the legal process, stage by stage: what happens and what to do at each stage)',
+  'Case Study': 'a CASE STUDY built only on real, sourced facts (the situation, the legal issue, what happened, the outcome, lessons) — never an invented client story',
+  'Expertise Page': 'an EXPERTISE / SERVICE page (who it helps, the problems it solves, how the process works, FAQs)',
+};
+export async function synthesizeContentBrief({ keyword, title = '', intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText, judgmentBudget = 7000, operatorNotes = '', contentType = '' }) {
   const sources = (research.sources || []).map((s, i) => `[${i + 1}] ${s.title || ''} — ${s.url}`).join('\n');
   // Case law: the judgment is the primary source, so keep the general material short and give
   // the judgment room — a large judgment + 9k material + 5k output blew the 84s Claude timeout.
@@ -649,7 +660,8 @@ export async function synthesizeContentBrief({ keyword, title = '', intent, site
   const topicLine = title && squash(title) !== squash(keyword)
     ? `TOPIC (what the operator chose to publish — the brief must be about THIS; if it names another country, adapt it to ${country}; the keyword is the search term to rank for): ${String(title).slice(0, 300)}\n`
     : '';
-  const userMsg = `${scope}TODAY'S DATE: ${today} — any year in the title, meta or "in <year>" wording must be the current year (${today.slice(0, 4)}); dated facts keep their real dates.\nTARGET MARKET: ${country}\n${topicLine}KEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}${judgeBlock}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}${compBlock}${opBlock}\n\nWrite the ${country} ${caseLaw ? 'CASE-LAW brief (Background / Issues / Decision / Impact) — every case and statute in "citations" must be real and sourced from the research; anything you cannot source goes in "unverifiedClaims", never stated as fact' : 'content brief'} as JSON.\n\nThe numbered SOURCES list above is attached to the brief automatically: cite sources by number [n], and wherever your format asks for a consolidated source list give only the numbers — never re-type the whole list of titles and URLs.`;
+  const typeLine = BRIEF_PAGE_TYPE[contentType] ? `CONTENT TYPE: ${BRIEF_PAGE_TYPE[contentType]}\n` : '';
+  const userMsg = `${scope}TODAY'S DATE: ${today} — any year in the title, meta or "in <year>" wording must be the current year (${today.slice(0, 4)}); dated facts keep their real dates.\nTARGET MARKET: ${country}\n${topicLine}${typeLine}KEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}${judgeBlock}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}${compBlock}${opBlock}\n\nWrite the ${country} ${caseLaw ? 'CASE-LAW brief (Background / Issues / Decision / Impact) — every case and statute in "citations" must be real and sourced from the research; anything you cannot source goes in "unverifiedClaims", never stated as fact' : 'content brief'} as JSON.\n\nThe numbered SOURCES list above is attached to the brief automatically: cite sources by number [n], and wherever your format asks for a consolidated source list give only the numbers — never re-type the whole list of titles and URLs.`;
   // Strip ```json fences, slice the outer object, parse. null on failure (truncated JSON).
   const parse = (t) => {
     let s = String(t || '').trim();
