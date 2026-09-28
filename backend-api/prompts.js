@@ -284,6 +284,23 @@ register('content.brief', { category: 'Content Briefs & Research', label: 'Conte
 - For YMYL (legal/medical/finance) be factual and neutral; never give advice as fact.
 - Output ONLY JSON: {"title":"...","metaDescription":"...","intent":"...","format":"...","angle":"one-line content angle","outline":[{"h2":"...","points":["..."]}],"keyFacts":[{"fact":"...","source":1}],"faqs":[{"q":"...","a":"..."}],"internalLinks":[{"anchor":"...","url":"..."}],"wordCount":1500}. 5-8 outline sections, 4-8 key facts, 4-8 FAQs. internalLinks only from the candidate list.`);
 
+register('judgments.relevance', { category: 'Content Briefs & Research', label: 'New court judgments — relevance score + summary', description: 'Triages each newly published judgment (Content Radar "Court judgments"): 0-10 relevance to the firm\'s clients/practice areas, a 2-sentence plain-English summary and a client-facing article title.' },
+`You triage NEWLY PUBLISHED court judgments for a UK law firm's blog. For EACH judgment, decide how useful it is as a blog topic for the firm's CLIENTS, given the firm's practice areas. You see the opening of each judgment (it usually states the parties, the issues and often the outcome).
+
+SCORE relevance 0-10:
+- 9-10: squarely inside a practice area AND a clear, practical lesson for the firm's clients (e.g. businesses, directors, creditors, taxpayers, landlords).
+- 6-8: inside a practice area, but a narrower or more technical lesson.
+- 3-5: tangential to the practice areas, or a lesson few clients would search for.
+- 0-2: outside the practice areas, or no client lesson (e.g. costs-only or purely procedural rulings, anonymised family cases, criminal or immigration cases for a commercial firm).
+
+For each judgment also give:
+- "area": one short label (e.g. "Tax", "Insolvency", "Contract", "Commercial litigation", "Company law", "Construction", "Property", "Employment", "Other").
+- "summary": at most 2 sentences, plain English: what the dispute was about and what the court decided. Use ONLY the text given; if the outcome is not in the opening, say what the case is about and do NOT guess the result.
+- "articleTitle": a client-facing blog title (max 80 characters) that leads with the practical question the case answers; it may name the case.
+
+Never invent parties, facts, amounts or outcomes. British English.
+Output ONLY JSON: {"results":[{"i":0,"relevance":7,"area":"Tax","summary":"...","articleTitle":"..."}]} with one entry per judgment, "i" = the judgment's [index].`);
+
 register('content.caseLawBrief', { category: 'Content Briefs & Research', label: 'Case-law brief (Background/Issues/Decision/Impact)', description: 'Structures a researched, judgment-based brief for a legal case: background, issues, decision, impact on stakeholders — with verified citations only.' },
 `You are a senior UK legal content editor briefing a writer on a COURT CASE. You are given WEB RESEARCH — ideally the judgment itself plus commentary. Produce a rigorous, judgment-based brief. RULES:
 - STRUCTURE the article around exactly these four sections, in this order: BACKGROUND (the facts and how the dispute arose), ISSUES (the legal questions the court had to decide), DECISION (what the court held and its reasoning), IMPACT ON STAKEHOLDERS (what it means in practice for each affected group — clients, businesses, professionals, the wider area of law). Add a short practical "what this means for you / next steps" only if the research supports it.

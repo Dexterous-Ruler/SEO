@@ -49,6 +49,7 @@ import { generateCssFixes } from './css-fixes.js';
 import { generateA11yFixes } from './a11y-fixes.js';
 import { findOpportunities } from './content-opportunities.js';
 import * as research from './research.js';
+import * as judgments from './judgments.js';
 import * as imageOpt from './image-optimize.js';
 import * as prompts from './prompts.js';
 import * as perplexity from './perplexity.js';
@@ -4677,24 +4678,36 @@ const routes = {
   // Article Writer with Status BLANK (human-in-the-loop — nothing auto-publishes).
   'POST /radar-sources': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    return { sources: await radarSourcesFor(body.siteId) };
+    // courtGroups: the "New court judgments" presets (Find Case Law court codes) for the UI.
+    return { sources: await radarSourcesFor(body.siteId), courtGroups: judgments.COURT_GROUPS };
   },
   'POST /radar-source-save': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
     const s = body.source || {};
-    const type = ['google_alert', 'outlet_rss', 'google_news'].includes(s.type) ? s.type : 'outlet_rss';
-    if (type === 'google_news') { if (!String(s.query || '').trim()) return { error: 'A search query is required for a Google News source.' }; }
+    const type = ['google_alert', 'outlet_rss', 'google_news', 'court_judgments'].includes(s.type) ? s.type : 'outlet_rss';
+    let courts = [];
+    if (type === 'court_judgments') {
+      const group = judgments.COURT_GROUPS[s.group];
+      courts = (Array.isArray(s.courts) && s.courts.length ? s.courts : (group ? group.courts : [])).map((c) => String(c).toLowerCase().trim()).filter(judgments.validCourt);
+      if (!courts.length) return { error: 'Pick at least one court to watch.' };
+    } else if (type === 'google_news') { if (!String(s.query || '').trim()) return { error: 'A search query is required for a Google News source.' }; }
     else if (!/^https?:\/\//i.test(String(s.url || '').trim())) return { error: 'A valid feed URL (https://…) is required.' };
     const list = await radarSourcesFor(body.siteId);
     const id = s.id || ('src_' + Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4));
     const entry = {
       id, type,
-      url: type === 'google_news' ? '' : String(s.url || '').trim(),
+      url: (type === 'google_news' || type === 'court_judgments') ? '' : String(s.url || '').trim(),
       query: type === 'google_news' ? String(s.query || '').trim() : '',
-      label: String(s.label || '').trim() || (type === 'google_news' ? String(s.query || '').trim() : ''),
+      label: String(s.label || '').trim() || (type === 'google_news' ? String(s.query || '').trim() : (type === 'court_judgments' ? ((judgments.COURT_GROUPS[s.group] || {}).label || 'Court judgments') : '')),
       active: s.active !== false,
       addedAt: (list.find((x) => x.id === id) || {}).addedAt || new Date().toISOString(),
     };
+    if (type === 'court_judgments') {
+      entry.courts = courts;
+      if (s.group && judgments.COURT_GROUPS[s.group]) entry.group = s.group;
+      // What the firm does — steers the 0-10 relevance score (e.g. "commercial litigation, insolvency, tax, contract").
+      entry.focus = String(s.focus || '').trim().slice(0, 400);
+    }
     const i = list.findIndex((x) => x.id === id);
     if (i >= 0) list[i] = { ...list[i], ...entry }; else list.push(entry);
     await db.setAppSecret('radar_sources:' + body.siteId, JSON.stringify(list));
@@ -4716,15 +4729,25 @@ const routes = {
     const r = await engine.ingestFeeds(body.siteId, sources);
     return { ok: !r.error, ...r };
   },
-  // List the current, un-actioned radar items (source 'feeds'), freshest first.
+  // List the current, un-actioned radar items (source 'feeds'): news freshest first; court
+  // judgments (payload.kind 'judgment') most-relevant first, with their score, summary and
+  // brief/verification state so the screen can research + push them like competitor topics.
   'POST /radar-items': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    const wl = await engine.worklist(body.siteId, { source: 'feeds', limit: Math.min(body.limit || 80, 200) }).catch(() => ({ items: [] }));
+    const wl = await engine.worklist(body.siteId, { source: 'feeds', limit: Math.min(body.limit || 200, 400) }).catch(() => ({ items: [] }));
     if (wl.notProvisioned) return { notProvisioned: true, items: [], note: wl.error };
     const items = (wl.items || [])
       .filter((o) => !['dismissed', 'queued', 'published'].includes(o.status))
-      .map((o) => ({ id: o.id, title: o.title, score: o.score, status: o.status, source: (o.payload && o.payload.sourceLabel) || 'feed', link: o.payload && o.payload.link, summary: o.payload && o.payload.summary, published: o.payload && o.payload.published, primaryKeyword: o.primary_keyword }))
-      .sort((a, b) => String(b.published || '').localeCompare(String(a.published || '')) || (b.score - a.score));
+      .map((o) => {
+        const p = o.payload || {};
+        const base = { id: o.id, title: o.title, score: o.score, status: o.status, source: p.sourceLabel || 'feed', link: p.link, summary: p.summary, published: p.published, primaryKeyword: o.primary_keyword, kind: p.kind === 'judgment' ? 'judgment' : 'news' };
+        if (base.kind !== 'judgment') return base;
+        const v = p.briefVerification || (p.brief && p.brief.verification) || null;
+        return Object.assign(base, { caseName: p.caseName, citation: p.citation, court: p.court, relevance: p.relevance, area: p.area, judgmentUrl: p.judgmentUrl, hasBrief: !!(p.brief && typeof p.brief === 'object' && !p.brief.error), verifyStatus: v ? v.status : null });
+      })
+      .sort((a, b) => (a.kind === 'judgment' && b.kind === 'judgment')
+        ? ((b.relevance || 0) - (a.relevance || 0)) || String(b.published || '').localeCompare(String(a.published || ''))
+        : String(b.published || '').localeCompare(String(a.published || '')) || (b.score - a.score));
     return { items };
   },
   // ── Competitor sitemap → "out-rank them" opportunities ──────────────────
@@ -4812,8 +4835,11 @@ const routes = {
     if (body.jurisdiction) { const c = semrush.COUNTRIES.find((x) => x.label.toLowerCase() === String(body.jurisdiction).toLowerCase()); if (c) market = marketFor(c.db); }
     // The competitor's own article (best-effort, external tiers) so the brief out-does it.
     // Operator can override the auto-scanned sitemap link with the EXACT competitor URL to outrank.
+    // A Content Radar court-judgment item's link IS the judgment — read it as the primary source,
+    // never as a competitor article to out-do.
+    const isJudgment = payload.kind === 'judgment' || !!payload.judgmentUrl;
     let competitor = null;
-    const compUrl = (body.competitorUrl && String(body.competitorUrl).trim()) || payload.link;
+    const compUrl = (body.competitorUrl && String(body.competitorUrl).trim()) || (isJudgment ? '' : payload.link);
     if (compUrl) {
       try { const pg = await chatbot.readPage(compUrl); if (pg && !pg.error && pg.text) competitor = { url: compUrl, title: pg.title || opp.title, text: String(pg.text).slice(0, 6000) }; } catch (e) {}
     }
@@ -4831,7 +4857,7 @@ const routes = {
     const suggestedType = payload.category || payload.suggestedType || 'blog';
     // Operator can paste the exact court judgment (URL or full text). Supplying one forces case-law
     // structure + verification (Karim: "add the court judgment URL as part of the flow").
-    const judgmentUrl = (body.judgmentUrl && String(body.judgmentUrl).trim()) || '';
+    const judgmentUrl = (body.judgmentUrl && String(body.judgmentUrl).trim()) || (isJudgment ? String(payload.judgmentUrl || payload.link || '') : '');
     const judgmentText = (body.judgmentText && String(body.judgmentText).trim()) || '';
     const hasJudgment = !!(judgmentUrl || judgmentText);
     const caseLaw = body.caseLaw != null ? !!body.caseLaw : (hasJudgment || isCaseLawTopic(opp.title, suggestedType));

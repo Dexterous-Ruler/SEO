@@ -1461,22 +1461,43 @@ function RadarScreen({ ctx }){
   // Go Legal AI: Blog/Smart template/Legal definition/How-to guide/Legal pathway).
   const TYPES = contentTypesFor(s);
   const [draftType,setDraftType] = useState("blog");
+  // "New court judgments" (The National Archives) — court presets come from /radar-sources.
+  const [courtGroups,setCourtGroups] = useState({});
+  const [jGroups,setJGroups] = useState({});            // court group → ticked in the add form
+  const [focus,setFocus] = useState("");                // what the firm does → steers the 0–10 score
+  const [tab,setTab] = useState("");                    // "judgments" | "news" ("" = pick automatically)
+  const [showLow,setShowLow] = useState(false);         // also show judgments scored under 5/10
+  const [briefing,setBriefing] = useState("");          // judgment whose brief is being researched
+  const [briefs,setBriefs] = useState({});              // id → researched brief (case, decision, checks)
+  const [blocked,setBlocked] = useState({});            // id → push held back on unconfirmed citations
   const inp = { padding:"9px 12px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none", width:"100%", boxSizing:"border-box" };
   const lbl = { fontSize:11.5, color:"var(--muted)", marginBottom:5, fontWeight:600 };
-  const TYPE_LABEL = { google_alert:"Google Alert", outlet_rss:"News site", google_news:"Topic search" };
+  const TYPE_LABEL = { google_alert:"Google Alert", outlet_rss:"News site", google_news:"Topic search", court_judgments:"Court judgments" };
   const TYPE_HELP = {
     google_news:"Easiest — just type a topic (e.g. “redundancy law UK”) and we watch Google News for new stories about it. No links needed.",
     google_alert:"Paste a Google Alert link. Create one free at google.com/alerts, set “Deliver to → RSS feed”, then copy the link it gives you and paste it here.",
     outlet_rss:"Follow one specific news website: paste its “latest articles” link (usually the site address followed by /feed/).",
+    court_judgments:"New judgments from the courts you tick, straight from the National Archives (the official, free source). Each new one is read and scored 0–10 for how useful it is to your clients, with a short summary. Checked automatically every 2 hours.",
   };
+  const ET_FEED = "https://www.gov.uk/employment-tribunal-decisions.atom";
+  const JTYPE = (TYPES.find(t=>t[0]==="case_study")||[])[0] || draftType;   // judgments go to the writer as a case study where the site has that type
   const fmtDate = (d)=>{ if(!d) return ""; try{ return new Date(d).toLocaleDateString(undefined,{day:"numeric",month:"short",year:"numeric"}); }catch(e){ return String(d).slice(0,10); } };
 
-  const loadSources = ()=>{ if(!live) return; API.radarSources(s.id).then(r=>setSources((r&&r.sources)||[])).catch(()=>{}); };
+  const loadSources = ()=>{ if(!live) return; API.radarSources(s.id).then(r=>{ setSources((r&&r.sources)||[]); if(r&&r.courtGroups) setCourtGroups(r.courtGroups); }).catch(()=>{}); };
   const loadItems = ()=>{ if(!live) return; setLoading(true); API.radarItems(s.id).then(r=>{ if(r&&r.notProvisioned){ setNotProv(true); setItems([]); return; } setNotProv(false); setItems((r&&r.items)||[]); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setLoading(false)); };
   useEffect(()=>{ setSources([]); setItems([]); setNotProv(false); if(live){ loadSources(); loadItems(); } },[s.id]);
 
   const addSource = ()=>{
     if(!live) return;
+    if(form.type==="court_judgments"){
+      const picked = Object.keys(jGroups).filter(k=>jGroups[k]);
+      if(!picked.length){ ctx.toast("Tick at least one court to watch","gold"); return; }
+      // One source per court group, so each can be removed on its own later.
+      picked.reduce((p,g)=>p.then(()=>API.radarSourceSave(s.id, { type:"court_judgments", group:g, focus:focus.trim(), label:(courtGroups[g]||{}).label }).then(r=>{ if(r&&r.error) throw new Error(r.error); if(r&&r.sources) setSources(r.sources); })), Promise.resolve())
+        .then(()=>{ setJGroups({}); ctx.toast("Watching "+picked.length+" court"+(picked.length===1?"":"s")+" — click “Check for new stories” to pull today's judgments","teal"); })
+        .catch(e=>ctx.toast(e.message,"clay"));
+      return;
+    }
     const src = { type:form.type, label:form.label };
     if(form.type==="google_news"){ if(!form.query.trim()){ ctx.toast("Type a topic to watch first","gold"); return; } src.query=form.query.trim(); }
     else { if(!/^https?:\/\//i.test(form.url.trim())){ ctx.toast("Paste a link starting with https://","gold"); return; } src.url=form.url.trim(); }
@@ -1494,6 +1515,51 @@ function RadarScreen({ ctx }){
     API.radarDraft(s.id, { title:it.title, link:it.link, summary:it.summary, primaryKeyword:it.primaryKeyword }, it.id, draftType).then(r=>{ if(r&&r.error){ ctx.toast("Couldn't add: "+r.error,"clay"); return; } setItems(x=>x.filter(y=>y.id!==it.id)); ctx.toast("Added to the Article Writer as a "+((TYPES.find(t=>t[0]===draftType)||[])[1]||"draft")+" — open it there when you're ready to write it","teal"); }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId(""));
   };
   const dismiss = (it)=>{ setBusyId(it.id); API.engineDismiss(it.id).then(()=>setItems(x=>x.filter(y=>y.id!==it.id))).catch(()=>{}).finally(()=>setBusyId("")); };
+  const addEmploymentTribunal = ()=>{
+    if(!live) return;
+    if(sources.some(x=>x.url===ET_FEED)){ ctx.toast("Already watching Employment Tribunal decisions","gold"); return; }
+    API.radarSourceSave(s.id, { type:"outlet_rss", url:ET_FEED, label:"Employment Tribunal decisions" }).then(r=>{ if(r&&r.error){ ctx.toast(r.error,"clay"); return; } setSources((r&&r.sources)||[]); ctx.toast("Added Employment Tribunal decisions","teal"); }).catch(e=>ctx.toast(e.message,"clay"));
+  };
+
+  // Court judgment → researched case-law brief (reads THIS judgment: background, issues, decision,
+  // impact; citations checked). Same background job + poll as the Competitors screen.
+  const researchJudgment = (it)=> new Promise((resolve)=>{
+    setBriefing(it.id);
+    ctx.toast("Reading the judgment and researching a brief for “"+String(it.caseName||it.title).slice(0,45)+"” (~1–2 min)…","teal");
+    API.competitorBriefStart(s.id, it.id, {}).then(st=>{
+      if(st&&st.error){ ctx.toast(st.error,"clay"); setBriefing(""); resolve(null); return; }
+      let polls=0;
+      const poll=()=>{ API.competitorBriefStatus(s.id, it.id).then(r=>{
+        if(!r||r.status==="running"){ if(++polls<75) setTimeout(poll,4000); else { ctx.toast("Still researching — reopen this in a minute","gold"); setBriefing(""); resolve(null); } return; }
+        if(r.status==="error"||r.error||!r.brief){ ctx.toast("Research failed: "+(r.error||r.reason||"unknown"),"clay"); setBriefing(""); resolve(null); return; }
+        setBriefs(b=>Object.assign({},b,{[it.id]:r}));
+        setItems(xs=>xs.map(x=>x.id===it.id?Object.assign({},x,{ hasBrief:true, verifyStatus:(r.verification&&r.verification.status)||null }):x));
+        setBriefing(""); resolve(r);
+      }).catch(e=>{ ctx.toast(e.message,"clay"); setBriefing(""); resolve(null); }); };
+      setTimeout(poll,4000);
+    }).catch(e=>{ ctx.toast(e.message,"clay"); setBriefing(""); resolve(null); });
+  });
+  const viewJudgmentBrief = (it)=>{
+    if(briefs[it.id]){ setBriefs(b=>{ const x=Object.assign({},b); delete x[it.id]; return x; }); return; }   // toggle closed
+    if(it.hasBrief){ API.competitorBrief(s.id, it.id, { existing:true }).then(r=>{ if(r&&r.brief) setBriefs(b=>Object.assign({},b,{[it.id]:r})); else ctx.toast((r&&r.error)||"No brief yet","gold"); }).catch(e=>ctx.toast(e.message,"clay")); return; }
+    if(!briefing) researchJudgment(it);
+  };
+  // Push to the Article Writer with the researched brief. Citations the checker couldn't confirm
+  // hold the push back until the operator has looked (then "Push anyway"), as on Competitors.
+  const pushJudgment = async (it, force)=>{
+    if(busyId) return;
+    setBusyId(it.id);
+    try{
+      let vs = it.verifyStatus||null;
+      if(!it.hasBrief && !(briefs[it.id])){ const b = await researchJudgment(it); if(!b){ return; } vs = (b.verification&&b.verification.status)||null; }
+      if(!force && vs && vs!=="verified"){ setBlocked(m=>Object.assign({},m,{[it.id]:true})); if(!briefs[it.id]) viewJudgmentBrief(it); ctx.toast("Held back: some citations couldn't be confirmed automatically. Check the brief, then “Push anyway”.","gold"); return; }
+      const r = await API.engineAutodraft(s.id, { ids:[it.id], category:JTYPE, force:!!force });
+      if(r&&r.reason==="verification-blocked"){ setBlocked(m=>Object.assign({},m,{[it.id]:true})); ctx.toast("Held back: citations not confirmed. Check the brief, then “Push anyway”.","gold"); return; }
+      if(r&&(r.error||r.skipped)){ ctx.toast("Couldn't push: "+(r.error||r.reason),"clay"); return; }
+      setItems(xs=>xs.filter(x=>x.id!==it.id));
+      ctx.toast((r&&r.drafted)>0?"Sent to the Article Writer with a researched case-law brief ✓":"Already in the Article Writer — marked done","teal");
+    } catch(e){ ctx.toast(e.message,"clay"); } finally { setBusyId(""); }
+  };
 
   return (
     <div>
@@ -1512,16 +1578,33 @@ function RadarScreen({ ctx }){
           <div><div style={lbl}>What to watch</div>
             <select style={inp} value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}>
               <option value="google_news">A topic (easiest)</option>
+              <option value="court_judgments">New court judgments</option>
               <option value="google_alert">A Google Alert</option>
               <option value="outlet_rss">A specific news site</option>
             </select></div>
           {form.type==="google_news"
             ? <div><div style={lbl}>Topic to watch</div><input style={inp} placeholder="e.g. UK settlement agreement redundancy" value={form.query} onChange={e=>setForm(f=>({...f,query:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addSource()} /></div>
-            : <div><div style={lbl}>Paste the link</div><input style={inp} placeholder={form.type==="google_alert"?"Paste your Google Alert link…":"e.g. https://www.lawgazette.co.uk/feed/"} value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addSource()} /></div>}
-          <div><div style={lbl}>Name (optional)</div><input style={inp} placeholder="e.g. Employment news" value={form.label} onChange={e=>setForm(f=>({...f,label:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addSource()} /></div>
+            : form.type==="court_judgments"
+              ? <div><div style={lbl}>What your firm does (used to score each judgment)</div><input style={inp} placeholder="e.g. commercial litigation, insolvency, contract disputes, tax" value={focus} onChange={e=>setFocus(e.target.value)} /></div>
+              : <div><div style={lbl}>Paste the link</div><input style={inp} placeholder={form.type==="google_alert"?"Paste your Google Alert link…":"e.g. https://www.lawgazette.co.uk/feed/"} value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addSource()} /></div>}
+          {form.type==="court_judgments" ? <div /> : <div><div style={lbl}>Name (optional)</div><input style={inp} placeholder="e.g. Employment news" value={form.label} onChange={e=>setForm(f=>({...f,label:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addSource()} /></div>}
           <NeoButton kind="ghost" size="sm" onClick={addSource}>Add</NeoButton>
         </div>
+        {form.type==="court_judgments" && (
+          <div style={{ marginTop:12 }}>
+            <div style={lbl}>Which courts to watch</div>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              {Object.entries(courtGroups).map(([k,g])=>{ const on=!!jGroups[k]; const have=sources.some(x=>x.type==="court_judgments"&&x.group===k); return (
+                <button key={k} disabled={have} onClick={()=>setJGroups(m=>Object.assign({},m,{[k]:!m[k]}))} title={have?"Already watching":("Courts: "+(g.courts||[]).join(", "))}
+                  style={{ padding:"7px 12px", borderRadius:"var(--r-pill)", border:"none", cursor:have?"default":"pointer", fontSize:12.5, fontWeight:700, background:have?"var(--t-50)":(on?"var(--t-100)":"var(--surface)"), boxShadow:on?"var(--neo-in)":"var(--neo-xs)", color:have?"var(--t-700)":(on?"var(--t-700)":"var(--muted)"), opacity:have?.75:1 }}>
+                  {have?"✓ ":(on?"☑ ":"☐ ")}{g.label}
+                </button>
+              ); })}
+            </div>
+          </div>
+        )}
         <div style={{ marginTop:9, fontSize:12, color:"var(--muted)", lineHeight:1.5 }}>{TYPE_HELP[form.type]}</div>
+        <div style={{ marginTop:6, fontSize:12, color:"var(--muted)" }}>Quick add: <button onClick={addEmploymentTribunal} style={{ border:"none", background:"none", color:"var(--t-700)", fontWeight:700, cursor:"pointer", padding:0, fontSize:12 }}>＋ Employment Tribunal decisions</button> <span>(new decisions from GOV.UK)</span></div>
         {!!sources.length && <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginTop:14 }}>
           {sources.map(src=>(
             <div key={src.id} style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 11px", borderRadius:"var(--r-pill)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5 }}>
@@ -1537,8 +1620,67 @@ function RadarScreen({ ctx }){
       {notProv && <SoftCard tone="gold" style={{ marginBottom:16 }}>The content queue table isn’t provisioned yet — run <code>supabase/content-engine.sql</code>, then poll again.</SoftCard>}
       {loading && <div style={{ color:"var(--muted)", padding:"12px 4px" }}>Loading…</div>}
       {!loading && !items.length && !notProv && <SoftCard><div style={{ color:"var(--muted)", textAlign:"center", padding:"22px 0" }}>Nothing here yet. Add a topic or news source above, then click <b>Check for new stories</b>.</div></SoftCard>}
+      {(()=>{
+        const judg = items.filter(i=>i.kind==="judgment");
+        const cur = tab || (judg.length ? "judgments" : "news");
+        const low = judg.filter(i=>(i.relevance||0)<5).length;
+        const shownJ = showLow ? judg : judg.filter(i=>(i.relevance||0)>=5);
+        const tabBtn = (k,label)=>(<button key={k} onClick={()=>setTab(k)} style={{ padding:"7px 14px", borderRadius:"var(--r-pill)", border:"none", cursor:"pointer", fontSize:13, fontWeight:700, background:cur===k?"var(--t-100)":"var(--surface)", boxShadow:cur===k?"var(--neo-in)":"var(--neo-xs)", color:cur===k?"var(--t-700)":"var(--muted)" }}>{label}</button>);
+        if(!judg.length) return null;
+        return (
+          <div style={{ marginBottom:12 }}>
+            <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+              {tabBtn("judgments","Court judgments ("+judg.length+")")}
+              {tabBtn("news","News ("+(items.length-judg.length)+")")}
+              {cur==="judgments" && <span style={{ fontSize:12, color:"var(--muted)", marginLeft:4 }}>Best for your clients first · scored 0–10 when they came in</span>}
+            </div>
+            {cur==="judgments" && (
+              <div style={{ display:"flex", flexDirection:"column", gap:12, marginTop:12 }}>
+                {shownJ.map(it=>{
+                  const rel = it.relevance||0;
+                  const d = briefs[it.id];
+                  const cl = (d&&d.brief&&d.brief.caseLaw)||{};
+                  const v = d&&(d.verification||(d.brief&&d.brief.verification));
+                  return (
+                    <SoftCard key={it.id} hover={false}>
+                      <div style={{ display:"flex", justifyContent:"space-between", gap:16 }}>
+                        <div style={{ minWidth:0 }}>
+                          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:5, flexWrap:"wrap" }}>
+                            <span title="How useful this judgment is as an article for your clients (0–10)" style={{ fontSize:12, fontWeight:800, padding:"2px 9px", borderRadius:"var(--r-pill)", background:rel>=8?"var(--t-600)":(rel>=5?"var(--t-100)":"var(--bg)"), color:rel>=8?"#F3EFE4":(rel>=5?"var(--t-700)":"var(--muted)"), boxShadow:rel>=5?"none":"var(--neo-in)" }}>{rel}/10</span>
+                            {it.area && <span style={{ fontSize:11.5, fontWeight:700, color:"var(--muted)", padding:"2px 8px", borderRadius:"var(--r-pill)", background:"var(--bg)", boxShadow:"var(--neo-in)" }}>{it.area}</span>}
+                          </div>
+                          <a href={it.judgmentUrl||it.link} target="_blank" rel="noopener noreferrer" title="Open the judgment" style={{ fontWeight:700, fontSize:14.5, color:"var(--ink)", textDecoration:"none" }}>{it.title}</a>
+                          <div style={{ fontSize:12, color:"var(--muted)", margin:"4px 0 8px" }}>{it.caseName}{it.citation?(" "+it.citation):""}{it.court?(" · "+it.court):""}{it.published?(" · "+fmtDate(it.published)):""}</div>
+                          {it.summary && <div style={{ fontSize:13, color:"var(--ink)", opacity:.85, lineHeight:1.5 }}>{it.summary}</div>}
+                          {d && (
+                            <div style={{ marginTop:10, padding:"10px 12px", borderRadius:"var(--r-md)", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5, lineHeight:1.5 }}>
+                              <div style={{ fontWeight:700, color:d.judgmentRead?"var(--t-700)":"var(--gold)" }}>{d.judgmentRead?"✓ Judgment read":"⚠ Couldn't read the judgment"}{cl.caseName?(" — "+cl.caseName+(cl.neutralCitation?" "+cl.neutralCitation:"")):""}</div>
+                              {Array.isArray(cl.issues)&&cl.issues.length>0 && <div style={{ marginTop:4 }}><b>Issues:</b> {cl.issues.slice(0,3).join(" · ")}</div>}
+                              {cl.decision && <div style={{ marginTop:4 }}><b>Decision:</b> {String(cl.decision).slice(0,340)}{String(cl.decision).length>340?"…":""}</div>}
+                              {v&&v.status && <div style={{ marginTop:4, fontWeight:600, color:v.status==="verified"?"var(--t-700)":"var(--gold)" }}>{v.status==="verified"?"✓ All citations confirmed":"⚠ Some citations couldn't be confirmed automatically — have a quick look, then “Push anyway”"}</div>}
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ display:"flex", flexDirection:"column", gap:8, alignItems:"flex-end", flexShrink:0 }}>
+                          <NeoButton kind="ghost" size="sm" disabled={briefing===it.id||busyId===it.id} onClick={()=>viewJudgmentBrief(it)} title="Read the judgment and research a case-law brief (background, issues, decision, impact)">{briefing===it.id?"Reading judgment…":(d?"Hide brief":(it.hasBrief?"Brief ✓ · View":"Research brief"))}</NeoButton>
+                          {blocked[it.id]
+                            ? <NeoButton kind="primary" size="sm" disabled={busyId===it.id} onClick={()=>pushJudgment(it,true)} title="You've checked the brief — send it to the writer anyway">Push anyway</NeoButton>
+                            : <NeoButton kind="primary" size="sm" icon="sparkles" disabled={busyId===it.id||briefing===it.id} onClick={()=>pushJudgment(it)} title="Send to the Article Writer with the researched case-law brief (it researches first if needed)">{busyId===it.id?"Working…":"Push to writer"}</NeoButton>}
+                          <button onClick={()=>dismiss(it)} disabled={busyId===it.id} title="Not interested — hide this judgment" style={{ border:"none", background:"none", cursor:"pointer", color:"var(--muted)", fontSize:12 }}>Hide</button>
+                        </div>
+                      </div>
+                    </SoftCard>
+                  );
+                })}
+                {!shownJ.length && <SoftCard><div style={{ color:"var(--muted)", textAlign:"center", padding:"16px 0" }}>No strong matches right now{low?" — "+low+" lower-scored judgment"+(low===1?" is":"s are")+" hidden":""}.</div></SoftCard>}
+                {low>0 && <div style={{ textAlign:"center" }}><button onClick={()=>setShowLow(x=>!x)} style={{ border:"none", background:"none", color:"var(--t-700)", fontWeight:700, cursor:"pointer", fontSize:12.5 }}>{showLow?"Hide":"Show"} {low} lower-relevance judgment{low===1?"":"s"} (under 5/10)</button></div>}
+              </div>
+            )}
+          </div>
+        );
+      })()}
       <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
-        {items.map(it=>(
+        {(items.some(i=>i.kind==="judgment") && (tab||"judgments")==="judgments") ? null : items.filter(i=>i.kind!=="judgment").map(it=>(
           <SoftCard key={it.id} hover={false}>
             <div style={{ display:"flex", justifyContent:"space-between", gap:16 }}>
               <div style={{ minWidth:0 }}>

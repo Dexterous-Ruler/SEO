@@ -478,6 +478,38 @@ export async function competitorClusters({ topic, competitorUrl, keywords, siteN
   }
 }
 
+// Content Radar "Court judgments": score each NEW judgment 0-10 for relevance to this firm's
+// clients/practice areas + a 2-sentence summary + a client-facing article title (the rival
+// system Karim cited scores every new judgment and blogs the relevant ones the same day).
+// items: [{ caseName, citation, court, published, opening }] → same-order array of
+// { relevance, area, summary, articleTitle } (null where the model gave nothing usable).
+// Haiku by default: a short, high-volume triage task.
+export async function scoreJudgments({ items, focus, siteName, siteId }) {
+  if (!Array.isArray(items) || !items.length) return [];
+  const list = items.map((it, i) => `### [${i}] ${it.caseName || ''} ${it.citation || ''} | ${it.court || ''} | ${String(it.published || '').slice(0, 10)}\n${String(it.opening || '(opening not available — judge from the case name and court)').slice(0, 2500)}`).join('\n\n');
+  const txt = await complete({
+    system: sys('judgments.relevance', siteId),
+    promptKey: 'judgments.relevance',
+    model: modelFor('judgments.relevance') || 'claude-haiku-4-5-20251001',
+    maxTokens: 300 + items.length * 230,
+    timeoutMs: 60000, deadlineMs: 90000,
+    messages: [{ role: 'user', content: `FIRM: ${siteName || ''}\nPRACTICE AREAS / CLIENTS: ${focus || '(not stated — use the site context above)'}\n\nNEW JUDGMENTS (opening of each):\n\n${list}\n\nReturn the JSON.` }],
+  });
+  const out = new Array(items.length).fill(null);
+  const take = (r) => {
+    const i = Number(r && r.i);
+    const rel = Number(r && r.relevance);
+    if (!Number.isInteger(i) || i < 0 || i >= items.length || !Number.isFinite(rel)) return;
+    out[i] = { relevance: Math.max(0, Math.min(10, Math.round(rel))), area: String(r.area || '').slice(0, 40), summary: String(r.summary || '').slice(0, 600), articleTitle: String(r.articleTitle || '').slice(0, 120) };
+  };
+  try { const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1)); (o.results || []).forEach(take); }
+  catch (e) {   // truncated JSON → salvage each complete result object
+    const re = /\{\s*"i"\s*:\s*\d+[\s\S]*?\}/g; let m;
+    while ((m = re.exec(txt)) !== null) { try { take(JSON.parse(m[0])); } catch (_) {} }
+  }
+  return out;
+}
+
 export async function clusterKeywords({ keywords, siteName, niche, siteId, timeoutMs, deadlineMs, model }) {
   const list = (keywords || []).slice(0, 140).map((k) => `${k.keyword}${k.volume ? ` (${k.volume})` : ''}`).join('\n');
   // Haiku by DEFAULT (measured 12.7s vs Sonnet 24.8s p50 and a >60s tail on this exact

@@ -35,6 +35,7 @@ import * as airtable from './airtable.js';
 import * as claude from './claude.js';
 import * as drift from './drift.js';
 import feeds from './feeds.js';
+import * as judgments from './judgments.js';
 
 const SB = process.env.SUPABASE_URL;
 const SRV = process.env.SUPABASE_SERVICE_ROLE;
@@ -413,15 +414,83 @@ function rowFor(o) {
 // Compact, stable hash of a URL → short dedupe key (djb2 + length, base36).
 function feedHash(s) { let h = 5381; const str = String(s || ''); for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0; return h.toString(36) + str.length.toString(36); }
 
-export async function ingestFeeds(siteId, sources) {
+// Which of these dedupe keys already exist for the site (one bounded read). Lets the judgments
+// lane skip anything already scored, so each poll only pays to read + score genuinely NEW cases.
+async function existingDedupeKeys(siteId, keys) {
+  const out = new Set();
+  if (!SB || !SRV || !keys.length) return out;
+  try {
+    const inList = [...new Set(keys)].map((k) => `"${String(k).replace(/"/g, '')}"`).join(',');
+    const res = await fetch(`${SB}/rest/v1/content_opportunities?site_id=eq.${encodeURIComponent(siteId)}&dedupe_key=in.(${encodeURIComponent(inList)})&select=dedupe_key`, { headers: headers() });
+    if (res.ok) for (const r of (await res.json().catch(() => [])) || []) out.add(r.dedupe_key);
+  } catch (e) { /* treat as none known */ }
+  return out;
+}
+
+// ---- 5c) COURT JUDGMENTS lane (Content Radar source type 'court_judgments') ----------------
+// Newest judgments from the chosen courts (Find Case Law) → read each NEW one's opening → one
+// Claude triage call scores relevance 0-10 to the firm's practice areas, summarises it and
+// proposes a client-facing title → queued as Radar items (source 'feeds', payload.kind
+// 'judgment', score = relevance/10). Already-seen judgments are skipped BEFORE any reading or
+// scoring. Only successfully-scored items are saved, so a failed scoring run retries next poll.
+async function ingestJudgmentSource(siteId, site, src) {
+  const courts = (Array.isArray(src.courts) && src.courts.length) ? src.courts : ((judgments.COURT_GROUPS[src.group] || {}).courts || []);
+  const label = src.label || (judgments.COURT_GROUPS[src.group] || {}).label || 'Court judgments';
+  const feed = await judgments.fetchCourtFeed(courts, { perPage: 40 });
+  if (feed.error) return { stat: { id: src.id, label, error: feed.error, items: 0 }, opps: [] };
+  const entries = feed.items.map((e) => ({ ...e, dedupeKey: 'judg:' + feedHash(e.url.toLowerCase()) }));
+  const known = await existingDedupeKeys(siteId, entries.map((e) => e.dedupeKey));
+  const cap = Math.min(Math.max(Number(src.maxPerPoll) || 12, 1), 30);
+  const fresh = entries.filter((e) => !known.has(e.dedupeKey)).slice(0, cap);
+  if (!fresh.length) return { stat: { id: src.id, label, items: 0, known: entries.length }, opps: [] };
+  // The opening states the parties, the issues and often the outcome — enough to triage on.
+  // 3 at a time per source (sources run in parallel) — polite to the National Archives.
+  for (let i = 0; i < fresh.length; i += 3) {
+    await Promise.all(fresh.slice(i, i + 3).map(async (e) => {
+      const j = await judgments.readJudgment(e.url).catch(() => null);
+      e.opening = j && j.text ? j.text.slice(0, 3500) : '';
+    }));
+  }
+  const focus = String(src.focus || site.niche || '').slice(0, 400);
+  const scores = [];
+  for (let i = 0; i < fresh.length; i += 10) {
+    const chunk = fresh.slice(i, i + 10);
+    const r = await claude.scoreJudgments({ items: chunk.map((e) => ({ caseName: e.title, citation: e.citation, court: e.court, published: e.published, opening: e.opening })), focus, siteName: site.name, siteId }).catch(() => []);
+    for (let k = 0; k < chunk.length; k++) scores.push((r && r[k]) || null);
+  }
+  const opps = [];
+  fresh.forEach((e, idx) => {
+    const s = scores[idx]; if (!s) return;                 // unscored → not saved → retried next poll
+    const o = makeOpp(siteId, {
+      source: 'feeds', sourceRef: src.id,
+      title: s.articleTitle || e.title, primaryKeyword: e.title,
+      intent: 'informational', actionType: 'article',
+      score: s.relevance / 10, scoreBreakdown: { relevance: s.relevance },
+      evidence: [{ source: 'judgments', detail: `${e.court || 'Court'}${e.published ? ' · ' + String(e.published).slice(0, 10) : ''}` }],
+      payload: { kind: 'judgment', link: e.url, judgmentUrl: e.url, caseName: e.title, citation: e.citation, court: e.court, published: e.published, summary: s.summary, relevance: s.relevance, area: s.area, sourceLabel: label, sourceType: 'court_judgments', sourceId: src.id, suggestedType: 'case_study' },
+    });
+    o.dedupeKey = e.dedupeKey;
+    opps.push(o);
+  });
+  return { stat: { id: src.id, label, items: opps.length, scanned: entries.length, known: entries.length - entries.filter((e) => !known.has(e.dedupeKey)).length }, opps };
+}
+
+export async function ingestFeeds(siteId, sources, { only } = {}) {
   const site = await db.getSite(siteId).catch(() => null);
   if (!site) return { error: 'Site not found.', saved: 0 };
   const scoreSite = { id: siteId, __nicheCtx: geoFor(siteId) || '', __negatives: (Array.isArray(site.negative_keywords) ? site.negative_keywords : []).map((n) => String(n || '').toLowerCase().trim()).filter(Boolean) };
   const market = marketFor(site.semrush_db);   // scope google_news sources to the site's country/language
-  const active = (sources || []).filter((s) => s && s.active !== false);
+  // `only` = restrict to one source type (the 2-hourly judgments poll passes 'court_judgments').
+  const active = (sources || []).filter((s) => s && s.active !== false && (!only || s.type === only));
   const perSource = [];
   const raw = [];
+  // Court-judgment sources run IN PARALLEL (each reads + scores its own new judgments), so a
+  // manual "Check for new stories" across several courts stays well under the ~95s request cap.
+  const jr = await Promise.all(active.filter((s) => s.type === 'court_judgments').map((src) =>
+    ingestJudgmentSource(siteId, site, src).catch((e) => ({ stat: { id: src.id, label: src.label, error: String((e && e.message) || e).slice(0, 160), items: 0 }, opps: [] }))));
+  for (const r of jr) { perSource.push(r.stat); raw.push(...r.opps); }
   for (const src of active) {
+    if (src.type === 'court_judgments') continue;
     const url = feeds.sourceToUrl(src, market);
     if (!url) { perSource.push({ id: src.id, label: src.label, error: 'no feed URL' }); continue; }
     const r = await feeds.fetchFeed(url).catch((e) => ({ error: String((e && e.message) || e), items: [] }));

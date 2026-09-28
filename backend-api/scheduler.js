@@ -346,9 +346,22 @@ async function jobRadarPoll(site) {
   if (r && r.saved) await note(site.id, `Content Radar: ${r.saved} fresh item(s) from ${sources.filter((s) => s.active !== false).length} source(s)`);
 }
 
+// ── Job: new court judgments (Content Radar 'court_judgments' sources) ──────────────────
+// Karim's model: a rival blogs a relevant judgment ~an hour after it's handed down. The
+// National Archives feed is cheap to check, and only NEW judgments are read + scored, so a
+// 2-hourly poll keeps the queue fresh without re-paying for anything already seen.
+async function jobJudgmentsPoll(site) {
+  let sources = [];
+  try { const raw = await db.getAppSecret('radar_sources:' + site.id); if (raw) { const a = JSON.parse(raw); if (Array.isArray(a)) sources = a; } } catch (e) { return; }
+  if (!sources.some((s) => s && s.active !== false && s.type === 'court_judgments')) return;
+  const r = await engine.ingestFeeds(site.id, sources, { only: 'court_judgments' }).catch(() => null);
+  if (r && r.saved) await note(site.id, `Court judgments: ${r.saved} new judgment(s) scored for relevance`);
+}
+
 const JOBS = [
   { name: 'auto-index', every: DAY, run: jobAutoIndex },
   { name: 'radar-poll', every: 12 * HOUR, run: jobRadarPoll },
+  { name: 'judgments-poll', every: 2 * HOUR, run: jobJudgmentsPoll },
   { name: 'gsc-health', every: DAY, run: jobGscHealth },
   { name: 'keyword-push', every: 7 * DAY, run: jobKeywordPush },
   { name: 'engine-refresh', every: 7 * DAY, run: jobEngineRefresh },

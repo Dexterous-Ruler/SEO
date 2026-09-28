@@ -244,3 +244,42 @@ export async function resolveJudgment({ title = '', keyword = '', competitor = n
     return { text: r.text, url: r.url, via: r.via, found: r.found, partial: !!r.partial, citation, tried };
   }
 }
+
+// ---- "New court judgments" feed (Content Radar) --------------------------------
+// Karim: a rival "scans all the court judgments from certain courts, scores how relevant each
+// is to my clients, summarises it, then blogs it" — often live an hour after the judgment.
+// Westlaw's Current Awareness shows the same NEW judgments, but automated use of a subscriber
+// login breaches Westlaw's terms; Find Case Law publishes them free (Open Justice Licence) with
+// a per-court Atom feed. Court codes below verified live 28 Sep 2026.
+export const COURT_GROUPS = {
+  tax:        { label: 'Tax decisions (Upper Tribunal + First-tier Tax)', courts: ['ukut/tcc', 'ukftt/tc'] },
+  chancery:   { label: 'Chancery: insolvency, companies & business', courts: ['ewhc/ch'] },
+  commercial: { label: 'Commercial Court & TCC (construction)', courts: ['ewhc/comm', 'ewhc/tcc'] },
+  civil:      { label: "King's Bench: contract & civil claims", courts: ['ewhc/kb'] },
+  appeals:    { label: 'Court of Appeal (civil) & Supreme Court', courts: ['ewca/civ', 'uksc'] },
+  employment: { label: 'Employment Appeal Tribunal', courts: ['eat'] },
+};
+const KNOWN_COURTS = new Set(['uksc', 'ukpc', 'ewca/civ', 'ewca/crim', 'ewhc/ch', 'ewhc/comm', 'ewhc/kb', 'ewhc/qb', 'ewhc/tcc', 'ewhc/admin', 'ewhc/fam', 'ewhc/pat', 'ewhc/ipec', 'ewhc/admlty', 'ewhc/scco', 'ewhc/mercantile', 'ukut/tcc', 'ukut/iac', 'ukut/aac', 'ukut/lc', 'ukftt/tc', 'ukftt/grc', 'eat', 'ewcop', 'ewfc', 'ukiptrib']);
+export const validCourt = (c) => KNOWN_COURTS.has(String(c || '').toLowerCase().trim());
+export const courtFeedUrl = (courts, perPage = 40) =>
+  `${NA}/atom.xml?${(courts || []).filter(validCourt).map((c) => 'court=' + encodeURIComponent(String(c).toLowerCase().trim())).join('&')}&order=-date&per_page=${perPage}`;
+const decodeEnt = (s) => String(s || '').replace(/&amp;/g, '&').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+
+// Newest judgments from the given courts → { items: [{ title, url, citation, published, court }] }.
+export async function fetchCourtFeed(courts, { perPage = 40 } = {}) {
+  const valid = (courts || []).filter(validCourt);
+  if (!valid.length) return { error: 'no valid courts selected', items: [] };
+  const r = await fetchText(courtFeedUrl(valid, perPage), { timeoutMs: 20000 });
+  if (!r.body) return { error: r.status ? `HTTP ${r.status}` : 'court feed fetch failed', items: [] };
+  const items = [];
+  for (const e of r.body.split('<entry>').slice(1)) {
+    const title = decodeEnt((e.match(/<title>([^<]*)<\/title>/) || [])[1]).trim();
+    const link = (e.match(/<link href="(https:\/\/caselaw\.nationalarchives\.gov\.uk\/[^"]+)"/) || [])[1] || '';
+    const url = link ? naCanonical(link) : '';
+    const citation = ((e.match(/type="ukncn">([^<]*)</) || [])[1] || '').trim();
+    const published = (e.match(/<published>([^<]*)<\/published>/) || [])[1] || null;
+    const court = decodeEnt((e.match(/<author>\s*<name>([^<]*)<\/name>/) || [])[1]).trim();
+    if (title && url) items.push({ title, url, citation, published, court });
+  }
+  return { items };
+}
