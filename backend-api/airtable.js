@@ -476,16 +476,16 @@ function briefToText(b) {
       else if (l && (l.url || l.to || l.title || l.anchor)) lines.push('• ' + (l.anchor || l.title || l.from || '') + (l.url ? ' → ' + l.url : (l.to ? ' → ' + l.to : '')) + (l.reason ? ' — ' + l.reason : ''));
     });
   }
-  // Verified citations the writer MUST use exactly (and only these).
+  // Citations the writer MUST use exactly (and only these). Presented CLEANLY — no per-item
+  // "unverified/misstated" marks: the citation verifier has a high false-negative rate on
+  // well-known statutes (it flagged Insolvency Act 1986 s265 as "unverified"), and showing the
+  // writer a scary mark made it either hedge ("could not be verified") or DROP real, load-bearing
+  // law → thin/confusing articles. Verification stays an INTERNAL push-gate signal, not writer text.
   if (Array.isArray(b.citations) && b.citations.length) {
-    const vmap = new Map();
-    if (b.verification && Array.isArray(b.verification.checks)) for (const c of b.verification.checks) vmap.set(String(c.item || '').toLowerCase(), c.verdict);
-    lines.push('\nCITATIONS (use ONLY these — all checked; do not add un-cited cases/statutes):');
+    lines.push('\nCITATIONS (use ONLY these, exactly as written — do not add any case or statute that is not in this list):');
     b.citations.forEach((c) => {
       const label = [c.name, c.citation || c.section].filter(Boolean).join(' ');
-      const verd = vmap.get(label.toLowerCase());
-      const mark = verd === 'verified' ? ' ✓verified' : (verd ? ' ⚠' + verd : '');
-      lines.push('• ' + label + (c.proposition ? ' — ' + c.proposition : '') + (c.sourceUrl ? ' [' + c.sourceUrl + ']' : '') + mark);
+      lines.push('• ' + label + (c.proposition ? ' — ' + c.proposition : '') + (c.sourceUrl ? ' [' + c.sourceUrl + ']' : ''));
     });
   }
   // Points we could NOT verify: a WRITER INSTRUCTION, never article content. The old wording
