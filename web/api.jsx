@@ -140,8 +140,8 @@
     contentOpportunities(siteId, opts) { return engine("/content-opportunities", Object.assign({ siteId }, opts || {})); },
     contentOpportunitiesStart(siteId, opts) { return engine("/content-opportunities-start", Object.assign({ siteId }, opts || {})); },
     contentOpportunitiesStatus(siteId) { return engine("/content-opportunities-status", { siteId }); },
-    contentBrief(siteId, keyword, intent) { return engine("/content-brief", { siteId, keyword, intent }); },
-    contentBriefStart(siteId, keyword, intent) { return engine("/content-brief-start", { siteId, keyword, intent }); },
+    contentBrief(siteId, keyword, intent, opts) { return engine("/content-brief", Object.assign({ siteId, keyword, intent }, opts || {})); },
+    contentBriefStart(siteId, keyword, intent, opts) { return engine("/content-brief-start", Object.assign({ siteId, keyword, intent }, opts || {})); },
     contentBriefStatus(siteId) { return engine("/content-brief-status", { siteId }); },
     // Keyword Gap → article planning
     gapTitle(siteId, keyword, opts) { return engine("/gap-title", Object.assign({ siteId, keyword }, opts || {})); },

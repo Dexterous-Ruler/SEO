@@ -1895,11 +1895,24 @@ const routes = {
         internalLinkCandidates = [...pg, ...ps].map((r) => ({ title: (r.title?.rendered || '').replace(/&[a-z]+;/g, ' ').trim(), url: r.link })).filter((p) => p.title && p.url);
       } catch (e) {}
     }
+    // Rich-context inputs (Karim's manual path): paste a competitor URL to out-do + the court
+    // judgment (URL or full text). Supplying a judgment forces case-law structure + verification.
+    let competitor = null;
+    const compUrl = (body.competitorUrl && String(body.competitorUrl).trim()) || '';
+    if (compUrl) {
+      try { const pg = await chatbot.readPage(compUrl); if (pg && !pg.error && pg.text) competitor = { url: compUrl, title: pg.title || '', text: String(pg.text).slice(0, 6000) }; } catch (e) {}
+    }
+    const judgmentUrl = (body.judgmentUrl && String(body.judgmentUrl).trim()) || '';
+    const judgmentText = (body.judgmentText && String(body.judgmentText).trim()) || '';
+    const hasJudgment = !!(judgmentUrl || judgmentText);
+    const caseLaw = body.caseLaw != null ? !!body.caseLaw : (hasJudgment || isCaseLawTopic(body.keyword, 'blog'));
+    const verify = body.verify != null ? !!body.verify : ((site && isLegalSite(site)) || caseLaw);
     try {
       return await research.contentBrief({
         keyword: body.keyword, intent: body.intent,
         siteName: site && site.name, niche: (site && site.niche) || (site && site.stack && site.stack.type),
         excludeDomain, internalLinkCandidates, siteId: body.siteId, db: site && site.semrush_db, now: Date.now(),
+        competitor, caseLaw, verify, judgmentUrl, judgmentText,
       });
     } catch (e) { return { error: 'Brief generation failed: ' + e.message }; }
   },
@@ -4798,9 +4811,11 @@ const routes = {
     let market = marketFor(site.semrush_db);
     if (body.jurisdiction) { const c = semrush.COUNTRIES.find((x) => x.label.toLowerCase() === String(body.jurisdiction).toLowerCase()); if (c) market = marketFor(c.db); }
     // The competitor's own article (best-effort, external tiers) so the brief out-does it.
+    // Operator can override the auto-scanned sitemap link with the EXACT competitor URL to outrank.
     let competitor = null;
-    if (payload.link) {
-      try { const pg = await chatbot.readPage(payload.link); if (pg && !pg.error && pg.text) competitor = { url: payload.link, title: pg.title || opp.title, text: String(pg.text).slice(0, 6000) }; } catch (e) {}
+    const compUrl = (body.competitorUrl && String(body.competitorUrl).trim()) || payload.link;
+    if (compUrl) {
+      try { const pg = await chatbot.readPage(compUrl); if (pg && !pg.error && pg.text) competitor = { url: compUrl, title: pg.title || opp.title, text: String(pg.text).slice(0, 6000) }; } catch (e) {}
     }
     const excludeDomain = (site.url || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
     let internalLinkCandidates = [];
@@ -4814,11 +4829,16 @@ const routes = {
     // Legal content: read the judgment + Background/Issues/Decision/Impact for case law, and
     // VERIFY every cited case / statute / rule before it can be pushed (Karim's requirement).
     const suggestedType = payload.category || payload.suggestedType || 'blog';
-    const caseLaw = body.caseLaw != null ? !!body.caseLaw : isCaseLawTopic(opp.title, suggestedType);
+    // Operator can paste the exact court judgment (URL or full text). Supplying one forces case-law
+    // structure + verification (Karim: "add the court judgment URL as part of the flow").
+    const judgmentUrl = (body.judgmentUrl && String(body.judgmentUrl).trim()) || '';
+    const judgmentText = (body.judgmentText && String(body.judgmentText).trim()) || '';
+    const hasJudgment = !!(judgmentUrl || judgmentText);
+    const caseLaw = body.caseLaw != null ? !!body.caseLaw : (hasJudgment || isCaseLawTopic(opp.title, suggestedType));
     const verify = body.verify != null ? !!body.verify : (isLegalSite(site) || caseLaw);
     let r;
     try {
-      r = await research.contentBrief({ keyword, intent: opp.intent, siteName: site.name, niche: site.niche || (site.stack && site.stack.type), excludeDomain, internalLinkCandidates, siteId: body.siteId, db: market.db, now: Date.now(), competitor, caseLaw, verify });
+      r = await research.contentBrief({ keyword, intent: opp.intent, siteName: site.name, niche: site.niche || (site.stack && site.stack.type), excludeDomain, internalLinkCandidates, siteId: body.siteId, db: market.db, now: Date.now(), competitor, caseLaw, verify, judgmentUrl, judgmentText });
     } catch (e) { return { error: 'Brief research failed: ' + String((e && e.message) || e) }; }
     if (!r || r.error) return { error: (r && r.error) || 'Brief research failed.' };
     if (!r.brief || r.brief.error) return { error: 'Brief could not be structured — try again.' + (r.brief && r.brief._tail ? ' (output ended: …' + String(r.brief._tail).slice(-140).replace(/\s+/g, ' ') + ')' : '') };

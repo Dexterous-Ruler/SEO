@@ -584,18 +584,19 @@ export function judgmentExcerpt(text, budget = 7000) {
 // Perplexity grounded answer). Claude structures + writes the brief but must use
 // ONLY the supplied research — every fact ties to a provided source, nothing
 // invented. UK audience, UK English. Returns structured JSON.
-export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText }) {
+export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText, judgmentBudget = 7000 }) {
   const sources = (research.sources || []).map((s, i) => `[${i + 1}] ${s.title || ''} — ${s.url}`).join('\n');
   // Case law: the judgment is the primary source, so keep the general material short and give
   // the judgment room — a large judgment + 9k material + 5k output blew the 84s Claude timeout.
-  const material = (research.material || '').slice(0, caseLaw ? 3500 : 9000);
+  // A user-supplied judgment (bigger budget) gets more general material too — it's the high-value case.
+  const material = (research.material || '').slice(0, caseLaw ? (judgmentBudget > 7000 ? 5000 : 3500) : 9000);
   const links = (internalLinkCandidates || []).slice(0, 25).map((p) => `${p.title} → ${p.url}`).join('\n');
   const country = (market && market.country) || 'United Kingdom';
   const scope = (market && market.scope) ? market.scope + '\n\n' : '';
   const briefKey = caseLaw ? 'content.caseLawBrief' : 'content.brief';
   // Case law: inject the judgment (opening + conclusion) so Background/Issues/Decision come from the source.
   const judgeBlock = (caseLaw && judgmentText)
-    ? `\n\n=== JUDGMENT TEXT (opening + conclusion; base Background, Issues and Decision on THIS; capture the neutral citation, court, date and judges; take the OUTCOME from the conclusion) ===\n${judgmentExcerpt(judgmentText)}`
+    ? `\n\n=== JUDGMENT TEXT (opening + conclusion; base Background, Issues and Decision on THIS; capture the neutral citation, court, date and judges; take the OUTCOME from the conclusion) ===\n${judgmentExcerpt(judgmentText, judgmentBudget)}`
     : '';
   // Competitors screen: the brief must OUT-DO the competitor's own article (we read it).
   const compBlock = (competitor && competitor.text)

@@ -488,8 +488,17 @@ function briefToText(b) {
       lines.push('• ' + label + (c.proposition ? ' — ' + c.proposition : '') + (c.sourceUrl ? ' [' + c.sourceUrl + ']' : '') + mark);
     });
   }
-  if (Array.isArray(b.unverifiedClaims) && b.unverifiedClaims.length) { lines.push('\nDO NOT STATE AS FACT (could not be verified — omit or clearly caveat):'); b.unverifiedClaims.forEach((u) => lines.push('• ' + u)); }
-  if (b.verification && b.verification.status) lines.push('\nVERIFICATION: ' + b.verification.status.toUpperCase() + (b.verification.summary ? ' — ' + b.verification.summary : ''));
+  // Points we could NOT verify: a WRITER INSTRUCTION, never article content. The old wording
+  // ("omit OR clearly caveat") let the writer publish a hedge section ("statutes... were not
+  // confirmed in the verified sources") — exactly what Karim flagged. Now: omit silently, and
+  // never write that anything is unverified. No echo-able "could not be verified" phrasing here.
+  if (Array.isArray(b.unverifiedClaims) && b.unverifiedClaims.length) {
+    lines.push('\nWRITER INSTRUCTION — DO NOT WRITE ABOUT THE FOLLOWING AT ALL. Leave them out of the article entirely; never write a section, sentence, caveat or note saying anything was "unverified", "not confirmed", "could not be verified" or "not found in sources". Simply omit:');
+    b.unverifiedClaims.forEach((u) => lines.push('• ' + u));
+  }
+  // NOTE: the verification status/summary is an INTERNAL QA signal (used by the push gate) and is
+  // deliberately NOT written into the brief the writer receives — its summary text contains the
+  // literal phrase "could not be verified", which the writer was echoing into the published page.
   if (b.wordCount) lines.push('\nTarget length: ~' + b.wordCount + ' words');
   return lines.join('\n');
 }

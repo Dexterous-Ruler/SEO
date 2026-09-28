@@ -1972,6 +1972,12 @@ function CompetitorsScreen({ ctx }) {
   const [briefing,setBriefing] = useState("");      // id whose researched brief is being generated
   const [briefOpen,setBriefOpen] = useState({});    // id → brief panel open?
   const [briefData,setBriefData] = useState({});    // id → { brief, sources, briefFor, competitorRead, verification }
+  // Optional operator context for the NEXT brief on a topic: paste the exact court judgment
+  // (link or full text) + the competitor article to out-rank — Karim's manual path, made explicit.
+  const [advOpen,setAdvOpen] = useState({});        // id → judgment/competitor inputs panel open?
+  const [adv,setAdv] = useState({});                // id → { judgmentUrl, judgmentText, competitorUrl }
+  const setAdvField = (id,k,v)=> setAdv(a=>Object.assign({},a,{[id]:Object.assign({},a[id],{[k]:v})}));
+  const advOpts = (id)=>{ const a=adv[id]||{}; const o={}; if(a.judgmentUrl&&a.judgmentUrl.trim())o.judgmentUrl=a.judgmentUrl.trim(); if(a.judgmentText&&a.judgmentText.trim())o.judgmentText=a.judgmentText.trim(); if(a.competitorUrl&&a.competitorUrl.trim())o.competitorUrl=a.competitorUrl.trim(); return o; };
   const [blockedIds,setBlockedIds] = useState({});  // id → true when a push was blocked (citations unverified)
   const [types,setTypes] = useState({});            // item id → content type chosen before push
   const [busyId,setBusyId] = useState("");
@@ -2073,7 +2079,8 @@ function CompetitorsScreen({ ctx }) {
     setBriefing(it.id);
     ctx.toast("Researching a detailed brief for “"+String(it.title).slice(0,40)+"” — reading the competitor's page + live sources (~45s)…","teal");
     const jx = pushJx[0] || siteJx || undefined;
-    API.competitorBriefStart(s.id, it.id, jx?{ jurisdiction: jx }:{}).then(st=>{
+    const opts = Object.assign({}, jx?{ jurisdiction: jx }:{}, advOpts(it.id));
+    API.competitorBriefStart(s.id, it.id, opts).then(st=>{
       if(st && st.error){ ctx.toast(st.error,"clay"); setBriefing(""); resolve(null); return; }
       let polls=0;
       const poll=()=>{ API.competitorBriefStatus(s.id, it.id).then(r=>{
@@ -2135,6 +2142,30 @@ function CompetitorsScreen({ ctx }) {
     return <span title={ok?"Every cited case, statute and rule was checked against authoritative sources":"Some cited cases/statutes/rules couldn't be verified — open the brief to review"} style={{ fontSize:11.5, fontWeight:700, padding:"3px 8px", borderRadius:"var(--r-pill)", background:ok?"var(--t-50)":"var(--clay-bg)", color:ok?"var(--t-700)":"var(--clay)", boxShadow:"var(--neo-in)" }}>{ok?"Verified ✓":"⚠ Unverified"}</span>;
   };
   // Inline preview of the researched brief (what the writer will receive).
+  // Optional inputs panel: paste the court judgment (link or full text) + the competitor article
+  // to out-rank, then research the brief from THOSE (reliable primary source, like Karim's chat path).
+  const advPanel = (it)=>{
+    if(!advOpen[it.id]) return null;
+    const a = adv[it.id]||{};
+    const inp = { width:"100%", padding:"8px 10px", borderRadius:8, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5, color:"var(--ink)", boxSizing:"border-box" };
+    const lab = { fontSize:11.5, fontWeight:700, color:"var(--t-700)", margin:"8px 0 3px" };
+    const busy = briefing===it.id;
+    return (
+      <div style={{ margin:"0 4px 10px 22px", padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--surface)", boxShadow:"var(--neo-xs)" }}>
+        <div style={{ fontSize:12, color:"var(--muted)", marginBottom:2 }}>Give the writer the exact case papers — this is what made your best article good. All optional.</div>
+        <div style={lab}>Court judgment link <span style={{ color:"var(--muted)", fontWeight:500 }}>(paste the BAILII or caselaw.nationalarchives.gov.uk page for this case)</span></div>
+        <input style={inp} placeholder="https://caselaw.nationalarchives.gov.uk/…" value={a.judgmentUrl||""} onChange={e=>setAdvField(it.id,"judgmentUrl",e.target.value)} />
+        <div style={lab}>…or paste the judgment text <span style={{ color:"var(--muted)", fontWeight:500 }}>(if you have the full text)</span></div>
+        <textarea style={Object.assign({},inp,{minHeight:60, resize:"vertical", fontFamily:"inherit"})} placeholder="Paste the full judgment here…" value={a.judgmentText||""} onChange={e=>setAdvField(it.id,"judgmentText",e.target.value)} />
+        <div style={lab}>Competitor article to out-rank <span style={{ color:"var(--muted)", fontWeight:500 }}>(the exact page you want to beat)</span></div>
+        <input style={inp} placeholder="https://competitor.co.uk/their-article" value={a.competitorUrl||""} onChange={e=>setAdvField(it.id,"competitorUrl",e.target.value)} />
+        <div style={{ display:"flex", gap:8, marginTop:10, alignItems:"center" }}>
+          <NeoButton kind="primary" size="sm" disabled={busy} onClick={()=>{ ensureBrief(it).then(r=>{ if(r){ setBriefOpen(o=>Object.assign({},o,{[it.id]:true})); ctx.toast("Brief ready ✓ — "+((r.sources||[]).length)+" sources"+(r.judgmentRead?", judgment read":"")+(r.competitorRead?", competitor read":""),"teal"); loadItems(); } }); }}>{busy?"Researching…":(it.hasBrief?"Re-research with this":"Research brief with this")}</NeoButton>
+          <NeoButton kind="ghost" size="sm" disabled={busy} onClick={()=>setAdvOpen(o=>Object.assign({},o,{[it.id]:false}))}>Close</NeoButton>
+        </div>
+      </div>
+    );
+  };
   const briefPanel = (it)=>{
     const d = briefData[it.id]; if(!briefOpen[it.id] || !d || !d.brief) return null;
     const b = d.brief;
@@ -2372,6 +2403,7 @@ function CompetitorsScreen({ ctx }) {
                 ? <NeoButton kind="soft" size="sm" onClick={()=>setOpenCl(o=>Object.assign({},o,{[it.id]:!o[it.id]}))} title="Show the keyword clusters found around this topic">{it.clusterCount+" cluster"+(it.clusterCount===1?"":"s")+(openCl[it.id]?" ▴":" ▾")}</NeoButton>
                 : <NeoButton kind="soft" size="sm" icon={expanding===it.id?undefined:"sparkles"} disabled={!!expanding} onClick={()=>expand(it)} title="Find 3–5 keyword clusters around this competitor article so you can surround and out-rank it">{expanding===it.id?"Finding…":"Take over this topic"}</NeoButton>)}
               {it.status!=="dismissed" && <NeoButton kind="ghost" size="sm" disabled={briefing===it.id||busyId===it.id} onClick={()=>viewBrief(it)} title={it.hasBrief?"Show the researched brief that goes to the writer":"Research a detailed brief (competitor's page + live sources) before pushing"}>{briefing===it.id?"Researching…":(it.hasBrief?(briefOpen[it.id]?"Hide brief":"Brief ✓ · View"):"Research brief")}</NeoButton>}
+              {it.status!=="dismissed" && <NeoButton kind="ghost" size="sm" disabled={busyId===it.id} onClick={()=>setAdvOpen(o=>Object.assign({},o,{[it.id]:!o[it.id]}))} title="Paste the court judgment link/text and the competitor article to out-rank, then research the brief from those">{advOpen[it.id]?"Hide links":"＋ Judgment / competitor link"}</NeoButton>}
               {verifyChip(it)}
               {isPushed(it.status) && <span style={{ fontSize:12, fontWeight:700, color:"var(--t-700)", background:"var(--t-50)", padding:"5px 10px", borderRadius:"var(--r-pill)" }}>Pushed ✓</span>}
               {it.status==="dismissed" && <span style={{ fontSize:12, fontWeight:700, color:"var(--muted)", background:"var(--bg)", padding:"5px 10px", borderRadius:"var(--r-pill)", boxShadow:"var(--neo-in)" }}>Hidden</span>}
@@ -2381,6 +2413,7 @@ function CompetitorsScreen({ ctx }) {
               {it.status==="scored" && <NeoButton kind="ghost" size="sm" disabled={busyId===it.id} onClick={()=>hide(it)} title="Not interested — hide it">Hide</NeoButton>}
               {it.status==="dismissed" && <NeoButton kind="ghost" size="sm" disabled={busyId===it.id} onClick={()=>unhide(it)}>Unhide</NeoButton>}
             </div>
+            {advPanel(it)}
             {briefPanel(it)}
             {clusterPanel(it)}
             </React.Fragment>
