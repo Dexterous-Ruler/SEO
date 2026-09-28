@@ -15,29 +15,11 @@ import * as claude from './claude.js';
 import { UK } from './uk.js';
 import { marketFor } from './market.js';
 import { P, modelFor, tempFor, geoFor } from './prompts.js';
+import { resolveJudgment } from './judgments.js';
 // Prepend the site's niche/context to a Perplexity system prompt so grounded
 // research stays on-niche (the same off-niche fix applied to trending).
 const withNiche = (base, ctx) => (ctx ? `=== THIS SITE'S NICHE & CONTEXT (keep findings strictly relevant to this) ===\n${ctx}\n\n${base}` : base);
 const mt = (key, fallbackModel) => ({ model: modelFor(key) || fallbackModel, temperature: tempFor(key) != null ? tempFor(key) : undefined });
-
-// Bounded plain fetch → readable text. Fallback judgment reader for legal sources
-// (BAILII, legislation.gov.uk) that Tavily sometimes can't extract. Strips markup,
-// drops obvious page chrome; 20s cap so it never stalls a brief request.
-async function fetchReadable(url) {
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), 20000);
-  try {
-    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SentinelBot/1.0)' }, signal: ctl.signal });
-    if (!r.ok) return '';
-    const html = await r.text();
-    return html
-      .replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<nav[\s\S]*?<\/nav>|<footer[\s\S]*?<\/footer>/gi, '')
-      .replace(/<\/(p|div|h[1-6]|li|tr|section|article|br)\s*>/gi, '\n')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;|&rsquo;/g, "'").replace(/&quot;|&ldquo;|&rdquo;/g, '"')
-      .replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim();
-  } catch (e) { return ''; } finally { clearTimeout(t); }
-}
 
 // ---- source hygiene --------------------------------------------------------
 const domainOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return u || ''; } };
@@ -127,7 +109,10 @@ export async function gather(topic, { recency = 'month', excludeDomains, include
 
 // Authoritative UK legal sources — judgments, legislation, official guidance. Used to bias
 // research (and to check verification sources) for case-law / legal briefs.
-const LEGAL_DOMAINS = ['bailii.org', 'caselaw.nationalarchives.gov.uk', 'legislation.gov.uk', 'judiciary.uk', 'supremecourt.uk', 'gov.uk', 'nationalarchives.gov.uk', 'parliament.uk'];
+// England & Wales judgment + legislation sources (research bias + verifier filter; both cap at 10).
+// gov.uk also covers caselaw.nationalarchives.gov.uk, legislation.gov.uk and the tribunal-decision
+// finders. BAILII stays for DISCOVERY only — judgments.js reads BAILII links via the National Archives.
+const LEGAL_DOMAINS = ['caselaw.nationalarchives.gov.uk', 'bailii.org', 'legislation.gov.uk', 'judiciary.uk', 'supremecourt.uk', 'casemine.com', 'jcpc.uk', 'gov.uk', 'parliament.uk'];
 const isLegalSource = (url) => { const d = domainOf(url); return LEGAL_DOMAINS.some((x) => d === x || d.endsWith('.' + x) || d.endsWith(x)); };
 
 // Research-backed content brief for a keyword/cluster. Tavily+Perplexity gather,
@@ -137,7 +122,7 @@ const isLegalSource = (url) => { const d = domainOf(url); return LEGAL_DOMAINS.s
 // `caseLaw` → Background/Issues/Decision/Impact structure + read the judgment (extract the
 // full text of a judgment URL) + bias research to legal sources.
 // `verify` → after the brief, run legal citation verification (verifyLegal) and attach it.
-export async function contentBrief({ keyword, intent, siteName, niche, excludeDomain, internalLinkCandidates, siteId, db, now = 0, competitor, caseLaw = false, verify = false, judgmentUrl = '', judgmentText = '' }) {
+export async function contentBrief({ keyword, title = '', intent, siteName, niche, excludeDomain, internalLinkCandidates, siteId, db, now = 0, competitor, caseLaw = false, verify = false, judgmentUrl = '', judgmentText = '' }) {
   if (!perplexity.hasKey() && !tavily.hasKey()) return { error: 'No research engine configured — add PERPLEXITY_API_KEY and/or TAVILY_API_KEY.' };
   const market = marketFor(db);
   // A user-supplied judgment (URL or pasted text) is the reliable primary source Karim's
@@ -154,29 +139,33 @@ export async function contentBrief({ keyword, intent, siteName, niche, excludeDo
   if (!research.summary && !research.material) return { error: 'Research returned nothing for this keyword.', engines: research.engines };
 
   // Case law: read the FULL judgment so Background/Issues/Decision come from the PRIMARY source,
-  // not commentary snippets. Priority: (1) pasted judgment text, (2) the exact URL the operator
-  // gave, (3) auto-discover the best legal source from the research. This is Karim's key ask —
-  // "add the court judgment URL as part of the flow" — his manual path always fed the judgment.
+  // not commentary snippets. Pasted text wins; otherwise judgments.resolveJudgment FINDS it
+  // (Karim: "can it not find the judgment itself?"): pasted link → judgment hyperlinked in the
+  // competitor article → neutral citation → National Archives party-name search → research
+  // sources → CaseMine (partial). BAILII blocks bots, so BAILII links are read via their
+  // National Archives copy instead.
   let judgment = String(judgmentText || '').trim();
-  let userSuppliedJudgment = !!judgment;
-  if (!judgment && caseLaw) {
-    try {
-      const chosen = String(judgmentUrl || '').trim()
-        || (research.sources || []).map((s) => s.url).find((u) => /bailii\.org|caselaw\.nationalarchives|judiciary\.uk|supremecourt|legislation\.gov\.uk/i.test(String(u || '')));
-      if (chosen) {
-        let txt = '';
-        if (tavily.hasKey()) { try { const ex = await tavily.extract([chosen], { depth: 'advanced' }); txt = (ex[0] && ex[0].content) || ''; } catch (e) {} }
-        if (!txt) txt = await fetchReadable(chosen).catch(() => '');   // BAILII etc. sometimes need a plain fetch
-        judgment = txt;
-        if (judgment) { research.judgmentUrl = chosen; userSuppliedJudgment = !!String(judgmentUrl || '').trim(); }
-      }
-    } catch (e) { /* best-effort; the brief still uses the gathered material */ }
-  } else if (judgment) {
+  let judgmentFull = !!judgment;
+  let judgmentInfo = null;
+  if (judgment) {
     research.judgmentUrl = String(judgmentUrl || '').trim() || null;
+    judgmentInfo = { found: 'pasted text' };
+  } else if (caseLaw) {
+    try {
+      const j = await resolveJudgment({
+        title: title || keyword, keyword, competitor, userUrl: String(judgmentUrl || '').trim(),
+        researchSources: research.sources, researchText: `${research.summary || ''}\n${research.material || ''}`,
+      });
+      if (j && j.text) {
+        judgment = j.text; judgmentFull = !j.partial; research.judgmentUrl = j.url;
+        judgmentInfo = { found: j.found, via: j.via, citation: j.citation, partial: !!j.partial };
+      } else judgmentInfo = { found: null, tried: (j && j.tried || []).map((t) => t.via) };
+    } catch (e) { /* best-effort; the brief still uses the gathered material */ }
   }
 
-  const brief = await claude.synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText: judgment, judgmentBudget: userSuppliedJudgment ? 12000 : 7000 });
-  const out = { keyword, intent, brief, country: market.country, sources: research.sources, engines: research.engines, researchCost: research.cost, caseLaw, judgmentRead: !!judgment, judgmentUrl: research.judgmentUrl || null };
+  // A full primary-source judgment gets the bigger budget (worked examples + the decision survive).
+  const brief = await claude.synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText: judgment, judgmentBudget: judgmentFull ? 12000 : 7000 });
+  const out = { keyword, intent, brief, country: market.country, sources: research.sources, engines: research.engines, researchCost: research.cost, caseLaw, judgmentRead: !!judgment, judgmentUrl: research.judgmentUrl || null, judgment: judgmentInfo };
 
   // Verify every cited case / statute / rule BEFORE the brief is allowed to push.
   if (verify && brief && !brief.error) {

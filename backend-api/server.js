@@ -1909,7 +1909,7 @@ const routes = {
     const verify = body.verify != null ? !!body.verify : ((site && isLegalSite(site)) || caseLaw);
     try {
       return await research.contentBrief({
-        keyword: body.keyword, intent: body.intent,
+        keyword: body.keyword, title: body.title || body.keyword, intent: body.intent,
         siteName: site && site.name, niche: (site && site.niche) || (site && site.stack && site.stack.type),
         excludeDomain, internalLinkCandidates, siteId: body.siteId, db: site && site.semrush_db, now: Date.now(),
         competitor, caseLaw, verify, judgmentUrl, judgmentText,
@@ -4803,7 +4803,7 @@ const routes = {
     const payload = (opp.payload && typeof opp.payload === 'object') ? opp.payload : {};
     const stored = payload.brief && typeof payload.brief === 'object' && !payload.brief.error ? payload.brief : null;
     if (stored && (body.existing || !body.regenerate)) {
-      return { brief: stored, sources: payload.briefSources || [], briefFor: payload.briefFor || null, competitorRead: !!payload.briefCompetitorRead, caseLaw: !!payload.briefCaseLaw, judgmentRead: !!payload.briefJudgmentRead, verification: payload.briefVerification || stored.verification || null, existing: true };
+      return { brief: stored, sources: payload.briefSources || [], briefFor: payload.briefFor || null, competitorRead: !!payload.briefCompetitorRead, caseLaw: !!payload.briefCaseLaw, judgmentRead: !!payload.briefJudgmentRead, judgmentUrl: payload.briefJudgmentUrl || null, judgment: payload.briefJudgment || null, verification: payload.briefVerification || stored.verification || null, existing: true };
     }
     if (body.existing) return { error: 'No brief stored yet.' };
     const site = await db.getSite(body.siteId).catch(() => null);
@@ -4838,7 +4838,7 @@ const routes = {
     const verify = body.verify != null ? !!body.verify : (isLegalSite(site) || caseLaw);
     let r;
     try {
-      r = await research.contentBrief({ keyword, intent: opp.intent, siteName: site.name, niche: site.niche || (site.stack && site.stack.type), excludeDomain, internalLinkCandidates, siteId: body.siteId, db: market.db, now: Date.now(), competitor, caseLaw, verify, judgmentUrl, judgmentText });
+      r = await research.contentBrief({ keyword, title: opp.title, intent: opp.intent, siteName: site.name, niche: site.niche || (site.stack && site.stack.type), excludeDomain, internalLinkCandidates, siteId: body.siteId, db: market.db, now: Date.now(), competitor, caseLaw, verify, judgmentUrl, judgmentText });
     } catch (e) { return { error: 'Brief research failed: ' + String((e && e.message) || e) }; }
     if (!r || r.error) return { error: (r && r.error) || 'Brief research failed.' };
     if (!r.brief || r.brief.error) return { error: 'Brief could not be structured — try again.' + (r.brief && r.brief._tail ? ' (output ended: …' + String(r.brief._tail).slice(-140).replace(/\s+/g, ' ') + ')' : '') };
@@ -4846,9 +4846,9 @@ const routes = {
     const verification = r.verification || null;
     await engine.updateOpp(opp.id, { payload: Object.assign({}, payload, {
       brief: r.brief, briefSources, briefAt: new Date().toISOString(), briefFor: market.country, briefCompetitorRead: !!competitor, briefEngines: r.engines || null,
-      briefCaseLaw: caseLaw, briefJudgmentRead: !!r.judgmentRead, briefVerification: verification, briefVerified: verification ? verification.status === 'verified' : null,
+      briefCaseLaw: caseLaw, briefJudgmentRead: !!r.judgmentRead, briefJudgmentUrl: r.judgmentUrl || null, briefJudgment: r.judgment || null, briefVerification: verification, briefVerified: verification ? verification.status === 'verified' : null,
     }) }).catch(() => {});
-    return { brief: r.brief, sources: briefSources, briefFor: market.country, competitorRead: !!competitor, engines: r.engines, caseLaw, judgmentRead: !!r.judgmentRead, judgmentUrl: r.judgmentUrl || null, verification };
+    return { brief: r.brief, sources: briefSources, briefFor: market.country, competitorRead: !!competitor, engines: r.engines, caseLaw, judgmentRead: !!r.judgmentRead, judgmentUrl: r.judgmentUrl || null, judgment: r.judgment || null, verification };
   },
   // Background wrapper — research + several Claude calls can run past the ~95s request
   // cap (the Content Plan brief 504'd at 102s on a slow keyword). Start → poll, keyed by id.

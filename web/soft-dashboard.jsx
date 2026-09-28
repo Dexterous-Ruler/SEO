@@ -2152,7 +2152,7 @@ function CompetitorsScreen({ ctx }) {
     const busy = briefing===it.id;
     return (
       <div style={{ margin:"0 4px 10px 22px", padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--surface)", boxShadow:"var(--neo-xs)" }}>
-        <div style={{ fontSize:12, color:"var(--muted)", marginBottom:2 }}>Give the writer the exact case papers — this is what made your best article good. All optional.</div>
+        <div style={{ fontSize:12, color:"var(--muted)", marginBottom:2 }}>The court judgment is found automatically (National Archives, the competitor's own links, CaseMine). Only paste it here if it wasn't found or it picked the wrong case. All optional.</div>
         <div style={lab}>Court judgment link <span style={{ color:"var(--muted)", fontWeight:500 }}>(paste the BAILII or caselaw.nationalarchives.gov.uk page for this case)</span></div>
         <input style={inp} placeholder="https://caselaw.nationalarchives.gov.uk/…" value={a.judgmentUrl||""} onChange={e=>setAdvField(it.id,"judgmentUrl",e.target.value)} />
         <div style={lab}>…or paste the judgment text <span style={{ color:"var(--muted)", fontWeight:500 }}>(if you have the full text)</span></div>
@@ -2175,6 +2175,19 @@ function CompetitorsScreen({ ctx }) {
     return (
       <div style={{ margin:"0 4px 10px 22px", padding:"10px 12px", borderRadius:"var(--r-md)", background:"var(--surface)", boxShadow:"var(--neo-xs)", fontSize:12.5, lineHeight:1.5 }}>
         <div style={{ fontSize:11.5, color:"var(--muted)", marginBottom:4 }}>Researched brief{d.briefFor?(" for "+d.briefFor):""} · {(d.sources||[]).length} live source{(d.sources||[]).length===1?"":"s"}{d.competitorRead?" · competitor's page read":""}{d.caseLaw?(d.judgmentRead?" · judgment read":" · case-law"):""} — this is what the writer receives.</div>
+        {d.caseLaw && (()=>{
+          // How the court judgment was found (or a plain next step when it wasn't).
+          const j = d.judgment || {};
+          const how = (f)=>{ f=String(f||""); if(/pasted text/.test(f)) return "from the text you pasted"; if(/pasted link/.test(f)) return "from the link you pasted"; if(/competitor/.test(f)) return "from the link in the competitor's article"; if(/citation/.test(f)) return "from the case citation"; if(/National Archives/.test(f)) return "by searching the National Archives"; if(/research/.test(f)) return "in the research sources"; if(/CaseMine/.test(f)) return "on CaseMine"; return ""; };
+          if(d.judgmentRead) return (
+            <div style={{ fontSize:12, marginBottom:6, color:"var(--t-700)", fontWeight:600 }}>
+              ✓ Court judgment read{j.citation?(" — "+j.citation):""}{how(j.found)?(", found "+how(j.found)):""}
+              {d.judgmentUrl && <a href={d.judgmentUrl} target="_blank" rel="noopener noreferrer" style={{ marginLeft:6, color:"var(--t-700)" }}>open ↗</a>}
+              {j.partial && <span style={{ color:"var(--gold)", fontWeight:600 }}> · only part of it (the rest is behind a sign-up wall) — paste the full judgment link for a complete brief</span>}
+            </div>
+          );
+          return <div style={{ fontSize:12, marginBottom:6, color:"var(--gold)", fontWeight:600 }}>⚠ Couldn't find the court judgment automatically — use “＋ Judgment / competitor link” to paste it, then re-research.</div>;
+        })()}
         {b.title && <div style={{ fontWeight:800, color:"var(--ink)" }}>{b.title}</div>}
         {b.angle && <div style={{ marginTop:4 }}><b>Angle:</b> {b.angle}</div>}
         {cl && (
