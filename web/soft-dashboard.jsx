@@ -2091,14 +2091,22 @@ function N8nScreen({ ctx }){
    Karim's spec (plain English): save competitor websites/sitemaps so I can come back to
    them; scan what they publish; see each topic with where it came from; pick the content
    type; push it → it's marked done; everything stays here so I can track done vs not. */
-/* Westlaw UK shortcut — Karim checks cases in the firm's own subscription and feeds the right
-   ones in by hand (AI chat / a topic's judgment box). The system never uses his login.
-   Legal sites only (every connected site except GoodFor). */
+/* Case-law shortcuts — Karim checks cases and feeds the right ones in by hand (AI chat / a
+   topic's judgment box). The National Archives (Find Case Law) is the free, official source the
+   system itself reads judgments from; Westlaw UK is the firm's own subscription (the system never
+   uses his login). Legal sites only (every connected site except GoodFor). */
 const WESTLAW_URL = "https://uk.westlaw.com/";
+const NATIONAL_ARCHIVES_URL = "https://caselaw.nationalarchives.gov.uk/";
+const naSearchUrl = (q)=> "https://caselaw.nationalarchives.gov.uk/search?query="+encodeURIComponent(String(q||""));
 function isLegalSiteUI(site){ const n=((site&&site.name)||"")+" "+((site&&site.url)||""); return /legal|visa|settlement|\bila\b|solicitor|\blaw\b|lawyer/i.test(n) && !/good\s?for/i.test(n); }
-function WestlawLink(){
-  return <a href={WESTLAW_URL} target="_blank" rel="noopener noreferrer" title="Open Westlaw UK (sign in with your own account)"
-    style={{ display:"inline-flex", alignItems:"center", gap:5, padding:"5px 12px", borderRadius:"var(--r-pill)", background:"var(--surface)", boxShadow:"var(--neo-xs)", color:"var(--t-700)", fontWeight:700, fontSize:12.5, textDecoration:"none", whiteSpace:"nowrap" }}>Westlaw UK ↗</a>;
+const shortcutPill = { display:"inline-flex", alignItems:"center", gap:5, padding:"5px 12px", borderRadius:"var(--r-pill)", background:"var(--surface)", boxShadow:"var(--neo-xs)", color:"var(--t-700)", fontWeight:700, fontSize:12.5, textDecoration:"none", whiteSpace:"nowrap" };
+function CaseLawShortcuts(){
+  return (
+    <span style={{ display:"inline-flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+      <a href={NATIONAL_ARCHIVES_URL} target="_blank" rel="noopener noreferrer" title="The National Archives — Find Case Law: the official, free home of judgments (no sign-in)" style={shortcutPill}>National Archives ↗</a>
+      <a href={WESTLAW_URL} target="_blank" rel="noopener noreferrer" title="Open Westlaw UK (sign in with your own account)" style={shortcutPill}>Westlaw UK ↗</a>
+    </span>
+  );
 }
 
 function CompetitorsScreen({ ctx }) {
@@ -2318,9 +2326,12 @@ function CompetitorsScreen({ ctx }) {
       <div style={{ margin:"0 4px 10px 22px", padding:"12px 14px", borderRadius:"var(--r-md)", background:"var(--surface)", boxShadow:"var(--neo-xs)" }}>
         <div style={{ fontSize:12, color:"var(--muted)", marginBottom:2 }}>The court judgment is found automatically (the National Archives, and links in the competitor's own article). Paste it here if it wasn't found, it picked the wrong case, or it's an older case the National Archives doesn't hold. All optional.</div>
         {legalSite && (
-          <div style={{ margin:"8px 0 2px" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap", margin:"8px 0 2px", fontSize:12 }}>
+            <span style={{ color:"var(--muted)", fontWeight:600 }}>Look it up:</span>
+            <a href={naSearchUrl(caseQuery(it.title))} target="_blank" rel="noopener noreferrer" title={"Search the National Archives for “"+caseQuery(it.title)+"”"}
+              style={{ padding:"4px 10px", borderRadius:"var(--r-pill)", background:"var(--bg)", boxShadow:"var(--neo-xs)", color:"var(--t-700)", fontWeight:700, fontSize:12, textDecoration:"none" }}>National Archives ↗</a>
             <button onClick={()=>lookUpWestlaw(it.title)} title={"Copies “"+caseQuery(it.title)+"” and opens Westlaw UK — paste it into the search box"}
-              style={{ padding:"4px 10px", borderRadius:"var(--r-pill)", border:"none", cursor:"pointer", background:"var(--bg)", boxShadow:"var(--neo-xs)", color:"var(--t-700)", fontWeight:700, fontSize:12 }}>Look it up on Westlaw ↗</button>
+              style={{ padding:"4px 10px", borderRadius:"var(--r-pill)", border:"none", cursor:"pointer", background:"var(--bg)", boxShadow:"var(--neo-xs)", color:"var(--t-700)", fontWeight:700, fontSize:12 }}>Westlaw UK ↗</button>
           </div>
         )}
         <div style={lab}>Court judgment link <span style={{ color:"var(--muted)", fontWeight:500 }}>(paste the BAILII or caselaw.nationalarchives.gov.uk page for this case)</span></div>
@@ -2456,7 +2467,7 @@ function CompetitorsScreen({ ctx }) {
       </PageHead>
       {legalSite && (
         <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", margin:"-6px 0 14px", fontSize:12.5, color:"var(--muted)" }}>
-          <WestlawLink />
+          <CaseLawShortcuts />
           <span>Check cases there, then paste the right ones into the AI chat or a topic's “＋ Judgment / competitor link”.</span>
         </div>
       )}
@@ -6732,7 +6743,7 @@ function ChatScreen({ ctx }) {
           <p style={{ margin:"6px 0 0", fontSize:14, color:"var(--muted)" }}>Connected to your live data — audits, keywords, gaps, AI visibility.</p>
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-          {isLegalSiteUI(active) && <WestlawLink />}
+          {isLegalSiteUI(active) && <CaseLawShortcuts />}
           <span style={{ fontSize:12.5, fontWeight:700, color:"var(--muted)" }}>Working on</span>
           <div style={{ position:"relative" }}>
             <select value={chatSite||""} onChange={e=>setChatSite(e.target.value)}
