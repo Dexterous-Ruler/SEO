@@ -406,7 +406,12 @@ export function canonicalChoice(value, choices) {
 export function mapArticleBrief(cluster, brief, briefField, fieldSet, category, market) {
   const c = cluster || {};
   const b = (brief && typeof brief === 'object') ? brief : {};
-  const title = b.title || c.suggestedTitle || c.label || c.primaryKeyword || c.keyword || '';
+  // A site's own brief schema can nest these (Fast ILA: titles_meta.h1Primary / meta_description,
+  // serp_competitor_analysis.outrank_angle) — without the fallback the Title was the raw keyword.
+  const h1 = b.title || pickBriefString(b, /^(h1|h1_?primary|primary_?h1|h1_?title)$/i);
+  const metaDesc = b.metaDescription || pickBriefString(b, /^meta_?description$/i);
+  const angle = b.angle || pickBriefString(b, /^outrank_?angle$/i);
+  const title = h1 || c.suggestedTitle || c.label || c.primaryKeyword || c.keyword || '';
   const keyword = c.primaryKeyword || c.keyword || b.title || title;
   if (!title && !keyword) return null;
   // Prefer the full generated brief; otherwise fall back to the cluster's own
@@ -424,9 +429,9 @@ export function mapArticleBrief(cluster, brief, briefField, fieldSet, category, 
   if (market && market.country) { row.Jurisdiction = market.country; row.Language = market.language || 'English'; }
   // Content type in the field the go-legal.ai multilingual writer reads ("Type of Article").
   { const toa = typeOfArticleFor(category); if (toa) row['Type of Article'] = toa; }
-  if (b.angle) row['Goal of Article'] = b.angle;
+  if (angle) row['Goal of Article'] = angle;
   // Description: the generated meta when we have one, else a synthesised summary — never blank.
-  row.Description = b.metaDescription || summaryFor(c, title);
+  row.Description = metaDesc || summaryFor(c, title);
   if (!row.Description) delete row.Description;
   if (planText) {
     if (briefField && briefField !== 'Description') row[briefField] = planText;
@@ -499,12 +504,24 @@ function briefToText(b) {
     });
   }
   if (Array.isArray(b.keyFacts) && b.keyFacts.length) { lines.push('\nKEY FACTS:'); b.keyFacts.forEach((f) => lines.push(f && typeof f === 'object' ? (f.fact ? `• ${f.fact} [${f.source}]` : '• ' + flatLine(f)) : '• ' + f)); }
-  if (Array.isArray(b.faqs) && b.faqs.length) { lines.push('\nFAQ:'); b.faqs.forEach((f) => lines.push(f && typeof f === 'object' ? `Q: ${f.q || f.question || ''}\nA: ${f.a || f.answer || ''}` : String(f))); }
+  if (Array.isArray(b.faqs) && b.faqs.length) {
+    lines.push('\nFAQ:');
+    b.faqs.forEach((f) => {
+      if (!f || typeof f !== 'object') { lines.push(String(f)); return; }
+      // A site schema may give "answer guidance" instead of an answer — keep whatever it gave.
+      const a = f.a || f.answer || flatLine(Object.fromEntries(Object.entries(f).filter(([k]) => !['q', 'question', 'query'].includes(k))));
+      lines.push(`Q: ${f.q || f.question || f.query || ''}\nA: ${a}`);
+    });
+  }
   if (Array.isArray(b.internalLinks) && b.internalLinks.length) {
     lines.push('\nINTERNAL LINKS (link to these existing pages):');
     b.internalLinks.forEach((l) => {
       if (typeof l === 'string') lines.push('• ' + l);
-      else if (l && (l.url || l.to || l.title || l.anchor)) lines.push('• ' + (l.anchor || l.title || l.from || '') + (l.url ? ' → ' + l.url : (l.to ? ' → ' + l.to : '')) + (l.reason ? ' — ' + l.reason : ''));
+      else if (l && (l.url || l.to || l.title || l.anchor)) {
+        // The URL may sit under a site schema's own name ("target_url", "href"…).
+        const u = l.url || l.to || l.target_url || l.targetUrl || l.href || l.link || Object.values(l).find((v) => typeof v === 'string' && /^(https?:\/\/|\/)\S*$/.test(v)) || '';
+        lines.push('• ' + (l.anchor || l.title || l.from || '') + (u ? ' → ' + u : '') + (l.reason ? ' — ' + l.reason : (l.placement ? ' — ' + l.placement : '')));
+      }
     });
   }
   // Citations the writer MUST use exactly (and only these). Presented CLEANLY — no per-item
@@ -545,6 +562,23 @@ function briefToText(b) {
   // A site's brief prompt names its inputs as {{APPROVED_FACTS}}-style placeholders, which the
   // model then cites as if they were sources ("[{{APPROVED_FACTS}}]") — write them as plain words.
   return lines.join('\n').replace(/\{\{\s*([A-Z][A-Z0-9_]*)\s*\}\}/g, (m, name) => name.toLowerCase().replace(/_/g, ' '));
+}
+// First non-empty string under a key matching `re`, searched breadth-first up to 2 levels deep
+// (a site schema may nest the H1 / meta description / angle inside its own sections).
+function pickBriefString(b, re) {
+  let level = [b];
+  for (let depth = 0; depth < 3 && level.length; depth++) {
+    const next = [];
+    for (const o of level) {
+      if (!o || typeof o !== 'object' || Array.isArray(o)) continue;
+      for (const [k, v] of Object.entries(o)) {
+        if (re.test(k) && typeof v === 'string' && v.trim()) return v.trim();
+        if (v && typeof v === 'object' && !Array.isArray(v)) next.push(v);
+      }
+    }
+    level = next;
+  }
+  return '';
 }
 // Keys briefToText prints explicitly (or must never print) — the generic pass skips them.
 const BRIEF_HANDLED = new Set(['title', 'metaDescription', 'intent', 'format', 'angle', 'caseLaw', 'wordCount', 'operatorNotes', 'sources', 'verification', 'error']);
