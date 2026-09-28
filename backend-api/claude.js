@@ -616,7 +616,7 @@ export function judgmentExcerpt(text, budget = 7000) {
 // Perplexity grounded answer). Claude structures + writes the brief but must use
 // ONLY the supplied research — every fact ties to a provided source, nothing
 // invented. UK audience, UK English. Returns structured JSON.
-export async function synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText, judgmentBudget = 7000, operatorNotes = '' }) {
+export async function synthesizeContentBrief({ keyword, title = '', intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText, judgmentBudget = 7000, operatorNotes = '' }) {
   const sources = (research.sources || []).map((s, i) => `[${i + 1}] ${s.title || ''} — ${s.url}`).join('\n');
   // Case law: the judgment is the primary source, so keep the general material short and give
   // the judgment room — a large judgment + 9k material + 5k output blew the 84s Claude timeout.
@@ -642,7 +642,14 @@ export async function synthesizeContentBrief({ keyword, intent, siteName, niche,
   // Today's date: without it the model guessed the year from its training (a Sept-2026 French brief
   // was titled "… en 2025" while others said 2026).
   const today = new Date().toISOString().slice(0, 10);
-  const userMsg = `${scope}TODAY'S DATE: ${today} — any year in the title, meta or "in <year>" wording must be the current year (${today.slice(0, 4)}); dated facts keep their real dates.\nTARGET MARKET: ${country}\nKEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}${judgeBlock}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}${compBlock}${opBlock}\n\nWrite the ${country} ${caseLaw ? 'CASE-LAW brief (Background / Issues / Decision / Impact) — every case and statute in "citations" must be real and sourced from the research; anything you cannot source goes in "unverifiedClaims", never stated as fact' : 'content brief'} as JSON.\n\nThe numbered SOURCES list above is attached to the brief automatically: cite sources by number [n], and wherever your format asks for a consolidated source list give only the numbers — never re-type the whole list of titles and URLs.`;
+  // The topic the operator actually picked (a Content Engine / competitor / news title). Without it
+  // the brief followed the bare cluster keyword: "Terms and Conditions Templates…" (keyword
+  // "agreement") came back as a generic "Agreements in Germany" brief.
+  const squash = (s) => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  const topicLine = title && squash(title) !== squash(keyword)
+    ? `TOPIC (what the operator chose to publish — the brief must be about THIS; if it names another country, adapt it to ${country}; the keyword is the search term to rank for): ${String(title).slice(0, 300)}\n`
+    : '';
+  const userMsg = `${scope}TODAY'S DATE: ${today} — any year in the title, meta or "in <year>" wording must be the current year (${today.slice(0, 4)}); dated facts keep their real dates.\nTARGET MARKET: ${country}\n${topicLine}KEYWORD: ${keyword}\nINTENT: ${intent || ''}\nSITE: ${siteName || ''}  NICHE: ${niche || ''}\n\n=== GROUNDED SUMMARY ===\n${research.summary || ''}\n\n=== SOURCE MATERIAL (excerpts) ===\n${material}${judgeBlock}\n\n=== SOURCES ===\n${sources}\n\n=== INTERNAL-LINK CANDIDATES (your real pages) ===\n${links || '(none)'}${compBlock}${opBlock}\n\nWrite the ${country} ${caseLaw ? 'CASE-LAW brief (Background / Issues / Decision / Impact) — every case and statute in "citations" must be real and sourced from the research; anything you cannot source goes in "unverifiedClaims", never stated as fact' : 'content brief'} as JSON.\n\nThe numbered SOURCES list above is attached to the brief automatically: cite sources by number [n], and wherever your format asks for a consolidated source list give only the numbers — never re-type the whole list of titles and URLs.`;
   // Strip ```json fences, slice the outer object, parse. null on failure (truncated JSON).
   const parse = (t) => {
     let s = String(t || '').trim();

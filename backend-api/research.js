@@ -165,7 +165,7 @@ export async function contentBrief({ keyword, title = '', intent, siteName, nich
 
   // A full primary-source judgment gets the bigger budget (worked examples + the decision survive).
   const notes = String(operatorNotes || '').trim();
-  const brief = await claude.synthesizeContentBrief({ keyword, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText: judgment, judgmentBudget: judgmentFull ? 12000 : 7000, operatorNotes: notes });
+  const brief = await claude.synthesizeContentBrief({ keyword, title, intent, siteName, niche, research, internalLinkCandidates, siteId, market, competitor, caseLaw, judgmentText: judgment, judgmentBudget: judgmentFull ? 12000 : 7000, operatorNotes: notes });
   // The operator's own brief (AI chat / AI-visibility gap / news hook) rides along VERBATIM so the
   // writer gets it untouched on top of the researched, verified structure (briefToText prints it).
   if (notes && brief && typeof brief === 'object' && !brief.error) brief.operatorNotes = notes.slice(0, 12000);
