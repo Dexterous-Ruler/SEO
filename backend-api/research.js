@@ -122,6 +122,7 @@ const isLegalSource = (url) => { const d = domainOf(url); return LEGAL_DOMAINS.s
 // `caseLaw` → Background/Issues/Decision/Impact structure + read the judgment (extract the
 // full text of a judgment URL) + bias research to legal sources.
 // `verify` → after the brief, run legal citation verification (verifyLegal) and attach it.
+const PLACEHOLDER_CITATION = /^(not (provided|available|stated|given|found|known)|unknown|n\/?a|tbc|tbd|none|unreported|citation (not|un)\w*)\b|not (provided|found) in (the )?(research|sources)/i;
 export async function contentBrief({ keyword, title = '', intent, siteName, niche, excludeDomain, internalLinkCandidates, siteId, db, now = 0, competitor, caseLaw = false, verify = false, judgmentUrl = '', judgmentText = '', operatorNotes = '', contentType = '' }) {
   if (!perplexity.hasKey() && !tavily.hasKey()) return { error: 'No research engine configured — add PERPLEXITY_API_KEY and/or TAVILY_API_KEY.' };
   const market = marketFor(db);
@@ -176,6 +177,15 @@ export async function contentBrief({ keyword, title = '', intent, siteName, nich
   // writer gets it untouched on top of the researched, verified structure (briefToText prints it).
   if (notes && brief && typeof brief === 'object' && !brief.error) brief.operatorNotes = notes.slice(0, 12000);
   const out = { keyword, intent, brief, country: market.country, sources: research.sources, engines: research.engines, researchCost: research.cost, caseLaw, judgmentRead: !!judgment, judgmentUrl: research.judgmentUrl || null, judgment: judgmentInfo };
+
+  // A model sometimes fills a citation it doesn't know with a placeholder ("Not provided in
+  // research"): the writer would print it, and verification marked the REAL case "misstated",
+  // holding the push. Blank it — the case is then checked (and cited) by its name alone.
+  if (brief && Array.isArray(brief.citations)) {
+    for (const c of brief.citations) for (const k of ['citation', 'section']) {
+      if (c && typeof c[k] === 'string' && PLACEHOLDER_CITATION.test(c[k].trim())) c[k] = '';
+    }
+  }
 
   // Verify every cited case / statute / rule BEFORE the brief is allowed to push.
   if (verify && brief && !brief.error) {
