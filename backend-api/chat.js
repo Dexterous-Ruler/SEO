@@ -552,7 +552,10 @@ async function runTool(name, input, siteId, turn) {
         const readOnly = !!input.startWriting && site.write_armed === false;
         const made = await engine.ensurePushOpps(siteId, [{ title, keyword, category: 'Blog', source: 'ai_chat', operatorNotes: brief ? brief + sourceNote : '', payload: { goal: input.goal ? String(input.goal) : null } }]).catch((e) => ({ error: String((e && e.message) || e) }));
         if (made && Array.isArray(made.ids) && made.ids[0]) {
-          await pushQueue.enqueue(siteId, [{ oppId: made.ids[0], title, source: 'ai_chat', category: 'Blog', upsertBy: 'Title', extraFields: { 'Goal of Article': input.goal ? String(input.goal) : '', Description: desc0.slice(0, 500) }, startWriting: !!input.startWriting && !readOnly }]);
+          // Title in extraFields: the operator NAMED this article — the researched brief must not
+          // rename it (a brief built on the wrong judgment turned "East-West United Bank v Gusinski…"
+          // into "Lakatamia Shipping v Su…"), and upsert-by-Title needs it to find the row again.
+          await pushQueue.enqueue(siteId, [{ oppId: made.ids[0], title, source: 'ai_chat', category: 'Blog', upsertBy: 'Title', extraFields: { Title: String(title).slice(0, 250), 'Goal of Article': input.goal ? String(input.goal) : '', Description: desc0.slice(0, 500) }, startWriting: !!input.startWriting && !readOnly }]);
           await db.logAirtableSync({ site_id: siteId, kind: 'article_brief', records_pushed: 0, status: 'queued' }).catch(() => {});
           return `QUEUED "${title}" for the Article Writer. Your brief is kept word-for-word at the top, and a researched, verified brief is being built around it (it reads any court judgment and checks every citation) — it will appear in Airtable in about 1–2 minutes` +
             (input.startWriting ? (readOnly ? `. Writing will NOT start automatically: "${site.name || 'this site'}" is READ-ONLY (write not armed) — ask the user to arm writes, then set Status to "Write Article".` : ', and the writer will start automatically once it lands.') : '. Tell the user to set Status to "Write Article" in Airtable when they want it written.') +

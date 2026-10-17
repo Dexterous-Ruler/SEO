@@ -15,7 +15,7 @@ import * as claude from './claude.js';
 import { UK } from './uk.js';
 import { marketFor } from './market.js';
 import { P, modelFor, tempFor, geoFor } from './prompts.js';
-import { resolveJudgment, citationsIn } from './judgments.js';
+import { resolveJudgment, citationsIn, partiesFrom, partiesFromText } from './judgments.js';
 // Prepend the site's niche/context to a Perplexity system prompt so grounded
 // research stays on-niche (the same off-niche fix applied to trending).
 const withNiche = (base, ctx) => (ctx ? `=== THIS SITE'S NICHE & CONTEXT (keep findings strictly relevant to this) ===\n${ctx}\n\n${base}` : base);
@@ -129,7 +129,10 @@ export async function contentBrief({ keyword, title = '', intent, siteName, nich
   // manual path used — force case-law structure + verification when one is given.
   const hasUserJudgment = !!(String(judgmentText || '').trim() || String(judgmentUrl || '').trim());
   if (hasUserJudgment) caseLaw = true;
-  const gatherQuery = caseLaw ? `${keyword} judgment ruling court case` : keyword;
+  // Case law: research THE case (its parties), not just the topic keyword — 'unlawful means conspiracy
+  // UK judgment' surfaces the leading authorities (Lakatamia v Su), not East-West United Bank v Gusinski.
+  const subject = caseLaw ? (partiesFrom(title) || partiesFrom(keyword) || partiesFromText(operatorNotes)) : null;
+  const gatherQuery = caseLaw ? (subject ? `${subject.a} v ${subject.b} judgment ${keyword}` : `${keyword} judgment ruling court case`) : keyword;
   const research = await gather(gatherQuery, {
     recency: caseLaw ? 'year' : 'month',
     excludeDomains: excludeDomain ? [excludeDomain] : undefined,
@@ -140,10 +143,11 @@ export async function contentBrief({ keyword, title = '', intent, siteName, nich
 
   // Case law: read the FULL judgment so Background/Issues/Decision come from the PRIMARY source,
   // not commentary snippets. Pasted text wins; otherwise judgments.resolveJudgment FINDS it
-  // (Karim: "can it not find the judgment itself?"): pasted link → judgment hyperlinked in the
-  // competitor article → neutral citation → National Archives party-name search → research
-  // sources → CaseMine (partial). BAILII blocks bots, so BAILII links are read via their
-  // National Archives copy instead.
+  // (Karim: "can it not find the judgment itself?"): pasted link → the operator's own brief (its
+  // judgment links + neutral citation) → judgment hyperlinked in the competitor article → National
+  // Archives party-name search → checked research citations/sources → CaseMine (partial). Every
+  // candidate must be the SUBJECT case (both parties named). BAILII blocks bots, so BAILII links
+  // are read via their National Archives copy instead.
   let judgment = String(judgmentText || '').trim();
   let judgmentFull = !!judgment;
   let judgmentInfo = null;
@@ -155,11 +159,13 @@ export async function contentBrief({ keyword, title = '', intent, siteName, nich
       const j = await resolveJudgment({
         title: title || keyword, keyword, competitor, userUrl: String(judgmentUrl || '').trim(),
         researchSources: research.sources, researchText: `${research.summary || ''}\n${research.material || ''}`,
+        operatorNotes,
       });
+      const rejected = (j && j.tried || []).filter((t) => t.rejected).map((t) => t.url);
       if (j && j.text) {
         judgment = j.text; judgmentFull = !j.partial; research.judgmentUrl = j.url;
-        judgmentInfo = { found: j.found, via: j.via, citation: j.citation, partial: !!j.partial };
-      } else judgmentInfo = { found: null, tried: (j && j.tried || []).map((t) => t.via) };
+        judgmentInfo = { found: j.found, via: j.via, citation: j.citation, partial: !!j.partial, ...(rejected.length ? { rejected } : {}) };
+      } else judgmentInfo = { found: null, tried: (j && j.tried || []).map((t) => t.via), ...(rejected.length ? { rejected } : {}) };
     } catch (e) { /* best-effort; the brief still uses the gathered material */ }
   }
 

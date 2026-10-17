@@ -1330,7 +1330,10 @@ export async function autoDraft(siteId, { topN = 5, actionType, ids, category, j
   let skippedDup = 0;
   for (const p of planned) {
     if (upsertBy === 'Title' && p.titleKey && byTitle.has(p.titleKey)) { toUpdate.push({ recId: byTitle.get(p.titleKey), row: p.row }); createdIds.add(p.id); perJurisdiction[p.jurisdiction] = (perJurisdiction[p.jurisdiction] || 0) + 1; continue; }
-    if (existing.has(p.key) || seen.has(p.key)) { skippedDup++; dupIds.add(p.id); continue; }
+    // A row with the same keyword + jurisdiction already exists → skip. NOT for the AI chat's
+    // deliberate push (upsert by Title): a different article on the same keyword is still wanted —
+    // Karim's corrected "East-West United Bank v Gusinski" push was silently skipped as a duplicate.
+    if ((upsertBy !== 'Title' && existing.has(p.key)) || seen.has(p.key)) { skippedDup++; dupIds.add(p.id); continue; }
     seen.add(p.key);
     toCreate.push(p.row); createdIds.add(p.id);
     perJurisdiction[p.jurisdiction] = (perJurisdiction[p.jurisdiction] || 0) + 1;
@@ -1372,6 +1375,8 @@ export async function topArticleIds(siteId, n = 5) {
 // push flow. Re-pushing the same keyword reuses its row and KEEPS any researched briefs.
 // items: [{ title, keyword, intent, category, source, link, operatorNotes, brief, briefFor, payload }]
 // → { ids: [...same order...] } | { notProvisioned } | { error }
+// Everything researchOppBrief stores about a researched brief (see server.js) — cleared together.
+const STALE_BRIEF_KEYS = ['brief', 'briefsByMarket', 'briefSources', 'briefAt', 'briefFor', 'briefCompetitorRead', 'briefEngines', 'briefCaseLaw', 'briefJudgmentRead', 'briefJudgmentUrl', 'briefJudgment', 'briefVerification', 'briefVerified'];
 export async function ensurePushOpps(siteId, items) {
   if (!SB || !SRV) return { ...NOT_PROVISIONED, error: 'Supabase not configured.' };
   const list = (items || []).filter((x) => x && (x.keyword || x.title));
@@ -1382,14 +1387,22 @@ export async function ensurePushOpps(siteId, items) {
   const existing = new Map();
   try {
     const inList = [...new Set(keys)].map((k) => `"${k.replace(/"/g, '')}"`).join(',');
-    const res = await fetch(`${SB}/rest/v1/content_opportunities?site_id=eq.${encodeURIComponent(siteId)}&dedupe_key=in.(${encodeURIComponent(inList)})&select=id,dedupe_key,payload,status`, { headers: headers() });
+    const res = await fetch(`${SB}/rest/v1/content_opportunities?site_id=eq.${encodeURIComponent(siteId)}&dedupe_key=in.(${encodeURIComponent(inList)})&select=id,dedupe_key,title,payload,status`, { headers: headers() });
     const text = await res.text();
     if (!res.ok) { if (isMissingTable(res.status, text)) return NOT_PROVISIONED; return { error: `content_opportunities read → ${res.status}` }; }
     for (const r of (JSON.parse(text || '[]') || [])) existing.set(r.dedupe_key, r);
   } catch (e) { return { error: String((e && e.message) || e) }; }
   const opps = list.map((x, i) => {
     const prev = existing.get(keys[i]);
-    const payload = Object.assign({}, (prev && prev.payload) || {}, x.payload || {}, {
+    // A re-push that changes the operator's brief or the title is a DIFFERENT article: drop the old
+    // researched briefs so it is researched again. (Karim re-pushed "East-West United Bank v
+    // Gusinski" with a corrected chat brief; the stored brief — built on the wrong judgment — was
+    // reused because it existed for the UK, and the wrong case went out again.)
+    const prevPayload = Object.assign({}, (prev && prev.payload) || {});
+    const notesChanged = !!x.operatorNotes && String(x.operatorNotes).slice(0, 12000) !== String(prevPayload.operatorNotes || '');
+    const titleChanged = !!(prev && x.title && prev.title && String(x.title).trim() !== String(prev.title).trim());
+    if (prev && (notesChanged || titleChanged)) for (const k of STALE_BRIEF_KEYS) delete prevPayload[k];
+    const payload = Object.assign({}, prevPayload, x.payload || {}, {
       category: x.category || (prev && prev.payload && prev.payload.category) || undefined,
       link: x.link || (prev && prev.payload && prev.payload.link) || undefined,
       pushSource: x.source || 'push',

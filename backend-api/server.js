@@ -621,7 +621,11 @@ async function researchOppBrief(siteId, oppId, opts = {}) {
   const judgmentUrl = (opts.judgmentUrl && String(opts.judgmentUrl).trim()) || (isJudgment ? String(payload.judgmentUrl || payload.link || '') : '');
   const judgmentText = (opts.judgmentText && String(opts.judgmentText).trim()) || '';
   const hasJudgment = !!(judgmentUrl || judgmentText);
-  const caseLaw = opts.caseLaw != null ? !!opts.caseLaw : (hasJudgment || isCaseLawTopic(opp.title, suggestedType));
+  // Also case law when the operator's OWN brief opens with a neutral citation: Karim's chat brief was
+  // about East-West United Bank v Gusinski [2026] EWHC 2550 (BP) but his title left the case name out,
+  // so the judgment was never read.
+  const notesCiteCase = judgments.citationsIn(String(payload.operatorNotes || '').slice(0, 1500)).length > 0;
+  const caseLaw = opts.caseLaw != null ? !!opts.caseLaw : (hasJudgment || isCaseLawTopic(opp.title, suggestedType) || notesCiteCase);
   const verify = opts.verify != null ? !!opts.verify : (isLegalSite(site) || caseLaw);
   let r;
   try {

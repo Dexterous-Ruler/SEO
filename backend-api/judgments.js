@@ -138,7 +138,8 @@ export async function searchNationalArchives(query, { max = 5 } = {}) {
     const title = ((e.match(/<title>([^<]*)<\/title>/) || [])[1] || '').replace(/&amp;/g, '&').trim();
     const link = (e.match(/<link href="(https:\/\/caselaw\.nationalarchives\.gov\.uk\/[^"]+)"/) || [])[1];
     const cit = (e.match(/type="ukncn">([^<]*)</) || [])[1] || '';
-    if (link && !/data\.xml$/.test(link)) out.push({ title, url: naCanonical(link), citation: cit.trim() });
+    const date = ((e.match(/<published>([^<]+)</) || e.match(/<updated>([^<]+)</) || [])[1] || '').slice(0, 10);
+    if (link && !/data\.xml$/.test(link)) out.push({ title, url: naCanonical(link), citation: cit.trim(), date });
   }
   return out;
 }
@@ -176,6 +177,29 @@ function courtHint(text) {
   return '';
 }
 const tokens = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter((w) => w.length > 2 && !STOP.has(w));
+// "X v Y" anywhere in an operator's own brief (its heading, a "Case:" line …) → parties. The
+// FIRST one wins: that is the subject; cases cited further down are its authorities.
+export function partiesFromText(text) {
+  for (const raw of String(text || '').split('\n').slice(0, 60)) {
+    const line = raw.replace(/[#*_>`]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!/\s[vV](?:s\.?)?\s/.test(line)) continue;
+    for (const seg of line.split(/[:|–—?]/)) { const p = partiesFrom(seg); if (p) return p; }
+  }
+  return null;
+}
+// Words that don't identify a party (company suffixes, the Crown, government departments, roles):
+// a judgment matches the subject case only if it names a DISTINCTIVE word from each side.
+const GENERIC_PARTY = new Set(['bank', 'banks', 'limited', 'ltd', 'plc', 'llp', 'llc', 'inc', 'corporation', 'corp', 'company', 'group', 'holdings', 'holding', 'international', 'services', 'trading', 'partners', 'partnership', 'united', 'kingdom', 'others', 'ors', 'anor', 'another', 'regina', 'rex', 'king', 'queen', 'crown', 'secretary', 'state', 'home', 'department', 'commissioners', 'commissioner', 'revenue', 'customs', 'hmrc', 'his', 'her', 'majesty', 'majestys', 'council', 'borough', 'city', 'county', 'london', 'trustees', 'trustee', 'trust', 'estate', 'attorney', 'general', 'director', 'public', 'prosecutions', 'police', 'chief', 'constable', 'ministry', 'justice', 'office', 'authority', 'national', 'british', 'england', 'wales', 'scotland', 'english', 'application', 'applicant', 'appellant', 'appellants', 'respondent', 'respondents', 'claimant', 'claimants', 'defendant', 'defendants', 'petitioner', 'mrs', 'miss', 'sir', 'lord', 'lady', 'dame']);
+const partyTokens = (s) => tokens(s).filter((w) => !GENERIC_PARTY.has(w));
+// Is this judgment the subject case? Its heading (title, parties, court — the first few thousand
+// characters) must name a distinctive word from EACH side. No parties known → can't tell → true.
+export function judgmentMatches(text, parties) {
+  if (!parties) return true;
+  const head = new Set(tokens(String(text || '').slice(0, 5000)));
+  const sides = [partyTokens(parties.a), partyTokens(parties.b)].filter((s) => s.length);
+  if (!sides.length) return true;
+  return sides.every((s) => s.some((w) => head.has(w)));
+}
 function partyMatch(result, parties) {
   if (!parties) return 0;
   const tt = new Set(tokens(result.title));
@@ -185,54 +209,77 @@ function partyMatch(result, parties) {
 
 // ---- the resolver --------------------------------------------------------------
 // → { text, url, via, citation, partial, tried[] } | { text:'', tried[] }.
-export async function resolveJudgment({ title = '', keyword = '', competitor = null, researchSources = [], researchText = '', userUrl = '' } = {}) {
+// THE SUBJECT CASE comes first and everything found is checked against it. Karim (Oct 2026): an
+// article on East-West United Bank v Gusinski [2026] EWHC 2550 (BP) was pushed as "Lakatamia
+// Shipping v Su…" — the resolver ignored the citation in his own brief, took the first citation in
+// the general research ([2025] EWCA Civ 1389, the leading conspiracy authority) and read THAT
+// judgment as the subject; a second try read an unrelated [2026] EWHC 2160 (Ch). Now: the
+// operator's own title / brief / links / citation lead; every candidate judgment must name both
+// parties of the subject case (judgmentMatches); research citations are tried only when the
+// parties are known (so they can be checked) — never as a guess.
+export async function resolveJudgment({ title = '', keyword = '', competitor = null, researchSources = [], researchText = '', userUrl = '', operatorNotes = '' } = {}) {
   const tried = [];
-  const attempt = async (url, via) => {
+  const notes = String(operatorNotes || '');
+  const parties = partiesFrom(title) || partiesFrom(keyword) || partiesFromText(notes);
+  const hint = courtHint(title + ' ' + keyword + ' ' + notes.slice(0, 2000));
+  const attempt = async (url, via, { check = true } = {}) => {
     if (!url || tried.some((t) => t.url === url)) return null;
     const r = await readJudgment(url).catch(() => null);
-    tried.push({ url, via, ok: !!(r && r.text) });
-    return r ? Object.assign(r, { found: via }) : null;
+    const ok = !!(r && r.text);
+    const match = ok && (!check || judgmentMatches(r.text, parties));
+    tried.push(ok && !match ? { url, via, ok: false, rejected: 'a different case' } : { url, via, ok });
+    return match ? Object.assign(r, { found: via }) : null;
   };
   let partialHit = null;
   const accept = (r) => { if (!r) return null; if (r.partial) { if (!partialHit) partialHit = r; return null; } return r; };
-
-  // 1) Exact URL the operator pasted.
-  if (userUrl) { const r = accept(await attempt(userUrl, 'pasted link')); if (r) return finish(r); }
-
-  // 2) Judgment links inside the competitor article (markdown/bare links in the reader text +
-  //    raw hrefs from its HTML) — competitors often hyperlink the judgment itself.
-  const links = new Set();
-  const addLinks = (s) => { for (const m of String(s || '').matchAll(/https?:\/\/[^\s"'<>)\]]+/g)) { const u = m[0].replace(/[.,;]+$/, ''); if (isJudgmentUrl(u)) links.add(u); } };
-  if (competitor) {
-    addLinks(competitor.text);
-    if (competitor.url) { const h = await fetchText(competitor.url, { timeoutMs: 15000 }); for (const m of String(h.body || '').matchAll(/href="([^"]+)"/g)) { try { const u = new URL(m[1], competitor.url).href; if (isJudgmentUrl(u)) links.add(u); } catch {} } }
-  }
   // Official/full-text sources first, CaseMine last.
   const rank = (u) => (/nationalarchives/.test(u) ? 0 : /supremecourt|jcpc|judiciary|tribunalsdecisions/.test(u) ? 1 : /bailii/.test(u) ? 2 : 3);
+  const judgmentLinksIn = (s) => { const out = new Set(); for (const m of String(s || '').matchAll(/https?:\/\/[^\s"'<>)\]]+/g)) { const u = m[0].replace(/[.,;]+$/, ''); if (isJudgmentUrl(u)) out.add(u); } return [...out]; };
+
+  // 1) Exact URL the operator pasted — trusted as given.
+  if (userUrl) { const r = accept(await attempt(userUrl, 'pasted link', { check: false })); if (r) return finish(r); }
+
+  // 2) The operator's own brief (e.g. the AI-chat brief): judgment links in it, then its neutral
+  //    citations — the title's citation first. Checked, because a brief also cites authorities.
+  for (const u of judgmentLinksIn(notes).sort((x, y) => rank(x) - rank(y)).slice(0, 4)) { const r = accept(await attempt(u, 'linked in your brief')); if (r) return finish(r); }
+  for (const c of [...citationsIn(title + ' ' + keyword), ...citationsIn(notes)].slice(0, 6)) { const r = accept(await attempt(naUrlFor(c), 'neutral citation ' + c.raw)); if (r) return finish(r); }
+
+  // 3) Judgment links inside the competitor article (markdown/bare links in the reader text +
+  //    raw hrefs from its HTML) — competitors often hyperlink the judgment itself.
+  const links = new Set();
+  if (competitor) {
+    for (const u of judgmentLinksIn(competitor.text)) links.add(u);
+    if (competitor.url) { const h = await fetchText(competitor.url, { timeoutMs: 15000 }); for (const m of String(h.body || '').matchAll(/href="([^"]+)"/g)) { try { const u = new URL(m[1], competitor.url).href; if (isJudgmentUrl(u)) links.add(u); } catch {} } }
+  }
   for (const u of [...links].sort((x, y) => rank(x) - rank(y)).slice(0, 4)) { const r = accept(await attempt(u, 'linked in competitor article')); if (r) return finish(r); }
 
-  // 3) Neutral citations in the title / competitor text / research → Find Case Law URL.
-  const parties = partiesFrom(title) || partiesFrom(keyword);
-  const hint = courtHint(title + ' ' + keyword);
-  const cites = [...citationsIn(title + ' ' + keyword), ...citationsIn(competitor && competitor.text), ...citationsIn(researchText)];
-  // Prefer a citation from the hinted court; the title's own citation first.
-  cites.sort((x, y) => (hint && y.court.startsWith(hint) ? 1 : 0) - (hint && x.court.startsWith(hint) ? 1 : 0));
-  for (const c of cites.slice(0, 4)) { const r = accept(await attempt(naUrlFor(c), 'neutral citation ' + c.raw)); if (r) return finish(r); }
-
-  // 4) Find Case Law search by party names (the "find it itself" path).
+  // 4) Find Case Law search by party names (the "find it itself" path). A long-running dispute has
+  //    several judgments (East-West v Gusinski: 2022, 2024, Mar 2026, Oct 2026) — the hinted court
+  //    first, then the NEWEST (articles are about the latest ruling).
   if (parties) {
-    const results = await searchNationalArchives(`${parties.a} ${parties.b}`).catch(() => []);
+    const results = await searchNationalArchives(`${parties.a} ${parties.b}`, { max: 8 }).catch(() => []);
     const good = results.filter((x) => partyMatch(x, parties) === 2);
-    good.sort((x, y) => (hint && y.citation.includes(hint) ? 1 : 0) - (hint && x.citation.includes(hint) ? 1 : 0));
-    for (const g of good.slice(0, 2)) { const r = accept(await attempt(g.url, 'National Archives search')); if (r) return finish(r); }
+    good.sort((x, y) => ((hint && y.citation.includes(hint) ? 1 : 0) - (hint && x.citation.includes(hint) ? 1 : 0)) || String(y.date).localeCompare(String(x.date)));
+    for (const g of good.slice(0, 3)) { const r = accept(await attempt(g.url, 'National Archives search')); if (r) return finish(r); }
   }
 
-  // 5) Judgment-site URLs the research surfaced.
-  for (const s of (researchSources || []).map((x) => x && x.url).filter(isJudgmentUrl).sort((x, y) => rank(x) - rank(y)).slice(0, 3)) {
-    const r = accept(await attempt(s, 'research source')); if (r) return finish(r);
+  // 5) Citations in the competitor article / research — ONLY when the subject's parties are known,
+  //    so each one is checked. Without parties a research citation is just a guess (that is how
+  //    "random cases" got pushed), so none is used.
+  if (parties) {
+    const cites = [...citationsIn(competitor && competitor.text), ...citationsIn(researchText)];
+    cites.sort((x, y) => (hint && y.court.startsWith(hint) ? 1 : 0) - (hint && x.court.startsWith(hint) ? 1 : 0));
+    for (const c of cites.slice(0, 4)) { const r = accept(await attempt(naUrlFor(c), 'neutral citation ' + c.raw)); if (r) return finish(r); }
   }
 
-  // 6) CaseMine search (partial text) as the last resort.
+  // 6) Judgment-site URLs the research surfaced — checked, so again only with known parties.
+  if (parties) {
+    for (const s of (researchSources || []).map((x) => x && x.url).filter(isJudgmentUrl).sort((x, y) => rank(x) - rank(y)).slice(0, 3)) {
+      const r = accept(await attempt(s, 'research source')); if (r) return finish(r);
+    }
+  }
+
+  // 7) CaseMine search (partial text) as the last resort.
   if (parties && !partialHit) {
     for (const u of await searchCaseMine(`${parties.a} ${parties.b}`).catch(() => [])) { accept(await attempt(u, 'CaseMine search')); if (partialHit) break; }
   }
