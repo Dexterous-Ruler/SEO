@@ -547,6 +547,10 @@ function slugTitle(u) {
 // Skip a competitor's non-article pages (site chrome, legal boilerplate, listings,
 // auth/commerce, media) so the list is what they PUBLISH, not their nav.
 const CSM_NONCONTENT = /\/(wp-content|wp-admin|wp-json|wp-includes|cart|checkout|my-account|account|login|log-in|signin|sign-in|signup|sign-up|register|tag|tags|category|categories|author|feed|comments|attachment|page\/\d+|search|sitemap|about|about-us|contact|contact-us|pricing|plans|privacy|privacy-policy|terms|terms-of-service|terms-and-conditions|cookie|cookies|cookie-policy|careers|jobs|team|our-team|faq|faqs|support|help|demo|book-a-demo|press|partners|affiliates|thank-you|thanks|unsubscribe|legal-notice|disclaimer|refund|shipping|testimonials|reviews|features|integrations|changelog|status)(\/|$|\?|#)/i;
+// Staff / barrister / lawyer PROFILE pages ("Audrey Dwyer") are not topics to out-rank — 7,622 of
+// 65,088 go-legal.co.uk competitor rows were profiles (mishcon /people/, hsfkramer /our-people/).
+// Whole path segments only, so /news/team-wins-award stays. Same pattern as CI_PROFILE_RX below.
+export const CSM_PROFILE = /\/(people|our-people|team|our-team|lawyers|our-lawyers|solicitors|our-solicitors|professionals|profiles?|bios?|staff|barristers|members|attorneys|experts)(\/|$|[?#])/i;
 // A competitor's homepage / bare section index is not an article either.
 function isIndexUrl(u) { try { const p = new URL(u).pathname.replace(/\/+$/, ''); return p.split('/').filter(Boolean).length === 0; } catch { return true; } }
 
@@ -662,7 +666,7 @@ export async function ingestCompetitorSitemap(siteId, inputs, opts) {
   const wantedMarket = dfs.COUNTRIES.find((c) => c.label === wanted);
   const googleDb = (wantedMarket && wantedMarket.db) || site.semrush_db || 'uk';
   const googleWhere = dfs.countryFor(googleDb).label;
-  const isContent = (u) => !CSM_NONCONTENT.test(u) && !isIndexUrl(u);
+  const isContent = (u) => !CSM_NONCONTENT.test(u) && !CSM_PROFILE.test(u) && !isIndexUrl(u);
   const fits = (j) => j === wanted || j === 'Not stated';
   const bareHost = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
 
@@ -1026,6 +1030,8 @@ export async function worklist(siteId, { status, actionType, source, excludeSour
 // exact counts (PostgREST count=exact) for the CURRENT competitor / type / country / search.
 const CI_PUSHED = ['queued', 'in_review', 'published', 'done'];
 const CI_LEGACY_JX = { 'United Kingdom': ['UK'], 'United States': ['US'] };
+// POSIX regex for PostgREST imatch — rows already stored from older scans are hidden on read.
+const CI_PROFILE_RX = '/(people|our-people|team|our-team|lawyers|our-lawyers|solicitors|our-solicitors|professionals|profiles?|bios?|staff|barristers|members|attorneys|experts)(/|$)';
 const ciQ = (v) => encodeURIComponent('"' + String(v).replace(/["\\]/g, '') + '"');    // PostgREST quoted value
 // Content type = the operator's pushed choice (category) if set, else the suggested type; none = article.
 function ciTypeCond(t) {
@@ -1050,7 +1056,7 @@ function ciStatusParam(s) {
   return '';
 }
 function ciParams(siteId, f, { status = f.status, type = f.type } = {}) {
-  const p = [`site_id=eq.${encodeURIComponent(siteId)}`, 'source=eq.competitor_sitemap'];
+  const p = [`site_id=eq.${encodeURIComponent(siteId)}`, 'source=eq.competitor_sitemap', `payload->>link=not.imatch.${encodeURIComponent(CI_PROFILE_RX)}`];
   if (f.competitor) p.push(`payload->>competitor=eq.${encodeURIComponent(f.competitor)}`);
   const st = ciStatusParam(status); if (st) p.push(st);
   const conds = [];
