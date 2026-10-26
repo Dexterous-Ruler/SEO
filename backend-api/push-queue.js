@@ -39,7 +39,8 @@ let leaseTimer = null;             // single timer to re-check another owner's s
 const nowIso = () => new Date().toISOString();
 const ms = (iso) => Date.parse(iso || 0) || 0;
 // Injectable for tests (two instances sharing one store); production uses the KV + engine.
-const kvGet = (k) => (deps.kv ? deps.kv.get(k) : db.getAppSecret(k));
+// Fresh (uncached) reads: another instance's claim must be visible at once; a failed read throws.
+const kvGet = (k) => (deps.kv ? deps.kv.get(k) : db.getAppSecretFresh(k));
 const kvSet = (k, v) => (deps.kv ? deps.kv.set(k, v) : db.setAppSecret(k, v));
 const E = () => deps.engine || engine;
 const getSite = (id) => (deps.getSite ? deps.getSite(id) : db.getSite(id));
@@ -47,10 +48,15 @@ const getSite = (id) => (deps.getSite ? deps.getSite(id) : db.getSite(id));
 // Merge the stored list into ours: an entry we're processing stays ours; otherwise the copy with
 // the newer updatedAt wins (updating OUR object in place, so live references stay valid); entries
 // only in the store (enqueued/claimed by another instance) are added. Read failure → keep ours.
+const READ_OK = new Map();          // siteId → did the last sync manage to read the store?
 async function sync(siteId) {
   const mine = QUEUES.get(siteId) || [];
   let stored = null;
-  try { const raw = await kvGet(KV(siteId)); stored = raw ? JSON.parse(raw) : []; } catch (e) { stored = null; }
+  try {
+    const raw = await kvGet(KV(siteId));
+    try { stored = raw ? JSON.parse(raw) : []; } catch (e) { stored = []; }   // corrupt value → treat as empty
+  } catch (e) { stored = null; }                                              // read FAILED
+  READ_OK.set(siteId, Array.isArray(stored));
   if (Array.isArray(stored)) {
     const byKey = new Map(mine.map((e) => [e.key, e]));
     for (const s of stored) {
@@ -67,6 +73,9 @@ async function sync(siteId) {
 }
 async function save(siteId) {
   let list = await sync(siteId);
+  // Couldn't read the store → don't overwrite it blind (another instance's entries would be lost).
+  // The in-memory copy keeps running; the next save retries.
+  if (!READ_OK.get(siteId)) return;
   // Keep everything still in flight or needing attention; drop finished items after 7 days.
   const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
   list = list.filter((e) => !(DONE.has(e.status) && ms(e.updatedAt || e.addedAt) < cutoff));

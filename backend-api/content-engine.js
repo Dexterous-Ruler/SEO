@@ -1073,7 +1073,7 @@ export async function competitorItems(siteId, { competitor = '', status = 'new',
   const lim = Math.min(Math.max(Number(limit) || 100, 1), 500), off = Math.max(0, Number(offset) || 0);
   const typeList = [...new Set((Array.isArray(types) && types.length ? types : ['blog', 'case_study', 'expertise', 'how-to-guide']).map(String).filter(Boolean))].slice(0, 12);
   try {
-    const pageQ = fetch(`${SB}/rest/v1/content_opportunities?${ciParams(siteId, f).join('&')}&select=id,title,score,status,primary_keyword,intent,created_at,updated_at,payload&order=created_at.desc,score.desc,id.asc&limit=${lim}&offset=${off}`, { headers: headers() })
+    const pageQ = fetch(`${SB}/rest/v1/content_opportunities?${ciParams(siteId, f).join('&')}&select=id,title,score,status,primary_keyword,intent,created_at,updated_at,payload&order=payload->>lastmod.desc.nullslast,created_at.desc,score.desc,id.asc&limit=${lim}&offset=${off}`, { headers: headers() })
       .then(async (res) => { const t = await res.text(); if (!res.ok) throw Object.assign(new Error(`list → ${res.status} ${t.slice(0, 160)}`), { status: res.status, body: t }); return JSON.parse(t || '[]'); });
     const statuses = ['new', 'pushed', 'hidden', 'all'];
     const [rows, sc, tc] = await Promise.all([

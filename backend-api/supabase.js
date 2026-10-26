@@ -182,8 +182,21 @@ export const db = {
     const now = Date.now();
     const hit = _secrets.get(name);
     if (hit && hit.exp > now) return hit.v;
-    const v = await rpc('get_app_secret', { p_name: String(name), p_key: encKey() }).catch(() => null);
+    // A FAILED read still returns null for these callers, but is no longer CACHED: it used to be
+    // remembered for 5 minutes, so one hiccup made the value look missing everywhere — and the
+    // saved-competitors list then re-seeded a default and saved it over the real one.
+    let v;
+    try { v = await rpc('get_app_secret', { p_name: String(name), p_key: encKey() }); }
+    catch (e) { return null; }
     _secrets.set(name, { v: v || null, exp: now + 300000 });
+    return v || null;
+  },
+  // Uncached, and a failed read THROWS. For state that more than one server instance writes (the
+  // push queue during a deploy overlap must see the other instance's claims NOW, not a 5-minute-old
+  // copy) and for callers that must never mistake "couldn't read" for "nothing saved".
+  async getAppSecretFresh(name) {
+    const v = await rpc('get_app_secret', { p_name: String(name), p_key: encKey() });
+    _secrets.set(name, { v: v || null, exp: Date.now() + 300000 });
     return v || null;
   },
 

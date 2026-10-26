@@ -347,7 +347,7 @@ function authOk(req) {
 // The dashboard's kill switch was per-tab React state — another tab (or the API)
 // happily kept writing. Now it's persisted (app_secrets) and enforced HERE, at the
 // dispatcher, for every route that can mutate WordPress/Airtable/n8n. 10s cache.
-const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|engine-clean-negatives|competitor-sitemap-poll|competitor-expand|competitor-brief|competitor-brief-start|competitor-source-save|competitor-source-remove|push-queue-action|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
+const WRITE_ROUTE_RE = /^POST \/(apply-|rollback-|embed-video|remove-video-embed|fix-|normalize-video-embeds|strip-internal-labels|content-refresh|content-rewrite|content-restore|content-apply-elementor|airtable-sync|airtable-push|airtable-update-record|airtable-create-record|airtable-ensure-field|n8n-update-prompts|n8n-run|n8n-set-active|n8n-prompt-rollback|engine-autodraft|engine-sync-published|engine-clean-negatives|competitor-sitemap-poll|competitor-expand|competitor-brief(?!-status)|competitor-source-save|competitor-source-remove|push-queue-action|radar-source-save|radar-source-remove|radar-poll|radar-draft|media-optimize|page-optimize-images|cleanup-webp-dupes|publish-|arm-beacon|aeo-apply)/;
 let _kill = { v: false, exp: 0 };
 async function killSwitchOn() {
   if (Date.now() < _kill.exp) return _kill.v;
@@ -552,7 +552,11 @@ function competitorSourceFrom(url, extra) {
   return Object.assign({ id: 'cmp_' + Math.random().toString(36).slice(2, 11), url: String(url).trim(), host, label: host, addedAt: new Date().toISOString(), lastScanAt: null, lastFound: 0, lastError: null }, extra || {});
 }
 async function competitorSourcesFor(siteId) {
-  const raw = await db.getAppSecret('competitor_sources:' + siteId).catch(() => null);
+  // A FAILED read must not look like "nothing saved yet": that path seeds a default list and SAVES
+  // it — over Karim's real competitors (47 on go-legal.co.uk). Fail loudly instead.
+  let raw;
+  try { raw = await db.getAppSecretFresh('competitor_sources:' + siteId); }
+  catch (e) { throw new Error("Couldn't load your saved competitors just now — please try again in a moment."); }
   if (raw) { try { const a = JSON.parse(raw); if (Array.isArray(a)) return a; } catch {} }
   // First open: seed from the site's saved competitors so it's never blank.
   const site = await db.getSite(siteId).catch(() => null);
