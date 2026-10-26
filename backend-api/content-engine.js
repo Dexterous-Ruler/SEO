@@ -630,7 +630,15 @@ export function inferJurisdiction(host, url, title) {
 
 // `inputs` = saved competitor sources [{ id, url, label }] (or plain URL strings).
 // Returns per-source stats keyed back by id so the caller can record lastScan/lastFound.
+// opts: { jurisdiction, maxPerCompetitor (default 15000), sitemapBudgetMs, onProgress(p) }.
+// A competitor's pages come from its sitemap (feeds.fetchSitemap: robots.txt discovery,
+// nested indexes, .gz, <lastmod>) — or, when there is no sitemap, it sits behind bot
+// protection, or it has nothing for the jurisdiction, from the pages it ranks for in Google
+// (dfs.relevantPages). perSource[]: via 'sitemap' | 'google', blocked = the site refused
+// automated reading; `error` only when BOTH routes failed (plain English).
 export async function ingestCompetitorSitemap(siteId, inputs, opts) {
+  const o = opts || {};
+  const progress = (p) => { if (typeof o.onProgress === 'function') { try { o.onProgress(p); } catch { /* a progress hook never breaks a scan */ } } };
   const site = await db.getSite(siteId).catch(() => null);
   if (!site) return { error: 'Site not found.', saved: 0 };
   let list = (Array.isArray(inputs) && inputs.length) ? inputs : (Array.isArray(site.competitors) ? site.competitors : []);
@@ -644,38 +652,134 @@ export async function ingestCompetitorSitemap(siteId, inputs, opts) {
   // sitemap (fast) to learn which countries they cover, then keep only the pages written
   // for the jurisdiction the user selected (default: the site's top-bar market), plus
   // unlabelled pages (a .com blog with no country signal may still be relevant).
-  const wanted = String((opts && opts.jurisdiction) || marketFor(site && site.semrush_db).country || 'United Kingdom');
+  const wanted = String(o.jurisdiction || marketFor(site && site.semrush_db).country || 'United Kingdom');
   const scoreSite = { id: siteId, __nicheCtx: geoFor(siteId) || '', __negatives: (Array.isArray(site.negative_keywords) ? site.negative_keywords : []).map((n) => String(n || '').toLowerCase().trim()).filter(Boolean) };
-  const raw = [];
-  // Fetch every competitor's sitemap CONCURRENTLY (each is internally bounded) so the
-  // whole run stays inside the gateway request budget.
-  // Read the WHOLE sitemap (big WordPress sites split posts across many child sitemaps),
-  // not just the first few hundred URLs — Karim noticed results capping at 200/competitor.
-  // Read the WHOLE sitemap (100k URLs ≈ 3s; it's the persist that's expensive, and that is
-  // bounded below AFTER the jurisdiction filter) so no country's pages are cut off.
-  const fetched = await Promise.all(list.map((src) => feeds.fetchSitemap(src.url, { maxUrls: 200000, maxChildren: 600 }).catch((e) => ({ error: String((e && e.message) || e), urls: [] }))));
-  const perSource = [];
-  for (let i = 0; i < list.length; i++) {
-    const src = list[i]; const sm = fetched[i] || { urls: [] };
+  // Rows created per competitor per scan (was a hard 3,000). Over the cap the NEWEST pages
+  // (sitemap <lastmod>) are kept first; pages without a date keep sitemap order.
+  const cap = Math.max(1, Math.floor(Number(o.maxPerCompetitor) || 15000));
+  // Google fallback market: the jurisdiction being scanned when it is a DataForSEO market,
+  // otherwise the site's own market.
+  const wantedMarket = dfs.COUNTRIES.find((c) => c.label === wanted);
+  const googleDb = (wantedMarket && wantedMarket.db) || site.semrush_db || 'uk';
+  const googleWhere = dfs.countryFor(googleDb).label;
+  const isContent = (u) => !CSM_NONCONTENT.test(u) && !isIndexUrl(u);
+  const fits = (j) => j === wanted || j === 'Not stated';
+  const bareHost = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+
+  // Read ONE competitor: its sitemap; else — or, when bot protection cut the sitemap walk
+  // short, as well — the pages Google ranks it for. Never throws.
+  const readCompetitor = async (src) => {
     const comp = src.__host || src.url;
-    if (sm.error) { perSource.push({ id: src.id, input: src.url, competitor: comp, error: sm.error, urls: 0, made: 0 }); continue; }
-    const urls = (sm.urls || []).filter((u) => !CSM_NONCONTENT.test(u) && !isIndexUrl(u));
+    const sm = await feeds.fetchSitemap(src.url, { maxUrls: 200000, maxChildren: 600, budgetMs: o.sitemapBudgetMs })
+      .catch((e) => ({ error: String((e && e.message) || e), reason: 'unreachable', urls: [], lastmod: {} }));
+    const smUrls = (sm.urls || []).filter(isContent);
+    const r = { src, comp, sm, urls: smUrls, via: 'sitemap', google: new Map(), googleAdded: 0, googleError: null };
+    const fallback = !!sm.error || !smUrls.some((u) => fits(inferJurisdiction(comp, u, '')));
+    const supplement = !fallback && !!sm.blocked && !!sm.partial;
+    if (!fallback && !supplement) return r;
+    let pages = [];
+    if (!dfs.hasKey()) r.googleError = "Google ranking data isn't connected (DataForSEO is not set up)";
+    else {
+      try { pages = await dfs.relevantPages(bareHost(sm.origin) || comp, { db: googleDb }); }
+      catch (e) { r.googleError = `the Google ranking lookup failed (${String((e && e.message) || e).slice(0, 140)})`; }
+    }
+    const have = new Set(smUrls);
+    const gUrls = [];
+    for (const p of (pages || [])) {
+      if (!p || !p.url || !isContent(p.url) || have.has(p.url)) continue;
+      have.add(p.url); gUrls.push(p.url); r.google.set(p.url, p);
+    }
+    if (!r.googleError && !gUrls.length) r.googleError = `Google shows no ranking pages for them in ${googleWhere}`;
+    // The sitemap's own URLs stay in the set so the jurisdiction tally still shows everything they cover.
+    r.urls = smUrls.concat(gUrls);
+    if (supplement) r.googleAdded = gUrls.length;
+    else if (gUrls.length && (!smUrls.length || gUrls.some((u) => fits(inferJurisdiction(comp, u, ''))))) r.via = 'google';
+    return r;
+  };
+  const whyNoPages = (sm, googleError) => {
+    const why = sm.blocked ? `their website blocks automated reading (${sm.blockedBy || 'bot protection'})`
+      : sm.reason === 'not_found' ? 'no sitemap was found on their website'
+        : sm.error ? String(sm.error)
+          : 'their sitemap lists no article pages';
+    const s = `${why}, and ${googleError || 'Google has no ranking pages for them either'}`;
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  };
+
+  // Fetch every competitor CONCURRENTLY (each walk is internally bounded: ≤4 requests at a
+  // time, maxChildren/maxUrls/budgetMs), reading the WHOLE sitemap — the jurisdiction filter
+  // and the per-competitor cap come after, so no country's pages are cut off.
+  let readDone = 0;
+  progress({ phase: 'reading', done: 0, of: list.length });
+  const reads = await Promise.all(list.map((src) => readCompetitor(src)
+    .catch((e) => ({ src, comp: src.__host || src.url, sm: { error: String((e && e.message) || e), urls: [], lastmod: {} }, urls: [], via: 'sitemap', google: new Map(), googleAdded: 0, googleError: null }))
+    .finally(() => progress({ phase: 'reading', done: ++readDone, of: list.length }))));
+
+  // Persisting: persist() pre-reads existing keys with ONE `dedupe_key=in.(...)` GET, so chunks
+  // are sized by that URL (≤ 250 rows and ≤ ~5 KB of encoded keys → the URL stays < 6 KB).
+  const chunksOf = (opps) => {
+    const out = []; let cur = [], len = 0;
+    for (const op of opps) {
+      const kl = encodeURIComponent(`"${String(op.dedupeKey).replace(/"/g, '')}",`).length;
+      if (cur.length && (cur.length >= 250 || len + kl > 5000)) { out.push(cur); cur = []; len = 0; }
+      cur.push(op); len += kl;
+    }
+    if (cur.length) out.push(cur);
+    return out;
+  };
+  // persist() upserts WHOLE columns, so a re-scan would replace `payload` and wipe what the
+  // operator added to a topic since (its researched brief, chosen type, notes). Read those
+  // rows' payloads first and keep every key this scan doesn't set. Best effort.
+  const keepOperatorPayload = async (chunk) => {
+    if (!SB || !SRV) return;
+    const inList = chunk.map((x) => `"${String(x.dedupeKey).replace(/"/g, '')}"`).join(',');
+    try {
+      const res = await fetch(`${SB}/rest/v1/content_opportunities?site_id=eq.${encodeURIComponent(siteId)}&dedupe_key=in.(${encodeURIComponent(inList)})&select=dedupe_key,payload`, { headers: headers() });
+      if (!res.ok) return;
+      const rows = JSON.parse((await res.text()) || '[]');
+      const prev = new Map((Array.isArray(rows) ? rows : []).map((x) => [x.dedupe_key, x.payload]));
+      for (const op of chunk) { const p = prev.get(op.dedupeKey); if (p && typeof p === 'object') op.payload = Object.assign({}, p, op.payload); }
+    } catch { /* the upsert below still lands the scan */ }
+  };
+  // A failed chunk is retried twice (transient PostgREST/network errors) so a big scan lands completely.
+  const persistChunk = async (chunk) => {
+    let res = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      res = await persist(siteId, chunk);
+      if (!res.error || res.notProvisioned) return res;
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+    }
+    return res;
+  };
+
+  // Process + save one competitor at a time (its sitemap data is released as we go).
+  const perSource = [];
+  let saved = 0, error = null, notProvisioned = false, fetched = 0, unique = 0;
+  for (let i = 0; i < reads.length; i++) {
+    const r = reads[i]; reads[i] = null;
+    const { src, comp, sm } = r;
+    const base = { id: src.id, input: src.url, competitor: comp, blocked: !!sm.blocked };
+    if (!r.urls.length) { perSource.push({ ...base, via: null, error: whyNoPages(sm, r.googleError), urls: 0, matched: 0, made: 0 }); continue; }
+    const lastmod = sm.lastmod || {};
     // 1) Tally which jurisdictions this competitor covers (the whole site, not just what we keep).
     const tally = {};
-    const labelled = urls.map((u) => { const j = inferJurisdiction(comp, u, ''); tally[j] = (tally[j] || 0) + 1; return [u, j]; });
+    const labelled = r.urls.map((u) => { const j = inferJurisdiction(comp, u, ''); tally[j] = (tally[j] || 0) + 1; return [u, j]; });
     const jurisdictions = Object.entries(tally).filter(([j]) => j !== 'Not stated').sort((a, b) => b[1] - a[1]).map(([j, n]) => ({ jurisdiction: j, pages: n }));
     // 2) Keep the pages written for the wanted jurisdiction (+ unlabelled ones).
-    const kept = labelled.filter(([, j]) => j === wanted || j === 'Not stated');
+    const kept = labelled.filter(([, j]) => fits(j));
     const matched = kept.length;
+    // 3) More than the cap → newest first by <lastmod> (stable sort: undated pages keep sitemap order, after dated ones).
+    if (kept.length > cap) kept.sort((a, b) => { const x = lastmod[a[0]] || '', y = lastmod[b[0]] || ''; return x === y ? 0 : (x < y ? 1 : -1); });
+    const opps = [];
     let made = 0;
     for (const [u, j0] of kept) {
       const title = slugTitle(u);
       if (!title || title.length < 8 || title.split(' ').length < 2) continue;   // "About", "Blog" etc. are not topics
       // An unlabelled URL may still name its country in the title ("… Agreement UK").
       const jurisdiction = j0 === 'Not stated' ? inferJurisdiction(comp, u, title) : j0;
-      if (jurisdiction !== wanted && jurisdiction !== 'Not stated') continue;
+      if (!fits(jurisdiction)) continue;
+      const g = r.google.get(u);
       const suggestedType = suggestTypeFor(site, title, u);
-      const o = makeOpp(siteId, {
+      const op = makeOpp(siteId, {
         source: 'competitor_sitemap',
         sourceRef: comp,
         title,
@@ -683,28 +787,35 @@ export async function ingestCompetitorSitemap(siteId, inputs, opts) {
         intent: 'informational',
         actionType: 'article',
         evidence: [{ source: 'competitor_sitemap', detail: `A competitor covers this: ${comp}` }],
-        payload: { link: u, competitor: comp, competitorSourceId: src.id || null, fromCompetitor: true, sourceType: 'competitor_sitemap', suggestedType, jurisdiction },
+        payload: Object.assign(
+          { link: u, competitor: comp, competitorSourceId: src.id || null, fromCompetitor: true, sourceType: 'competitor_sitemap', suggestedType, jurisdiction, foundVia: g ? 'google' : 'sitemap' },
+          lastmod[u] ? { lastmod: lastmod[u] } : {},
+          g ? { googleTraffic: Math.round(Number(g.etv) || 0), rankingKeywords: Number(g.keywords) || 0 } : {},
+        ),
       });
-      o.dedupeKey = 'csm:' + feedHash(String(u).replace(/[#?].*$/, '').toLowerCase());
-      score(o, scoreSite);
-      raw.push(o);
-      if (++made >= 3000) break;   // hard bound per competitor per scan (a 3000-row chunked persist ≈ 10s)
+      op.dedupeKey = 'csm:' + feedHash(String(u).replace(/[#?].*$/, '').toLowerCase());
+      score(op, scoreSite);
+      opps.push(op);
+      if (++made >= cap) break;
     }
     const others = jurisdictions.map((x) => x.jurisdiction).filter((j) => j !== wanted);
-    perSource.push({ id: src.id, input: src.url, competitor: comp, sitemap: sm.sitemapUrl, urls: urls.length, scannedFor: wanted, matched, made, capped: made >= 3000 && matched > made, jurisdictions, others });
+    const stat = { ...base, via: r.via, sitemap: sm.sitemapUrl, urls: r.urls.length, scannedFor: wanted, matched, made, capped: made >= cap && matched > made, jurisdictions, others };
+    if (r.via === 'sitemap' && sm.partial) stat.partial = true;   // the sitemap was only partly readable (caps/time/blocked files)
+    if (r.googleAdded) stat.googleAdded = r.googleAdded;
+    perSource.push(stat);
+    const merged = dedupeMerge(opps);
+    fetched += opps.length; unique += merged.length;
+    if (notProvisioned || !merged.length) continue;
+    for (const chunk of chunksOf(merged)) {
+      await keepOperatorPayload(chunk);
+      const res = await persistChunk(chunk);
+      if (res.notProvisioned) { notProvisioned = true; error = res.error; break; }
+      if (res.error && !error) error = res.error;
+      saved += res.saved || 0;
+      progress({ phase: 'saving', competitor: comp, done: i, of: list.length, saved });
+    }
   }
-  const merged = dedupeMerge(raw);
-  // Persist in CHUNKS: persist() pre-reads existing keys with ONE `dedupe_key=in.(...)`
-  // query, and thousands of keys would exceed the URL length limit. 150/chunk keeps every
-  // request small; chunks run sequentially so a big competitor still lands completely.
-  let saved = 0, error = null, notProvisioned = false;
-  for (let i = 0; i < merged.length; i += 150) {
-    const res = await persist(siteId, merged.slice(i, i + 150));
-    if (res.notProvisioned) { notProvisioned = true; error = res.error; break; }
-    if (res.error && !error) error = res.error;
-    saved += res.saved || 0;
-  }
-  return { saved, error, notProvisioned, fetched: raw.length, unique: merged.length, scannedFor: wanted, perSource };
+  return { saved, error, notProvisioned, fetched, unique, scannedFor: wanted, perSource };
 }
 
 // On-topic keyword pool (REAL volumes) for a competitor topic in the site's market.

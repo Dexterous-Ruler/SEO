@@ -568,6 +568,10 @@ async function competitorSourcesFor(siteId) {
 async function saveCompetitorSources(siteId, list) { await db.setAppSecret('competitor_sources:' + siteId, JSON.stringify(list)); return list; }
 // In-flight researched-brief jobs for competitor topics/clusters, keyed by opportunity id.
 const CBRIEF_RUNS = new Map();
+// Background competitor scans (POST /competitor-sitemap-poll {background:true}), keyed by
+// siteId → { status:'running'|'done'|'error', startedAt, finishedAt, result, error, progress, at }.
+// A big competitor (15,000 pages) takes minutes to read + save — far past the ~95s request cap.
+const CSCAN_RUNS = new Map();
 // A legal/law site (all Karim's sites except GoodFor) → verify cited legislation/cases/rules.
 function isLegalSite(site) { const n = ((site && site.name) || '') + ' ' + ((site && site.url) || ''); return /legal|visa|settlement|\bila\b|solicitor|\blaw\b|lawyer/i.test(n) && !/good\s?for/i.test(n); }
 // A case-law topic → Background/Issues/Decision/Impact structure + read the judgment.
@@ -4975,11 +4979,16 @@ const routes = {
     await saveCompetitorSources(body.siteId, list);
     return { ok: true, sources: list };
   },
-  // Scan ONE saved competitor (body.id) or ALL saved ones: walk the sitemap(s), turn every
-  // topic they publish into a persisted, attributed opportunity (source 'competitor_sitemap')
-  // with an auto-suggested content type. Records lastScanAt/lastFound per competitor so the
-  // list shows what's been scanned. Bounded + concurrent (stays under the gateway timeout).
+  // Scan ONE saved competitor (body.id) or ALL saved ones: read each one's sitemap (robots.txt
+  // discovery, nested indexes, .gz) — or, when it has none / blocks automated reading, the pages
+  // it ranks for in Google — and turn every topic they publish into a persisted, attributed
+  // opportunity (source 'competitor_sitemap') with an auto-suggested content type. Records
+  // lastScanAt/lastFound/via/blocked per competitor so the list shows what's been scanned.
   // A one-off `url` (not saved) is also accepted for quick checks.
+  //   body.background === true → returns { status:'running', startedAt } at once; poll
+  //   POST /competitor-scan-status for the result. Otherwise synchronous, as before (3,000 rows
+  //   per competitor so it fits the ~95s gateway cap). body.maxPerCompetitor overrides the cap;
+  //   background defaults to the engine's 15,000 (newest first).
   'POST /competitor-sitemap-poll': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
     const list = await competitorSourcesFor(body.siteId);
@@ -4991,19 +5000,59 @@ const routes = {
     // Scan for ONE jurisdiction: body.jurisdiction (a top-bar market label) or the site's current market.
     const pollSite = await db.getSite(body.siteId).catch(() => null);
     const jurisdiction = String(body.jurisdiction || marketFor(pollSite && pollSite.semrush_db).country);
-    const r = await engine.ingestCompetitorSitemap(body.siteId, targets, { jurisdiction });
-    // Record scan stats back onto the saved sources (incl. every jurisdiction they cover).
-    if (!body.url && Array.isArray(r.perSource)) {
-      const now = new Date().toISOString();
-      for (const ps of r.perSource) {
-        const s = list.find((x) => x.id === ps.id); if (!s) continue;
-        s.lastScanAt = now; s.lastScanFor = ps.scannedFor || jurisdiction; s.lastFound = ps.made || 0; s.lastMatched = ps.matched || 0; s.lastError = ps.error || null; s.sitemap = ps.sitemap || s.sitemap || null;
-        if (Array.isArray(ps.jurisdictions)) s.jurisdictions = ps.jurisdictions.slice(0, 40);
-        s.scannedFor = [...new Set([...(Array.isArray(s.scannedFor) ? s.scannedFor : []), ps.scannedFor || jurisdiction])];
+    const background = body.background === true;
+    const maxPerCompetitor = Number(body.maxPerCompetitor) > 0 ? Math.floor(Number(body.maxPerCompetitor)) : (background ? undefined : 3000);
+    const scan = async (onProgress) => {
+      const r = await engine.ingestCompetitorSitemap(body.siteId, targets, { jurisdiction, maxPerCompetitor, sitemapBudgetMs: background ? 240000 : 45000, onProgress });
+      let sources = list;
+      // Record scan stats back onto the saved sources (incl. every jurisdiction they cover).
+      if (!body.url && Array.isArray(r.perSource)) {
+        // Re-read the saved list right before writing: a background scan runs for minutes and
+        // must not undo a competitor added/removed meanwhile (falls back to the list we started with).
+        try { const raw = await db.getAppSecret('competitor_sources:' + body.siteId); const a = raw ? JSON.parse(raw) : null; if (Array.isArray(a)) sources = a; } catch {}
+        const now = new Date().toISOString();
+        for (const ps of r.perSource) {
+          const s = sources.find((x) => x.id === ps.id); if (!s) continue;
+          s.lastScanAt = now; s.lastScanFor = ps.scannedFor || jurisdiction; s.lastFound = ps.made || 0; s.lastMatched = ps.matched || 0; s.lastError = ps.error || null; s.sitemap = ps.sitemap || s.sitemap || null;
+          s.via = ps.via || null; s.blocked = !!ps.blocked;   // 'sitemap' | 'google' (null = nothing readable); blocked = bot protection refused us
+          if (Array.isArray(ps.jurisdictions)) s.jurisdictions = ps.jurisdictions.slice(0, 40);
+          s.scannedFor = [...new Set([...(Array.isArray(s.scannedFor) ? s.scannedFor : []), ps.scannedFor || jurisdiction])];
+        }
+        await saveCompetitorSources(body.siteId, sources).catch(() => {});
       }
-      await saveCompetitorSources(body.siteId, list).catch(() => {});
-    }
-    return { ok: !r.error, ...r, sources: list, siteJurisdiction: jurisdiction };
+      return { ok: !r.error, ...r, sources, siteJurisdiction: jurisdiction };
+    };
+    if (!background) return scan();
+    // Background: one scan per site at a time; the result stays readable via /competitor-scan-status.
+    const cur = CSCAN_RUNS.get(body.siteId);
+    if (cur && cur.status === 'running' && Date.now() - cur.at < 60 * 60 * 1000) return { status: 'running', startedAt: cur.startedAt, alreadyRunning: true };
+    const run = { status: 'running', startedAt: new Date().toISOString(), finishedAt: null, result: null, error: null, progress: null, at: Date.now() };
+    CSCAN_RUNS.set(body.siteId, run);
+    (async () => {
+      try {
+        const result = await scan((p) => { run.progress = p; });
+        Object.assign(run, { status: result.error && !result.saved ? 'error' : 'done', result, error: result.error || null });
+      } catch (e) {
+        Object.assign(run, { status: 'error', error: String((e && e.message) || e) });
+      }
+      Object.assign(run, { finishedAt: new Date().toISOString(), progress: null, at: Date.now() });
+    })();
+    return { status: 'running', startedAt: run.startedAt };
+  },
+  // Status of the background competitor scan for a site → { status: 'idle'|'running'|'done'|'error',
+  // startedAt, finishedAt, result } where `result` is exactly what the synchronous scan returns
+  // (perSource, sources, siteJurisdiction …); plus `progress` while running and `error` on failure.
+  // NOT consumed on read — a finished scan stays readable for an hour, then reads 'idle'.
+  'POST /competitor-scan-status': async (body) => {
+    if (!body.siteId) return { error: 'No site selected.' };
+    const r = CSCAN_RUNS.get(body.siteId);
+    if (r && r.status !== 'running' && Date.now() - r.at > 60 * 60 * 1000) CSCAN_RUNS.delete(body.siteId);
+    const run = CSCAN_RUNS.get(body.siteId);
+    if (!run) return { status: 'idle', startedAt: null, finishedAt: null, result: null };
+    const out = { status: run.status, startedAt: run.startedAt, finishedAt: run.finishedAt, result: run.result };
+    if (run.status === 'running' && run.progress) out.progress = run.progress;
+    if (run.error) out.error = run.error;
+    return out;
   },
   // "Take over this topic": one competitor article → 3-5 keyword clusters (real volumes
   // from DataForSEO + Claude), each persisted as its own opportunity under the topic.
