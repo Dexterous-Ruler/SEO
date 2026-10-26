@@ -193,7 +193,6 @@
     competitorSourceRemove(siteId, id) { return engine("/competitor-source-remove", { siteId, id }); },
     competitorSitemapPoll(siteId, opts) { return engine("/competitor-sitemap-poll", Object.assign({ siteId }, opts || {})); },
     competitorSitemapItems(siteId, opts) { return engine("/competitor-sitemap-items", Object.assign({ siteId }, opts || {})); },
-    competitorScanStatus(siteId) { return engine("/competitor-scan-status", { siteId }); },
     // "Take over this topic": one competitor article → 3-5 keyword clusters (persisted under it).
     competitorExpand(siteId, id, count) { return engine("/competitor-expand", { siteId, id, count }); },
     // Researched brief for one competitor topic / cluster (stored on it; background + poll).

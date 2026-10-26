@@ -2293,6 +2293,7 @@ function CompetitorsScreen({ ctx }) {
     const done = ()=>setScanning("");
     API.competitorSitemapPoll(s.id, Object.assign({ background:true }, src?{id:src.id}:{}, siteJx?{jurisdiction:siteJx}:{})).then(r=>{
       if(!r || r.status!=="running"){ scanSummary(r); done(); return; }     // finished already (older server)
+      if(!API.competitorScanStatus){ ctx.toast("The scan is running on the server — reload in a few minutes to see the results.","teal"); done(); return; }
       const started = Date.now();
       const check = ()=>{
         API.competitorScanStatus(s.id).then(st=>{
