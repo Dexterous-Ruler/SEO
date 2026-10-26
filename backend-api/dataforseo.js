@@ -175,6 +175,54 @@ export async function competitors(domain, { db = 'uk', limit = 10 } = {}) {
   });
 }
 
+// The pages a domain ranks for in Google (DataForSEO Labs relevant_pages), most organic
+// traffic first → [{ url, etv, keywords }]: url = page_address, etv = estimated monthly
+// organic visits, keywords = how many keywords that page ranks for. This is the legitimate
+// fallback for a competitor whose sitemap is missing or sits behind bot protection — and
+// exactly the pages worth out-ranking. Paginated with offset (≤1000 per request). Returns []
+// when DataForSEO isn't configured. A failed FIRST page throws (the caller says why); a
+// failed later page keeps what was already read. Complete pulls are cached 30 min so a
+// re-scan doesn't pay twice (~$0.01 per request + $0.0001 per page).
+export async function relevantPages(domain, { db = 'uk', limit = 2000 } = {}) {
+  if (!hasKey()) return [];
+  const target = cleanDomain(domain);
+  if (!target) return [];
+  const want = Math.max(1, Math.floor(Number(limit) || 2000));
+  const cacheKey = `relpages:${target}:${String(db || 'uk').toLowerCase()}:${want}`;
+  const hit = caches.dataforseo.get(cacheKey);
+  if (hit) return hit;
+  const out = [];
+  const seen = new Set();
+  let complete = true;
+  for (let offset = 0; offset < want;) {
+    const size = Math.min(1000, want - offset);
+    let items;
+    try {
+      items = await call('/dataforseo_labs/google/relevant_pages/live', {
+        target, ...locale(db),
+        item_types: ['organic'],
+        order_by: ['metrics.organic.etv,desc'],
+        limit: size, offset,
+      });
+    } catch (e) {
+      if (!out.length) throw e;
+      complete = false;
+      break;
+    }
+    for (const it of (items || [])) {
+      const url = String((it && it.page_address) || '').trim();
+      if (!/^https?:\/\//i.test(url) || seen.has(url)) continue;
+      seen.add(url);
+      const org = (it.metrics && it.metrics.organic) || {};
+      out.push({ url, etv: Number(org.etv || 0), keywords: Number(org.count || 0) });
+    }
+    offset += size;
+    if (!items || items.length < size) break;   // no more pages
+  }
+  if (complete) caches.dataforseo.set(cacheKey, out);
+  return out;
+}
+
 // Deterministic question-intent classifier (no AI). Returns one of
 // 'definitional' | 'procedural' | 'comparative' | 'evaluative' | 'other'.
 // Order: comparative → procedural → evaluative → definitional → other.
@@ -479,4 +527,4 @@ export async function domainIntersection(site, competitors, { limit = 100 } = {}
 
 export function hasKey() { return Boolean(process.env.DATAFORSEO_LOGIN && process.env.DATAFORSEO_PASSWORD); }
 
-export default { domainOverview, organicKeywords, competitors, backlinks, keywordGap, fullSnapshot, strikingDistance, keywordIdeas, relatedKeywords, peopleAlsoAsk, classifyQuestion, apiUnits, hasKey, backlinksSummary, referringDomains, backlinkAnchors, domainIntersection };
+export default { domainOverview, organicKeywords, competitors, backlinks, keywordGap, fullSnapshot, strikingDistance, keywordIdeas, relatedKeywords, peopleAlsoAsk, classifyQuestion, apiUnits, hasKey, backlinksSummary, referringDomains, backlinkAnchors, domainIntersection, relevantPages };
