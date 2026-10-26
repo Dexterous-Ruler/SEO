@@ -2277,7 +2277,9 @@ function CompetitorsScreen({ ctx }) {
         const n=Number(p.matched||0), m=Number(p.made||0);
         const oth=(p.others||[]);
         const how = p.via==="google" ? (p.blocked?" (their site blocks automated reading, so these are the pages that rank in Google)":" (no sitemap, so these are the pages that rank in Google)") : "";
-        return p.competitor+": "+n.toLocaleString()+" page"+(n===1?"":"s")+" for "+jx+how+(m<n?(" — kept the newest "+m.toLocaleString()):"")+(oth.length?(" · also covers "+oth.slice(0,3).join(", ")+(oth.length>3?(" +"+(oth.length-3)+" more"):"")):"");
+        // "kept the newest" only when the per-competitor cap really cut pages; otherwise the gap is
+        // pages that aren't topics (staff profiles, very short slugs).
+        return p.competitor+": "+n.toLocaleString()+" page"+(n===1?"":"s")+" for "+jx+how+(p.capped?(" — kept the newest "+m.toLocaleString()):(m<n?(" → "+m.toLocaleString()+" topics"):""))+(oth.length?(" · also covers "+oth.slice(0,3).join(", ")+(oth.length>3?(" +"+(oth.length-3)+" more"):"")):"");
       });
       const any=ps.some(p=>(p.matched||0)>0);
       ctx.toast(lines.length?lines.join("  |  "):"Nothing found", any?"teal":"gold");
