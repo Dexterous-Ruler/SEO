@@ -5066,44 +5066,32 @@ const routes = {
   // so the user can see what's new vs already pushed vs hidden. Optional competitor filter.
   'POST /competitor-sitemap-items': async (body) => {
     if (!body.siteId) return { error: 'No site selected.' };
-    // Page through ALL competitor items (no 400 cap): worklist() returns ≤500 per call.
-    const all = []; let notProv = false, note = '';
-    for (let off = 0; off < 10000; off += 500) {
-      const page = await engine.worklist(body.siteId, { source: 'competitor_sitemap', limit: 500, offset: off }).catch(() => ({ items: [] }));
-      if (page.notProvisioned) { notProv = true; note = page.error; break; }
-      const rows = page.items || []; all.push(...rows);
-      if (rows.length < 500) break;
-    }
-    if (notProv) return { notProvisioned: true, items: [], note };
-    const wl = { items: all };
-    const want = body.competitor ? String(body.competitor).toLowerCase() : '';
-    const order = { scored: 0, in_review: 1, queued: 2, published: 3, done: 3, dismissed: 4 };
+    // ONE PAGE, filtered and counted in the database (engine.competitorItems). The old version
+    // loaded the first 10,000 of 52,000+ topics into the browser and counted those, so the list
+    // stopped short and the counts never followed the competitor / type / country filters.
+    const r = await engine.competitorItems(body.siteId, {
+      competitor: body.competitor || '', status: body.status || 'new', type: body.type || '', jurisdiction: body.jurisdiction || '',
+      includeUnlabelled: body.includeUnlabelled !== false, q: body.q || '', offset: body.offset || 0, limit: body.limit || 100, types: Array.isArray(body.types) ? body.types : [],
+    });
+    if (r.notProvisioned) return { notProvisioned: true, items: [], note: r.error };
+    if (r.error) return { error: r.error, items: [] };
     // Rows scanned before the full-country detector carry short labels; normalise on read so
     // they match the top-bar labels (a re-scan rewrites them permanently).
     const LEGACY_JX = { UK: 'United Kingdom', US: 'United States' };
     const jxOf = (o) => { const j = (o.payload && o.payload.jurisdiction) || 'Not stated'; return LEGACY_JX[j] || j; };
     const hasBriefOf = (o) => !!(o.payload && o.payload.brief && typeof o.payload.brief === 'object' && !o.payload.brief.error);
     const briefMeta = (o) => { const p = o.payload || {}; const v = p.briefVerification || (p.brief && p.brief.verification) || null; return { hasBrief: hasBriefOf(o), briefFor: p.briefFor || null, caseLaw: !!p.briefCaseLaw, verifyStatus: v ? v.status : null }; };
-    const items = (wl.items || [])
-      .map((o) => Object.assign({ id: o.id, title: o.title, score: o.score, status: o.status, competitor: (o.payload && o.payload.competitor) || '', link: o.payload && o.payload.link, suggestedType: (o.payload && (o.payload.category || o.payload.suggestedType)) || 'blog', jurisdiction: jxOf(o), primaryKeyword: o.primary_keyword, createdAt: o.created_at || null, updatedAt: o.updated_at || null }, briefMeta(o)))
-      .filter((o) => !want || String(o.competitor).toLowerCase() === want)
-      .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || (b.score - a.score));
-    const counts = { total: items.length, new: items.filter((i) => i.status === 'scored').length, pushed: items.filter((i) => ['queued', 'in_review', 'published', 'done'].includes(i.status)).length, hidden: items.filter((i) => i.status === 'dismissed').length };
-    // Child clusters ("Take over this topic"), grouped under their competitor topic.
+    const items = r.items.map((o) => Object.assign({ id: o.id, title: o.title, score: o.score, status: o.status, competitor: (o.payload && o.payload.competitor) || '', link: o.payload && o.payload.link, suggestedType: (o.payload && (o.payload.category || o.payload.suggestedType)) || 'blog', jurisdiction: jxOf(o), primaryKeyword: o.primary_keyword, createdAt: o.created_at || null, updatedAt: o.updated_at || null }, briefMeta(o)));
+    // Child clusters ("Take over this topic") for the topics on THIS page only.
     const clustersByParent = {};
-    for (let off = 0; off < 10000; off += 500) {
-      const page = await engine.worklist(body.siteId, { source: 'competitor_cluster', limit: 500, offset: off }).catch(() => ({ items: [] }));
-      const rows = page.items || [];
-      for (const o of rows) {
-        const p = (o.payload && typeof o.payload === 'object') ? o.payload : {};
-        const pid = p.parentId; if (!pid) continue;
-        (clustersByParent[pid] = clustersByParent[pid] || []).push(Object.assign({ id: o.id, title: o.title, status: o.status, primaryKeyword: o.primary_keyword, keywords: Array.isArray(p.keywords) ? p.keywords : [], totalVolume: p.totalVolume || 0, angle: p.angle || '', format: p.format || '', intent: o.intent || p.intent || '', suggestedType: p.category || p.suggestedType || 'blog', jurisdiction: p.jurisdiction || 'Not stated', competitor: p.competitor || '', volumesReal: !!p.volumesReal, link: p.link || '' }, briefMeta(o)));
-      }
-      if (rows.length < 500) break;
+    for (const o of await engine.competitorClustersFor(body.siteId, items.map((i) => i.id))) {
+      const p = (o.payload && typeof o.payload === 'object') ? o.payload : {};
+      const pid = p.parentId; if (!pid) continue;
+      (clustersByParent[pid] = clustersByParent[pid] || []).push(Object.assign({ id: o.id, title: o.title, status: o.status, primaryKeyword: o.primary_keyword, keywords: Array.isArray(p.keywords) ? p.keywords : [], totalVolume: p.totalVolume || 0, angle: p.angle || '', format: p.format || '', intent: o.intent || p.intent || '', suggestedType: p.category || p.suggestedType || 'blog', jurisdiction: p.jurisdiction || 'Not stated', competitor: p.competitor || '', volumesReal: !!p.volumesReal, link: p.link || '' }, briefMeta(o)));
     }
     for (const it of items) it.clusterCount = (clustersByParent[it.id] || []).length;
     const itemsSite = await db.getSite(body.siteId).catch(() => null);
-    return { items, counts, siteJurisdiction: marketFor(itemsSite && itemsSite.semrush_db).country, clustersByParent };
+    return { items, total: r.total, offset: r.offset, limit: r.limit, counts: r.statusCounts, typeCounts: r.typeCounts, siteJurisdiction: marketFor(itemsSite && itemsSite.semrush_db).country, clustersByParent };
   },
 
   // One radar item → a writer-ready brief in the Article Writer (Status BLANK).

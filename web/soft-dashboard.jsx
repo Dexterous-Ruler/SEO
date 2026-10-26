@@ -2166,7 +2166,16 @@ function CompetitorsScreen({ ctx }) {
   const [blockedIds,setBlockedIds] = useState({});  // id → true when a push was blocked (citations unverified)
   const [types,setTypes] = useState({});            // item id → content type chosen before push
   const [busyId,setBusyId] = useState("");
-  const [shown,setShown] = useState(100);          // rows rendered so far (client-side "Show more" — the list itself is unlimited)
+  // The list is filtered, counted and paged ON THE SERVER (Karim: "only 86 out of 7000 … the figures
+  // don't change when I change the competitor"). `items` = the pages loaded so far for the current
+  // filters; `counts` / `typeCounts` = exact totals for those filters.
+  const [typeCounts,setTypeCounts] = useState({});
+  const [total,setTotal] = useState(0);              // topics matching the current tab + filters
+  const [loadingMore,setLoadingMore] = useState(false);
+  const [search,setSearch] = useState("");           // what's typed in the search box
+  const [q,setQ] = useState("");                     // the search actually applied (debounced)
+  const [jxInclude,setJxInclude] = useState(true);   // a country filter also shows pieces with no country stated
+  const reqSeq = useRef(0);                          // ignore responses for filters that changed since
   const TYPES = contentTypesFor(s);
   const typeLabel = (v)=>{ const t=TYPES.find(x=>x[0]===v); return t?t[1]:v; };
   const isPushed = (st)=>["queued","in_review","published","done"].includes(st);
@@ -2180,14 +2189,41 @@ function CompetitorsScreen({ ctx }) {
   const [pushOpen,setPushOpen] = useState(false);
 
   const loadSources = ()=>{ if(!live) return; API.competitorSources(s.id).then(r=>{ setSources((r&&r.sources)||[]); if(r&&r.siteJurisdiction){ setSiteJx(r.siteJurisdiction); setPushJx(p=>p.length?p:[r.siteJurisdiction]); } if(r&&Array.isArray(r.jurisdictionOptions)) setJxOptions(r.jurisdictionOptions); }).catch(()=>{}); };
-  const loadItems = ()=>{
+  const listOpts = (extra)=>Object.assign({ status:filter, competitor:compFilter, type:typeFilter, jurisdiction:jxFilter, includeUnlabelled:jxInclude, q, types:TYPES.map(t=>t[0]) }, extra||{});
+  // First page for the current filters (or, with keep, re-load as many rows as are already shown
+  // so an action on one topic doesn't throw the user back to the top of a long list).
+  const loadItems = (keep)=>{
     if(!live) return;
+    const seq = ++reqSeq.current;
     setLoading(true);
-    API.competitorSitemapItems(s.id).then(r=>{
+    const limit = keep ? Math.min(500, Math.max(100, items.length)) : 100;
+    API.competitorSitemapItems(s.id, listOpts({ offset:0, limit })).then(r=>{
+      if(seq!==reqSeq.current) return;
       if(r && r.notProvisioned){ setNotProv(true); setItems([]); return; }
-      setNotProv(false); setItems((r&&r.items)||[]); setCounts((r&&r.counts)||{}); if(r&&r.siteJurisdiction) setSiteJx(r.siteJurisdiction); setClusters((r&&r.clustersByParent)||{});
-    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setLoading(false));
+      if(r && r.error){ ctx.toast(r.error,"clay"); return; }
+      setNotProv(false); setItems((r&&r.items)||[]); setCounts((r&&r.counts)||{}); setTypeCounts((r&&r.typeCounts)||{}); setTotal(Number((r&&r.total)||0));
+      if(r&&r.siteJurisdiction) setSiteJx(r.siteJurisdiction); setClusters((r&&r.clustersByParent)||{});
+    }).catch(e=>{ if(seq===reqSeq.current) ctx.toast(e.message,"clay"); }).finally(()=>{ if(seq===reqSeq.current) setLoading(false); });
   };
+  const loadMore = ()=>{
+    if(!live || loadingMore) return;
+    const seq = reqSeq.current;
+    setLoadingMore(true);
+    API.competitorSitemapItems(s.id, listOpts({ offset:items.length, limit:200 })).then(r=>{
+      if(seq!==reqSeq.current || !r || r.error) return;
+      const have = new Set(items.map(i=>i.id));
+      setItems(prev=>prev.concat(((r.items)||[]).filter(i=>!have.has(i.id))));
+      setClusters(c=>Object.assign({},c,(r.clustersByParent)||{}));
+      setCounts(r.counts||{}); setTypeCounts(r.typeCounts||{}); setTotal(Number(r.total||0));
+    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setLoadingMore(false));
+  };
+  // Counts only (after Hide / Unhide on one row) — the rows themselves are updated in place.
+  const refreshCounts = ()=>{
+    if(!live) return;
+    const seq = reqSeq.current;
+    API.competitorSitemapItems(s.id, listOpts({ offset:0, limit:1 })).then(r=>{ if(seq===reqSeq.current && r && !r.error){ setCounts(r.counts||{}); setTypeCounts(r.typeCounts||{}); setTotal(Number(r.total||0)); } }).catch(()=>{});
+  };
+  const inTab = (st)=> filter==="all" || (filter==="new"&&st==="scored") || (filter==="pushed"&&isPushed(st)) || (filter==="hidden"&&st==="dismissed");
   // "Take over this topic": 3-5 keyword clusters (real volumes) around one competitor article.
   const expand = (it)=>{
     if(expanding) return;
@@ -2199,22 +2235,20 @@ function CompetitorsScreen({ ctx }) {
       const n=(r&&r.clusters||[]).length;
       ctx.toast(n?("Found "+n+" cluster"+(n===1?"":"s")+(r.volumesReal?" with real search volumes":" (no volume data — phrases are unverified)")+" — pick a type and push the ones you want"):"No clusters found", n?"teal":"gold");
       setOpenCl(o=>Object.assign({},o,{[it.id]:true}));
-      loadItems();
+      loadItems(true);
     }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setExpanding(""));
   };
-  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypes({}); setCompFilter(""); setJxFilter(""); setTypeFilter(""); setFilter("new"); setShown(100); setPushJx([]); setPushOpen(false); setClusters({}); setOpenCl({}); setBriefOpen({}); setBriefData({}); if(live){ loadSources(); loadItems(); } },[s.id]);
+  useEffect(()=>{ setSources([]); setItems([]); setCounts({}); setTypeCounts({}); setTotal(0); setTypes({}); setCompFilter(""); setJxFilter(""); setJxTouched(false); setJxInclude(true); setTypeFilter(""); setFilter("new"); setSearch(""); setQ(""); setPushJx([]); setPushOpen(false); setClusters({}); setOpenCl({}); setBriefOpen({}); setBriefData({}); if(live){ loadSources(); } },[s.id]);
   // Top-bar jurisdiction changed → refresh the label (and the auto filter follows it).
   useEffect(()=>{ if(live) loadSources(); },[s.semrush_db]);
-  useEffect(()=>{ setShown(100); },[filter,compFilter,jxFilter,typeFilter]);
-  // Follow the top-bar Jurisdiction: when it changes, go back to auto mode…
+  // Follow the top-bar Jurisdiction: when it changes, go back to auto mode, which shows the
+  // pieces written for that country PLUS those with no country stated (most firms never say).
   useEffect(()=>{ setJxTouched(false); },[s.semrush_db]);
-  // …and in auto mode, pre-filter to the site's jurisdiction when any pieces carry it
-  // (else show all, so the list never looks empty just because a .com site is "Not stated").
-  useEffect(()=>{
-    if(jxTouched) return;
-    const d = (siteJx && items.some(i=>(i.jurisdiction||"")===siteJx)) ? siteJx : "";
-    if(d!==jxFilter) setJxFilter(d);
-  },[items,s.semrush_db,jxTouched,siteJx]);
+  useEffect(()=>{ if(!jxTouched && siteJx && jxFilter!==siteJx){ setJxFilter(siteJx); setJxInclude(true); } },[siteJx,jxTouched]);
+  // Typing in the search box applies after a short pause.
+  useEffect(()=>{ const t=setTimeout(()=>setQ(search.trim()),350); return ()=>clearTimeout(t); },[search]);
+  // Any filter change → page 1 + fresh counts from the server.
+  useEffect(()=>{ if(live) loadItems(); },[s.id,filter,compFilter,jxFilter,jxInclude,typeFilter,q]);
 
   const add = ()=>{
     const u=url.trim();
@@ -2230,29 +2264,47 @@ function CompetitorsScreen({ ctx }) {
     API.competitorSourceRemove(s.id,src.id).then(r=>{ setSources((r&&r.sources)||[]); ctx.toast("Removed "+src.host,"teal"); }).catch(e=>ctx.toast(e.message,"clay"));
   };
   // Scan = "what did this competitor publish for the jurisdiction in the top bar?"
+  // Big competitors have thousands of pages, so the scan runs in the BACKGROUND on the server and
+  // this checks on it every few seconds (older servers answer straight away — handled too).
+  const scanSummary = (r)=>{
+    if(r && r.notProvisioned){ setNotProv(true); return; }
+    if(r && r.error && !r.saved){ ctx.toast("Scan: "+r.error,"clay"); }
+    else {
+      const ps=(r&&r.perSource)||[];
+      const jx=(r&&r.siteJurisdiction)||siteJx||"this jurisdiction";
+      const lines=ps.map(p=>{
+        if(p.error) return p.competitor+": couldn't read it — "+p.error;
+        const n=Number(p.matched||0), m=Number(p.made||0);
+        const oth=(p.others||[]);
+        const how = p.via==="google" ? (p.blocked?" (their site blocks automated reading, so these are the pages that rank in Google)":" (no sitemap, so these are the pages that rank in Google)") : "";
+        return p.competitor+": "+n.toLocaleString()+" page"+(n===1?"":"s")+" for "+jx+how+(m<n?(" — kept the newest "+m.toLocaleString()):"")+(oth.length?(" · also covers "+oth.slice(0,3).join(", ")+(oth.length>3?(" +"+(oth.length-3)+" more"):"")):"");
+      });
+      const any=ps.some(p=>(p.matched||0)>0);
+      ctx.toast(lines.length?lines.join("  |  "):"Nothing found", any?"teal":"gold");
+    }
+    if(r && r.sources) setSources(r.sources);
+    if(r && r.siteJurisdiction) setSiteJx(r.siteJurisdiction);
+    loadItems(true);
+  };
   const scan = (src)=>{
     if(scanning) return;
     setScanning(src?src.id:"all");
-    ctx.toast((src?("Scanning "+src.host):"Scanning all competitors")+(siteJx?(" for "+siteJx):"")+"…","teal");
-    API.competitorSitemapPoll(s.id, Object.assign(src?{id:src.id}:{}, siteJx?{jurisdiction:siteJx}:{})).then(r=>{
-      if(r && r.notProvisioned){ setNotProv(true); return; }
-      if(r && r.error && !r.saved){ ctx.toast("Scan: "+r.error,"clay"); }
-      else {
-        const ps=(r&&r.perSource)||[];
-        const jx=(r&&r.siteJurisdiction)||siteJx||"this jurisdiction";
-        const lines=ps.map(p=>{
-          if(p.error) return p.competitor+": couldn't read it";
-          const n=Number(p.matched||0), m=Number(p.made||0);
-          const oth=(p.others||[]);
-          return p.competitor+": "+n.toLocaleString()+" page"+(n===1?"":"s")+" for "+jx+(m<n?(" — took the first "+m.toLocaleString()):"")+(oth.length?(" · also covers "+oth.slice(0,3).join(", ")+(oth.length>3?(" +"+(oth.length-3)+" more"):"")):"");
-        });
-        const any=ps.some(p=>(p.matched||0)>0);
-        ctx.toast(lines.length?lines.join("  |  "):"Nothing found", any?"teal":"gold");
-      }
-      if(r && r.sources) setSources(r.sources);
-      if(r && r.siteJurisdiction) setSiteJx(r.siteJurisdiction);
-      loadItems();
-    }).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setScanning(""));
+    ctx.toast((src?("Scanning "+src.host):"Scanning all competitors")+(siteJx?(" for "+siteJx):"")+" — big sites take a few minutes; you can keep working…","teal");
+    const done = ()=>setScanning("");
+    API.competitorSitemapPoll(s.id, Object.assign({ background:true }, src?{id:src.id}:{}, siteJx?{jurisdiction:siteJx}:{})).then(r=>{
+      if(!r || r.status!=="running"){ scanSummary(r); done(); return; }     // finished already (older server)
+      const started = Date.now();
+      const check = ()=>{
+        API.competitorScanStatus(s.id).then(st=>{
+          if(st && st.status==="running" && Date.now()-started < 20*60*1000){ setTimeout(check, 4000); return; }
+          if(st && st.status==="done") scanSummary(st.result||{});
+          else if(st && st.status==="error") ctx.toast("Scan: "+((st.result&&st.result.error)||st.error||"failed"),"clay");
+          else ctx.toast("The scan is still running on the server — reload in a few minutes to see the results.","gold");
+          done();
+        }).catch(()=>setTimeout(check, 6000));
+      };
+      setTimeout(check, 3000);
+    }).catch(e=>{ ctx.toast(e.message,"clay"); done(); });
   };
   // Push ONE topic to the Article Writer as the chosen type → the row is created in Airtable
   // and the topic flips to "Pushed ✓" here (its status becomes queued), i.e. marked done.
@@ -2285,7 +2337,7 @@ function CompetitorsScreen({ ctx }) {
       return;
     }
     if(briefing) return;
-    ensureBrief(it).then(r=>{ if(r){ setBriefOpen(o=>Object.assign({},o,{[it.id]:true})); ctx.toast("Brief ready ✓ — "+((r.sources||[]).length)+" sources"+(r.competitorRead?", competitor page read":""),"teal"); loadItems(); } });
+    ensureBrief(it).then(r=>{ if(r){ setBriefOpen(o=>Object.assign({},o,{[it.id]:true})); ctx.toast("Brief ready ✓ — "+((r.sources||[]).length)+" sources"+(r.competitorRead?", competitor page read":""),"teal"); loadItems(true); } });
   };
   // Push ONE topic/cluster to the Article Writer as the chosen type → the row is created in
   // Airtable and it flips to "Pushed ✓" here. A detailed, RESEARCHED brief is produced first
@@ -2310,15 +2362,15 @@ function CompetitorsScreen({ ctx }) {
       const r = await API.engineAutodraft(s.id, Object.assign({ ids:[it.id], category:type, force: !!force }, jxs.length?{ jurisdictions: jxs }:{}));
       if(r && r.notProvisioned){ setNotProv(true); return; }
       // Multi-jurisdiction pushes research a brief PER COUNTRY in the background (go-legal.ai is multilingual).
-      if(queuedIn(r)>0){ ctx.toast((r.drafted>0?("Sent "+r.drafted+" now. "):"")+queuedMsg(queuedIn(r)),"teal"); setBlockedIds(m=>{ const x=Object.assign({},m); delete x[it.id]; return x; }); loadItems(); return; }
+      if(queuedIn(r)>0){ ctx.toast((r.drafted>0?("Sent "+r.drafted+" now. "):"")+queuedMsg(queuedIn(r)),"teal"); setBlockedIds(m=>{ const x=Object.assign({},m); delete x[it.id]; return x; }); loadItems(true); return; }
       if(r && r.reason==="verification-blocked"){ setBlockedIds(m=>Object.assign({},m,{[it.id]:true})); viewBrief(it); ctx.toast("⚠ Not pushed — "+((r.blocked&&r.blocked[0]&&r.blocked[0].summary)||"citations not verified")+" Review, then “Push anyway”.","gold"); return; }
-      if(r && r.skipped){ ctx.toast(r.reason||"Couldn't push — connect the Airtable Article Writer first","gold"); loadItems(); return; }
+      if(r && r.skipped){ ctx.toast(r.reason||"Couldn't push — connect the Airtable Article Writer first","gold"); loadItems(true); return; }
       if(r && r.error){ ctx.toast("Push: "+r.error,"clay"); return; }
       const n=(r&&r.drafted!=null)?r.drafted:0;
       const where = jxs.length>1 ? (n+" jurisdiction"+(n===1?"":"s")+" ("+Object.keys(r.perJurisdiction||{}).join(", ")+")") : "the writer";
       ctx.toast(n>0?("Pushed to "+where+" as "+typeLabel(type)+" with a researched"+(vstatus==="verified"?", verified":"")+" brief ✓ — marked done"+((r.skippedDup||0)>0?(" · "+r.skippedDup+" already there"):"")):(r&&r.skippedDup?"Already in the Article Writer for those jurisdictions — marked done":"Nothing pushed"), n>0?"teal":"gold");
       setBlockedIds(m=>{ const x=Object.assign({},m); delete x[it.id]; return x; });
-      loadItems();
+      loadItems(true);
     }catch(e){ ctx.toast(e.message,"clay"); }
     finally{ setBusyId(""); }
   };
@@ -2356,7 +2408,7 @@ function CompetitorsScreen({ ctx }) {
         <div style={lab}>Competitor article to out-rank <span style={{ color:"var(--muted)", fontWeight:500 }}>(the exact page you want to beat)</span></div>
         <input style={inp} placeholder="https://competitor.co.uk/their-article" value={a.competitorUrl||""} onChange={e=>setAdvField(it.id,"competitorUrl",e.target.value)} />
         <div style={{ display:"flex", gap:8, marginTop:10, alignItems:"center" }}>
-          <NeoButton kind="primary" size="sm" disabled={busy} onClick={()=>{ ensureBrief(it).then(r=>{ if(r){ setBriefOpen(o=>Object.assign({},o,{[it.id]:true})); ctx.toast("Brief ready ✓ — "+((r.sources||[]).length)+" sources"+(r.judgmentRead?", judgment read":"")+(r.competitorRead?", competitor read":""),"teal"); loadItems(); } }); }}>{busy?"Researching…":(it.hasBrief?"Re-research with this":"Research brief with this")}</NeoButton>
+          <NeoButton kind="primary" size="sm" disabled={busy} onClick={()=>{ ensureBrief(it).then(r=>{ if(r){ setBriefOpen(o=>Object.assign({},o,{[it.id]:true})); ctx.toast("Brief ready ✓ — "+((r.sources||[]).length)+" sources"+(r.judgmentRead?", judgment read":"")+(r.competitorRead?", competitor read":""),"teal"); loadItems(true); } }); }}>{busy?"Researching…":(it.hasBrief?"Re-research with this":"Research brief with this")}</NeoButton>
           <NeoButton kind="ghost" size="sm" disabled={busy} onClick={()=>setAdvOpen(o=>Object.assign({},o,{[it.id]:false}))}>Close</NeoButton>
         </div>
       </div>
@@ -2412,17 +2464,18 @@ function CompetitorsScreen({ ctx }) {
     );
   };
   const togglePushJx = (label)=> setPushJx(p=> p.includes(label) ? p.filter(x=>x!==label) : [...p,label]);
-  const hide = (it)=>{ setBusyId(it.id); API.engineDismiss(it.id).then(()=>loadItems()).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId("")); };
-  const unhide = (it)=>{ setBusyId(it.id); API.engineSetStatus(it.id,"scored").then(()=>loadItems()).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId("")); };
+  // Hide / Unhide change ONE row: update it in place (it leaves the current tab if it no longer
+  // belongs there) and refresh the counts — no reload, so a long list keeps its place.
+  const setRowStatus = (it,st)=>{ setItems(list=>list.map(x=>x.id===it.id?Object.assign({},x,{status:st}):x).filter(x=>x.id!==it.id||inTab(st))); refreshCounts(); };
+  const hide = (it)=>{ setBusyId(it.id); API.engineDismiss(it.id).then(()=>setRowStatus(it,"dismissed")).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId("")); };
+  const unhide = (it)=>{ setBusyId(it.id); API.engineSetStatus(it.id,"scored").then(()=>setRowStatus(it,"scored")).catch(e=>ctx.toast(e.message,"clay")).finally(()=>setBusyId("")); };
 
-  const visible = items
-    .filter(it=> filter==="all" || (filter==="new"&&it.status==="scored") || (filter==="pushed"&&isPushed(it.status)) || (filter==="hidden"&&it.status==="dismissed"))
-    .filter(it=> !compFilter || it.competitor===compFilter)
-    .filter(it=> !jxFilter || (it.jurisdiction||"Not stated")===jxFilter)
-    .filter(it=> !typeFilter || (types[it.id]||it.suggestedType||"blog")===typeFilter);
-  const comps = [...new Set(items.map(i=>i.competitor).filter(Boolean))].sort();
-  const typeCounts = {}; for(const it of items){ const t=types[it.id]||it.suggestedType||"blog"; typeCounts[t]=(typeCounts[t]||0)+1; }
-  const jxs = [...new Set(items.map(i=>i.jurisdiction||"Not stated"))].sort((a,b)=>(a==="Not stated")-(b==="Not stated")||a.localeCompare(b));
+  // The server already filtered + paged the list; the menus come from the saved competitors (all of
+  // them, not just those on the loaded page) and the countries they're known to cover.
+  const visible = items;
+  const comps = [...new Set(sources.map(x=>x.host).filter(Boolean))].sort();
+  const jxs = [...new Set([siteJx, ...sources.flatMap(x=>(x.jurisdictions||[]).map(j=>j.jurisdiction))].filter(Boolean))].sort((a,b)=>(b===siteJx)-(a===siteJx)||a.localeCompare(b)).concat(["Not stated"]);
+  const filtering = !!(compFilter||typeFilter||jxFilter||q);
   const fmtDate = (d)=>{ if(!d) return "never"; try{ return new Date(d).toLocaleDateString(undefined,{ day:"numeric", month:"short" }); }catch(e){ return ""; } };
   const inp = { padding:"10px 13px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:13, color:"var(--ink)", outline:"none" };
   const sel = { padding:"7px 10px", borderRadius:10, border:"none", background:"var(--bg)", boxShadow:"var(--neo-in)", fontSize:12.5, color:"var(--ink)", outline:"none" };
@@ -2469,7 +2522,7 @@ function CompetitorsScreen({ ctx }) {
   };
   const FilterBtn = ({k,label,n})=>(
     <button onClick={()=>setFilter(k)} className="neo-btn" style={{ padding:"6px 12px", borderRadius:"var(--r-pill)", border:"none", cursor:"pointer", fontSize:12, fontWeight:700, background:filter===k?"var(--t-100)":"var(--bg)", boxShadow:"var(--neo-in)", color:filter===k?"var(--t-700)":"var(--muted)" }}>
-      {label}{n!=null?" · "+n:""}
+      {label}{n!=null?" · "+Number(n).toLocaleString():""}
     </button>
   );
 
@@ -2513,6 +2566,7 @@ function CompetitorsScreen({ ctx }) {
                   {src.lastScanAt
                     ? ("Last scanned "+fmtDate(src.lastScanAt)+(src.lastScanFor?(" for "+src.lastScanFor):"")+" · "+Number(src.lastFound||0).toLocaleString()+" topics"+(src.lastMatched&&src.lastMatched>src.lastFound?(" of "+Number(src.lastMatched).toLocaleString()):""))
                     : "Not scanned yet"}
+                  {src.via==="google" && !src.lastError ? (src.blocked?" · their site blocks automated reading, so these are the pages that rank in Google":" · no sitemap, so these are the pages that rank in Google") : ""}
                   {src.lastError?(" · couldn't read it ("+src.lastError+")"):""}
                 </div>
                 {Array.isArray(src.jurisdictions) && src.jurisdictions.length>0 && (
@@ -2531,16 +2585,17 @@ function CompetitorsScreen({ ctx }) {
       {live && !notProv && (
         <SoftCard hover={false}>
           <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:10 }}>
-            <div style={{ fontSize:14, fontWeight:800, color:"var(--ink)", marginRight:6 }}>What they publish{counts.total!=null?<span style={{ fontWeight:600, color:"var(--muted)" }}> · {Number(counts.total).toLocaleString()} topics</span>:null}</div>
+            <div style={{ fontSize:14, fontWeight:800, color:"var(--ink)", marginRight:6 }}>What they publish{counts.all!=null?<span style={{ fontWeight:600, color:"var(--muted)" }}> · {Number(counts.all).toLocaleString()} topics{filtering?" for these filters":""}</span>:null}</div>
             <FilterBtn k="new" label="New" n={counts.new} />
             <FilterBtn k="pushed" label="Pushed" n={counts.pushed} />
             <FilterBtn k="hidden" label="Hidden" n={counts.hidden} />
-            <FilterBtn k="all" label="All" n={counts.total} />
-            <div style={{ display:"inline-flex", gap:8, marginLeft:"auto", flexWrap:"wrap" }}>
+            <FilterBtn k="all" label="All" n={counts.all} />
+            <div style={{ display:"inline-flex", gap:8, marginLeft:"auto", flexWrap:"wrap", alignItems:"center" }}>
+              <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search topics…" style={{ ...sel, width:170 }} title="Show only topics whose title contains these words" />
               {TYPES.length>1 && (
                 <select value={typeFilter} onChange={e=>setTypeFilter(e.target.value)} style={sel} title="Show one content type only — split the list by what you're working on">
                   <option value="">All types</option>
-                  {TYPES.map(([v,l])=><option key={v} value={v}>{l}{typeCounts[v]?(" · "+Number(typeCounts[v]).toLocaleString()):""}</option>)}
+                  {TYPES.map(([v,l])=><option key={v} value={v}>{l}{typeCounts[v]!=null?(" · "+Number(typeCounts[v]).toLocaleString()):""}</option>)}
                 </select>
               )}
               {comps.length>1 && (
@@ -2554,6 +2609,11 @@ function CompetitorsScreen({ ctx }) {
                   <option value="">All jurisdictions</option>
                   {jxs.map(j=><option key={j} value={j}>{j}</option>)}
                 </select>
+              )}
+              {jxFilter && jxFilter!=="Not stated" && (
+                <label style={{ display:"inline-flex", alignItems:"center", gap:5, fontSize:12, color:"var(--muted)", cursor:"pointer" }} title="Most firms never put a country in their web addresses — keep this on to include those pages">
+                  <input type="checkbox" checked={jxInclude} onChange={e=>{ setJxInclude(e.target.checked); setJxTouched(true); }} /> + no country stated
+                </label>
               )}
             </div>
           </div>
@@ -2585,16 +2645,13 @@ function CompetitorsScreen({ ctx }) {
             </div>
           )}
           {siteJx && jxFilter===siteJx && (
-            <div style={{ fontSize:12, color:"var(--t-700)", marginBottom:8, fontWeight:600 }}>Showing pieces written for <b>{siteJx}</b> — your current jurisdiction (top bar). Choose “All jurisdictions” to see everything.</div>
-          )}
-          {siteJx && !jxFilter && !jxTouched && items.length>0 && !items.some(i=>(i.jurisdiction||"")===siteJx) && (
-            <div style={{ fontSize:12, color:"var(--muted)", marginBottom:8 }}>None of these pieces are labelled for <b>{siteJx}</b> (your current jurisdiction), so all jurisdictions are shown. Many .com sites don't state a country.</div>
+            <div style={{ fontSize:12, color:"var(--t-700)", marginBottom:8, fontWeight:600 }}>Showing pieces written for <b>{siteJx}</b>{jxInclude?" plus pieces with no country stated":""} — your current jurisdiction (top bar). Choose “All jurisdictions” to see everything.</div>
           )}
           {loading && <div style={{ fontSize:13, color:"var(--muted)", padding:"8px 2px" }}>Loading…</div>}
           {!loading && !visible.length && (
-            <div style={{ fontSize:13, color:"var(--muted)", padding:"8px 2px" }}>{items.length?"Nothing here for this filter.":"Nothing scanned yet — click Scan on a competitor above."}</div>
+            <div style={{ fontSize:13, color:"var(--muted)", padding:"8px 2px" }}>{(counts.all||filtering)?"Nothing here for this filter.":"Nothing scanned yet — click Scan on a competitor above."}</div>
           )}
-          {visible.slice(0,shown).map(it=>(
+          {visible.map(it=>(
             <React.Fragment key={it.id}>
             <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", padding:"10px 4px", borderTop:"1px solid var(--line)" }}>
               <div style={{ flex:"1 1 340px", minWidth:0 }}>
@@ -2633,9 +2690,12 @@ function CompetitorsScreen({ ctx }) {
             {clusterPanel(it)}
             </React.Fragment>
           ))}
-          {visible.length>shown && (
-            <div style={{ display:"flex", justifyContent:"center", padding:"12px 0 4px" }}>
-              <NeoButton kind="soft" onClick={()=>setShown(n=>n+200)}>Show more ({Math.min(200, visible.length-shown).toLocaleString()} of {(visible.length-shown).toLocaleString()} remaining)</NeoButton>
+          {visible.length>0 && (
+            <div style={{ display:"flex", justifyContent:"center", alignItems:"center", gap:12, flexWrap:"wrap", padding:"12px 0 4px", fontSize:12, color:"var(--muted)" }}>
+              <span>Showing {visible.length.toLocaleString()} of {Number(total).toLocaleString()}</span>
+              {visible.length<total && (
+                <NeoButton kind="soft" disabled={loadingMore} onClick={loadMore}>{loadingMore?"Loading…":("Show more ("+Math.min(200, total-visible.length).toLocaleString()+" of "+(total-visible.length).toLocaleString()+" remaining)")}</NeoButton>
+              )}
             </div>
           )}
         </SoftCard>

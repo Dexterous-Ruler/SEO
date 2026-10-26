@@ -907,6 +907,92 @@ export async function worklist(siteId, { status, actionType, source, excludeSour
   }
 }
 
+// ---- 6b) Competitors screen: filtered, paged list + EXACT counts ---------------------------
+// Karim (23 Oct): "it only gives like 86 out of 7000 and cannot see more" + "these figures are
+// not updated as I change the competitor — they seem fixed/dummy". The old route loaded the
+// first 10,000 of 52,000+ rows into the browser and counted THOSE, ignoring every filter. Now the
+// filters run in the database, the page comes by offset/limit, and the tab + type counts are
+// exact counts (PostgREST count=exact) for the CURRENT competitor / type / country / search.
+const CI_PUSHED = ['queued', 'in_review', 'published', 'done'];
+const CI_LEGACY_JX = { 'United Kingdom': ['UK'], 'United States': ['US'] };
+const ciQ = (v) => encodeURIComponent('"' + String(v).replace(/["\\]/g, '') + '"');    // PostgREST quoted value
+// Content type = the operator's pushed choice (category) if set, else the suggested type; none = article.
+function ciTypeCond(t) {
+  const v = ciQ(t);
+  const own = `or(payload->>category.eq.${v},and(payload->>category.is.null,payload->>suggestedType.eq.${v})`;
+  return t === 'blog' ? own + ',and(payload->>category.is.null,payload->>suggestedType.is.null))' : own + ')';
+}
+// A country = pieces labelled for it (+ legacy short labels) and, by default, pieces with NO country
+// stated — most firms never put a country in their URLs, so a strict filter hid 90% of a UK
+// competitor's pages (stewartslaw: 61 of 556 shown).
+function ciJxCond(j, includeUnlabelled) {
+  if (j === 'Not stated') return `or(payload->>jurisdiction.eq.${ciQ('Not stated')},payload->>jurisdiction.is.null)`;
+  const vals = [j, ...(CI_LEGACY_JX[j] || [])].map(ciQ);
+  return includeUnlabelled
+    ? `or(payload->>jurisdiction.in.(${[...vals, ciQ('Not stated')].join(',')}),payload->>jurisdiction.is.null)`
+    : `or(payload->>jurisdiction.in.(${vals.join(',')}))`;
+}
+function ciStatusParam(s) {
+  if (s === 'new') return 'status=eq.scored';
+  if (s === 'pushed') return `status=in.(${CI_PUSHED.join(',')})`;
+  if (s === 'hidden') return 'status=eq.dismissed';
+  return '';
+}
+function ciParams(siteId, f, { status = f.status, type = f.type } = {}) {
+  const p = [`site_id=eq.${encodeURIComponent(siteId)}`, 'source=eq.competitor_sitemap'];
+  if (f.competitor) p.push(`payload->>competitor=eq.${encodeURIComponent(f.competitor)}`);
+  const st = ciStatusParam(status); if (st) p.push(st);
+  const conds = [];
+  if (type) conds.push(ciTypeCond(type));
+  if (f.jurisdiction) conds.push(ciJxCond(f.jurisdiction, f.includeUnlabelled));
+  if (conds.length) p.push(`and=(${conds.join(',')})`);
+  const q = String(f.q || '').replace(/[*,()"\\%]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+  if (q) p.push(`title=ilike.${encodeURIComponent('*' + q + '*')}`);
+  return p;
+}
+async function ciCount(params) {
+  const res = await fetch(`${SB}/rest/v1/content_opportunities?${params.join('&')}&select=id&limit=1`, { headers: headers({ Prefer: 'count=exact' }) });
+  if (!res.ok) { const t = await res.text(); throw Object.assign(new Error(`count → ${res.status} ${t.slice(0, 160)}`), { status: res.status, body: t }); }
+  return Number(String(res.headers.get('content-range') || '').split('/')[1]) || 0;
+}
+// → { items: [raw rows], total, statusCounts: {new,pushed,hidden,all}, typeCounts: {type: n} }
+export async function competitorItems(siteId, { competitor = '', status = 'new', type = '', jurisdiction = '', includeUnlabelled = true, q = '', offset = 0, limit = 100, types = [] } = {}) {
+  if (!SB || !SRV) return { ...NOT_PROVISIONED, error: 'Supabase not configured.', items: [] };
+  const f = { competitor: String(competitor || '').trim(), status: ['new', 'pushed', 'hidden', 'all'].includes(status) ? status : 'new', type: String(type || '').trim(), jurisdiction: String(jurisdiction || '').trim(), includeUnlabelled: includeUnlabelled !== false, q };
+  const lim = Math.min(Math.max(Number(limit) || 100, 1), 500), off = Math.max(0, Number(offset) || 0);
+  const typeList = [...new Set((Array.isArray(types) && types.length ? types : ['blog', 'case_study', 'expertise', 'how-to-guide']).map(String).filter(Boolean))].slice(0, 12);
+  try {
+    const pageQ = fetch(`${SB}/rest/v1/content_opportunities?${ciParams(siteId, f).join('&')}&select=id,title,score,status,primary_keyword,intent,created_at,updated_at,payload&order=created_at.desc,score.desc,id.asc&limit=${lim}&offset=${off}`, { headers: headers() })
+      .then(async (res) => { const t = await res.text(); if (!res.ok) throw Object.assign(new Error(`list → ${res.status} ${t.slice(0, 160)}`), { status: res.status, body: t }); return JSON.parse(t || '[]'); });
+    const statuses = ['new', 'pushed', 'hidden', 'all'];
+    const [rows, sc, tc] = await Promise.all([
+      pageQ,
+      Promise.all(statuses.map((s) => ciCount(ciParams(siteId, f, { status: s })))),
+      Promise.all(typeList.map((t) => ciCount(ciParams(siteId, f, { type: t })))),
+    ]);
+    const statusCounts = Object.fromEntries(statuses.map((s, i) => [s, sc[i]]));
+    const typeCounts = Object.fromEntries(typeList.map((t, i) => [t, tc[i]]));
+    return { items: Array.isArray(rows) ? rows : [], total: statusCounts[f.status], statusCounts, typeCounts, offset: off, limit: lim };
+  } catch (e) {
+    if (isMissingTable(e.status, e.body)) return { ...NOT_PROVISIONED, items: [] };
+    return { error: String((e && e.message) || e), items: [] };
+  }
+}
+// "Take over this topic" child clusters for the topics on the current page only.
+export async function competitorClustersFor(siteId, parentIds) {
+  const ids = [...new Set((parentIds || []).map(String).filter(Boolean))].slice(0, 200);
+  if (!SB || !SRV || !ids.length) return [];
+  const out = [];
+  for (let i = 0; i < ids.length; i += 60) {
+    const inList = ids.slice(i, i + 60).map((x) => `"${x.replace(/"/g, '')}"`).join(',');
+    try {
+      const res = await fetch(`${SB}/rest/v1/content_opportunities?site_id=eq.${encodeURIComponent(siteId)}&source=eq.competitor_cluster&payload->>parentId=in.(${encodeURIComponent(inList)})&select=id,title,status,primary_keyword,intent,payload&limit=1000`, { headers: headers() });
+      if (res.ok) { const rows = await res.json(); if (Array.isArray(rows)) out.push(...rows); }
+    } catch (e) { /* clusters are optional decoration */ }
+  }
+  return out;
+}
+
 // ---- 7) setStatus / dismiss ------------------------------------------------
 // Fetch specific opportunities BY ID (any status / score). The explicit-push path must not
 // depend on the top-N worklist window — a low-scored competitor topic sits far outside it
